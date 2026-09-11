@@ -72,6 +72,11 @@
       {% if item.evidence and item.evidence.heatmap %}
       <p><img class="evidence" src="{{ item.evidence.heatmap }}" alt="Forensic heatmap" /></p>
       {% endif %}
+      {% if item.evidence and item.evidence.ai_generated %}
+      <p style="font-size: 12px; color: #999; border-left: 3px solid #ffb81c; padding-left: 8px; margin: 8px 0;">
+        <strong>⚠️ AI-Assisted Research Lead:</strong> This finding is based on an automated public-knowledge check, not definitive evidence. Verify independently before relying on it.
+      </p>
+      {% endif %}
     </div>
     {% else %}
     <p>No automated findings were recorded.</p>

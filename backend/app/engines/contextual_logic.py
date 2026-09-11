@@ -1,31 +1,46 @@
 """Contextual fraud detection.
 
-Extracts entities (organizations, dates, locations) from an exhibit and checks
-whether the story the document tells is internally possible, then optionally asks
-Google Gemini whether a stated combination of company, place, and date is
-contradicted by public record.
+Extracts entities (organizations, dates, locations), checks whether the story the
+document tells is internally possible, and optionally calls Google Gemini in two
+distinct modes.
 
-Two constraints shape this module:
+Three tiers, each requiring more explicit opt-in than the last:
 
-1. Privacy. Only the generated question is sent to Google — never page text,
-   never the file. External verification stays off unless GEMINI_API_KEY is set.
-2. Evidentiary weight. A language model's factual claim is a research lead, not
-   proof. Model-sourced findings are capped at medium severity and carry
-   ai_generated=True so the report can label them for the reader.
+1. Local only (always on). Entity extraction plus deterministic timeline checks.
+   Nothing leaves the server.
+2. Claim verification (needs GEMINI_API_KEY). Sends only a generated question,
+   e.g. 'Was "Acme Freight, LLC" in operation on 2019-03-01?'. No document
+   content is transmitted.
+3. Document analysis (needs CONTEXTUAL_MULTIMODAL=true in addition to the key).
+   Sends rendered page images and extracted text to Google for comprehensive
+   review: date logic, arithmetic, text overlays, graphic manipulation, font
+   mismatches. This transmits the exhibit itself to a third party, so it is off
+   by default and must be enabled deliberately. Do not enable it for sealed,
+   privileged, or otherwise restricted evidence.
+
+Evidentiary weight. A language model's assertion is a research lead, not proof.
+Every model-sourced finding is capped at medium severity, has its confidence
+discounted, and carries ai_generated=True so the report labels it for the reader.
+No model output can drive a report to red on its own.
 """
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import io
 import json
 import re
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from dateutil import parser as dateparser
+
+if TYPE_CHECKING:
+    from PIL.Image import Image as PILImage
 
 from app.config import settings
 from app.engines import finding, timed_module
@@ -124,6 +139,87 @@ Answer only from well-established public knowledge, and follow these rules exact
 - "confidence" is your confidence in the verdict itself, 0-100.
 - "basis" names the kind of public record you relied on, or "none"."""
 
+ANALYSIS_TYPES = (
+    "date_inconsistency",
+    "math_error",
+    "text_overlay",
+    "graphic_manipulation",
+    "font_mismatch",
+    "logical_inconsistency",
+)
+
+FRAUD_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "findings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "analysis_type": {"type": "string", "enum": list(ANALYSIS_TYPES)},
+                    "severity": {"type": "string", "enum": ["info", "low", "medium", "high"]},
+                    "confidence": {"type": "integer"},
+                    "page": {"type": "integer"},
+                    "title": {"type": "string"},
+                    "observation": {"type": "string"},
+                    "why_suspicious": {"type": "string"},
+                    "quoted_evidence": {"type": "string"},
+                },
+                "required": [
+                    "analysis_type",
+                    "severity",
+                    "confidence",
+                    "title",
+                    "observation",
+                    "why_suspicious",
+                ],
+            },
+        },
+        "overall_note": {"type": "string"},
+    },
+    "required": ["findings"],
+}
+
+FRAUD_PROMPT = """You are assisting a court clerk reviewing a document exhibit for signs of
+alteration. You are given the rendered page images and the text extracted from the file.
+
+Report only observations you can point to directly in the material provided. Examine:
+
+1. date_inconsistency — dates that contradict each other or the document's own narrative
+   (a signature predating the agreement, a service period outside the billing period, a
+   sequence that cannot have happened in that order).
+2. math_error — arithmetic that does not add up: line items that do not sum to the stated
+   subtotal, a tax or discount that does not match the stated rate, a balance that is not
+   total minus payments. State the numbers you used.
+3. text_overlay — text that appears pasted over other content: misaligned baselines,
+   different background tone behind a value, a figure or name that sits at a different
+   angle or weight than its row, visible patching around an amount.
+4. graphic_manipulation — retouching, cloned regions, erased areas, inconsistent noise or
+   sharpness, edges of a pasted rectangle, a signature or stamp that looks composited.
+5. font_mismatch — a character, number, word, or line set in a different typeface, weight,
+   size, or spacing than the surrounding text of the same field.
+6. logical_inconsistency — internal contradictions in the document's own content (a party
+   named inconsistently, a total described in words that differs from the numeral, terms
+   that reference an attachment that is absent).
+
+Rules you must follow:
+- Report nothing unless you can cite the specific page and the specific text or region.
+  Put the exact words or numbers in "quoted_evidence".
+- Return an empty "findings" array when the document looks ordinary. An empty result is a
+  correct and expected answer. Do not invent concerns to appear thorough.
+- Do not flag normal document features: scan noise, JPEG softness, skew from a flatbed,
+  letterhead in a display typeface, a handwritten signature differing from printed text,
+  rounded currency, or ordinary OCR garbling.
+- "confidence" is 0-100 for that specific observation. Use under 50 when you are unsure.
+- "severity" reflects how much the observation would matter if confirmed by a human.
+- Be specific in "title" (name the field and page), and explain in "why_suspicious" why an
+  authentic document would not normally look this way.
+
+Extracted text from the file:
+---
+{text}
+---"""
+
 
 @dataclass
 class Mention:
@@ -167,19 +263,29 @@ class Entities:
         }
 
 
-def analyze_contextual(text: str, doc_meta: dict[str, Any] | None = None) -> ModuleResult:
-    """Entry point matching the other engines: returns a ModuleResult of Findings."""
-    if not (text or "").strip():
+def analyze_contextual(
+    text: str,
+    doc_meta: dict[str, Any] | None = None,
+    pages: list["PILImage"] | None = None,
+) -> ModuleResult:
+    """Entry point matching the other engines: returns a ModuleResult of Findings.
+
+    ``pages`` are page images already rendered by the pipeline. They are used only for
+    tier-3 document analysis and are ignored unless CONTEXTUAL_MULTIMODAL is enabled.
+    """
+    if not (text or "").strip() and not pages:
         return ModuleResult(
             name="contextual_logic",
             status="skipped",
-            summary="No extractable text to analyze.",
-            extras={"skipped": True, "reason": "no_text"},
+            summary="No extractable text or page images to analyze.",
+            extras={"skipped": True, "reason": "no_content"},
         )
-    return timed_module("contextual_logic", lambda: _run(text, doc_meta or {}))
+    return timed_module("contextual_logic", lambda: _run(text, doc_meta or {}, pages or []))
 
 
-def _run(text: str, doc_meta: dict[str, Any]) -> tuple[list[Finding], dict[str, Any]]:
+def _run(
+    text: str, doc_meta: dict[str, Any], pages: list["PILImage"]
+) -> tuple[list[Finding], dict[str, Any]]:
     entities = extract_entities(text)
     findings = check_internal_timeline(entities, doc_meta)
     claims = build_claims(entities)
@@ -189,15 +295,35 @@ def _run(text: str, doc_meta: dict[str, Any]) -> tuple[list[Finding], dict[str, 
         "claims": [asdict(c) for c in claims],
         "verifications": [],
         "external_verification": "disabled",
+        "document_analysis": "disabled",
         "provider": None,
     }
 
-    if not settings.gemini_api_key or not claims:
-        extras["external_verification"] = "disabled" if not settings.gemini_api_key else "no_claims"
+    if not settings.gemini_api_key:
+        return findings, extras
+
+    extras["provider"] = f"google:{settings.gemini_model}"
+
+    # Tier 3: full document review. Runs first because it is the more informative of the
+    # two remote calls, so a rate limit or outage does not consume the budget on claims.
+    if settings.contextual_multimodal:
+        document_findings, status = _run_document_analysis(text, pages, extras)
+        findings.extend(document_findings)
+        extras["document_analysis"] = status
+    else:
+        extras["document_analysis"] = "disabled"
+
+    if extras["document_analysis"] == "error":
+        # The remote service is unreachable or rejecting requests; claim verification
+        # would fail the same way and only duplicate the notice.
+        extras["external_verification"] = "skipped_after_error"
+        return findings, extras
+
+    if not claims:
+        extras["external_verification"] = "no_claims"
         return findings, extras
 
     extras["external_verification"] = "enabled"
-    extras["provider"] = f"google:{settings.gemini_model}"
 
     for claim in claims[: settings.contextual_max_claims]:
         try:
@@ -372,17 +498,90 @@ def check_internal_timeline(entities: Entities, doc_meta: dict[str, Any]) -> lis
     return findings
 
 
-def verify_claim(question: str) -> dict[str, Any]:
-    """Ask Gemini to adjudicate one claim. Sends the question only, never document text."""
-    url = GEMINI_ENDPOINT.format(model=settings.gemini_model)
-    payload = {
-        "contents": [{"role": "user", "parts": [{"text": PROMPT.format(question=question)}]}],
-        "generationConfig": {
-            "temperature": 0,
-            "responseMimeType": "application/json",
-            "responseSchema": VERDICT_SCHEMA,
+def analyze_document(text: str, pages: list["PILImage"]) -> dict[str, Any]:
+    """Tier 3: send page images and text to Gemini for comprehensive alteration review.
+
+    This transmits the exhibit's content to a third party. The caller is responsible for
+    checking settings.contextual_multimodal before calling.
+    """
+    parts: list[dict[str, Any]] = [
+        {"text": FRAUD_PROMPT.format(text=(text or "")[: settings.contextual_max_chars])}
+    ]
+    for index, page in enumerate(pages[: settings.contextual_max_pages], start=1):
+        parts.append({"text": f"Page {index} image:"})
+        parts.append(
+            {
+                "inline_data": {
+                    "mime_type": "image/jpeg",
+                    "data": _encode_page(page),
+                }
+            }
+        )
+
+    body = _post_gemini(
+        {
+            "contents": [{"role": "user", "parts": parts}],
+            "generationConfig": {
+                "temperature": 0,
+                "responseMimeType": "application/json",
+                "responseSchema": FRAUD_SCHEMA,
+            },
         },
+        timeout=settings.gemini_document_timeout_s,
+    )
+    parsed = _parse_json_payload(body)
+    raw_findings = parsed.get("findings")
+    if not isinstance(raw_findings, list):
+        raw_findings = []
+    return {
+        "findings": raw_findings,
+        "overall_note": str(parsed.get("overall_note", ""))[:500],
+        "pages_sent": min(len(pages), settings.contextual_max_pages),
+        "model": settings.gemini_model,
     }
+
+
+def _run_document_analysis(
+    text: str, pages: list["PILImage"], extras: dict[str, Any]
+) -> tuple[list[Finding], str]:
+    if not pages and not (text or "").strip():
+        return [], "no_content"
+    try:
+        result = analyze_document(text, pages)
+    except Exception as exc:
+        extras["document_analysis_error"] = str(exc)
+        return [_verification_unavailable(exc, stage="document analysis")], "error"
+
+    extras["document_analysis_result"] = {
+        "count": len(result["findings"]),
+        "pages_sent": result["pages_sent"],
+        "overall_note": result["overall_note"],
+    }
+    findings: list[Finding] = []
+    for index, item in enumerate(result["findings"][: settings.contextual_max_ai_findings]):
+        converted = _finding_from_analysis(item, index, result)
+        if converted:
+            findings.append(converted)
+    return findings, "enabled"
+
+
+def _encode_page(page: "PILImage") -> str:
+    """Downscale and JPEG-encode a page so a multi-page request stays within request limits."""
+    working = page.convert("RGB")
+    longest = max(working.width, working.height)
+    limit = settings.contextual_image_max_px
+    if longest > limit:
+        scale = limit / longest
+        working = working.resize(
+            (max(1, int(working.width * scale)), max(1, int(working.height * scale)))
+        )
+    buffer = io.BytesIO()
+    working.save(buffer, format="JPEG", quality=settings.contextual_image_quality)
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+def _post_gemini(payload: dict[str, Any], timeout: int | None = None) -> dict[str, Any]:
+    url = GEMINI_ENDPOINT.format(model=settings.gemini_model)
     request = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
@@ -393,14 +592,18 @@ def verify_claim(question: str) -> dict[str, Any]:
         },
     )
     try:
-        with urllib.request.urlopen(request, timeout=settings.gemini_timeout_s) as response:
-            body = json.loads(response.read().decode("utf-8"))
+        with urllib.request.urlopen(
+            request, timeout=timeout or settings.gemini_timeout_s
+        ) as response:
+            return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:300]
         raise RuntimeError(f"Gemini returned HTTP {exc.code}: {detail}") from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f"Could not reach Gemini: {exc.reason}") from exc
 
+
+def _parse_json_payload(body: dict[str, Any]) -> dict[str, Any]:
     candidates = body.get("candidates") or []
     if not candidates:
         raise RuntimeError("Gemini returned no candidates.")
@@ -408,7 +611,28 @@ def verify_claim(question: str) -> dict[str, Any]:
     raw = "".join(part.get("text", "") for part in parts).strip()
     if not raw:
         raise RuntimeError("Gemini returned an empty response.")
-    parsed = json.loads(raw)
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Gemini returned unparsable JSON: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise RuntimeError("Gemini returned JSON that was not an object.")
+    return parsed
+
+
+def verify_claim(question: str) -> dict[str, Any]:
+    """Tier 2: ask Gemini to adjudicate one claim. Sends the question only, no document content."""
+    body = _post_gemini(
+        {
+            "contents": [{"role": "user", "parts": [{"text": PROMPT.format(question=question)}]}],
+            "generationConfig": {
+                "temperature": 0,
+                "responseMimeType": "application/json",
+                "responseSchema": VERDICT_SCHEMA,
+            },
+        }
+    )
+    parsed = _parse_json_payload(body)
 
     verdict = str(parsed.get("verdict", "unverifiable")).lower()
     if verdict not in {"supported", "contradicted", "unverifiable"}:
@@ -424,6 +648,96 @@ def verify_claim(question: str) -> dict[str, Any]:
         "basis": str(parsed.get("basis", ""))[:200],
         "model": settings.gemini_model,
     }
+
+
+ANALYSIS_TITLES = {
+    "date_inconsistency": "Date inconsistency",
+    "math_error": "Arithmetic does not reconcile",
+    "text_overlay": "Possible text overlay",
+    "graphic_manipulation": "Possible graphic manipulation",
+    "font_mismatch": "Font or type mismatch",
+    "logical_inconsistency": "Internal inconsistency",
+}
+
+# The model may propose any severity; nothing it reports is allowed above medium.
+SEVERITY_CAP = {"info": "info", "low": "low", "medium": "medium", "high": "medium", "critical": "medium"}
+
+
+def _finding_from_analysis(
+    item: dict[str, Any], index: int, result: dict[str, Any]
+) -> Finding | None:
+    """Convert one model-reported observation into a Finding, discounted and labelled.
+
+    Category stays "contextual" for every analysis type. A model's opinion about splicing
+    is not equivalent to the deterministic copy-move detector's output, so it must not be
+    filed under "image" where a reader would take it for measured evidence.
+    """
+    if not isinstance(item, dict):
+        return None
+    analysis_type = str(item.get("analysis_type", "")).strip().lower()
+    if analysis_type not in ANALYSIS_TYPES:
+        return None
+
+    observation = str(item.get("observation", "")).strip()
+    why = str(item.get("why_suspicious", "")).strip()
+    if not observation or not why:
+        return None
+
+    try:
+        model_confidence = float(item.get("confidence", 0))
+    except (TypeError, ValueError):
+        model_confidence = 0.0
+    model_confidence = max(0.0, min(100.0, model_confidence))
+    if model_confidence < settings.contextual_min_confidence:
+        return None
+
+    severity = SEVERITY_CAP.get(str(item.get("severity", "low")).lower(), "low")
+    # Same discount as claim verification: an unconfirmed model observation cannot
+    # reach the >=70 threshold that scoring.py requires for red.
+    confidence = min(60.0, model_confidence * 0.7)
+
+    page = item.get("page")
+    try:
+        page_no = int(page) if page is not None else None
+    except (TypeError, ValueError):
+        page_no = None
+    if page_no is not None and page_no < 1:
+        page_no = None
+
+    quoted = str(item.get("quoted_evidence", "")).strip()[:300]
+    label = ANALYSIS_TITLES[analysis_type]
+    title = str(item.get("title", "")).strip()[:120] or label
+
+    explanation = f"Automated document review reported: {observation}"
+    if quoted:
+        explanation += f' Cited content: "{quoted}"'
+
+    fid_seed = f"{analysis_type}|{title}|{page_no}|{quoted}"
+    fid = f"ctx-ai-{hashlib.sha1(fid_seed.encode('utf-8')).hexdigest()[:10]}"
+
+    return finding(
+        fid=fid,
+        category="contextual",
+        severity=severity,
+        title=f"{label}: {title}" if not title.lower().startswith(label.lower()) else title,
+        explanation=explanation,
+        why_suspicious=why,
+        confidence=confidence,
+        page=page_no,
+        evidence={
+            "analysis_type": analysis_type,
+            "quoted_evidence": quoted or None,
+            "model": result.get("model"),
+            "model_confidence": model_confidence,
+            "model_severity": str(item.get("severity", "")).lower() or None,
+            "pages_sent": result.get("pages_sent"),
+            "ai_generated": True,
+        },
+        recommended_action=(
+            "Treat this as a research lead only. Confirm the cited page and content by eye, and "
+            "compare against the deterministic findings from the image, text, and PDF modules."
+        ),
+    )
 
 
 def _finding_from_verdict(claim: Claim, verdict: dict[str, Any]) -> Finding | None:
@@ -465,15 +779,15 @@ def _finding_from_verdict(claim: Claim, verdict: dict[str, Any]) -> Finding | No
     )
 
 
-def _verification_unavailable(exc: Exception) -> Finding:
+def _verification_unavailable(exc: Exception, stage: str = "fact verification") -> Finding:
     return finding(
-        fid="ctx-verification-unavailable",
+        fid=f"ctx-unavailable-{re.sub(r'[^a-z]+', '-', stage.lower())}",
         category="contextual",
         severity="info",
-        title="External fact verification did not run",
+        title=f"External {stage} did not run",
         explanation=(
             f"The contextual verification service could not be reached ({exc}). Entity extraction and "
-            "internal timeline checks still ran."
+            "internal timeline checks still ran, and all other engines are unaffected."
         ),
         why_suspicious="Not an authenticity issue; it records a gap in coverage for the audit trail.",
         confidence=0,

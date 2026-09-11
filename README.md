@@ -30,21 +30,41 @@ uvicorn app.main:app --reload --port 8000
 
 Optional: install [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) for image text extraction. PDFs with embedded text still analyze without it.
 
-### Contextual verification (opt-in, off by default)
+### Contextual verification (opt-in, three tiers)
 
-The contextual engine always extracts entities and checks timeline logic locally. It can
-additionally ask Google Gemini whether a company/place/date combination is contradicted by
-public record. That step is **disabled unless you set an API key**, because it sends data to
-a third party:
+The contextual engine runs in three tiers, each needing more explicit consent than the last.
+
+**Tier 1 — local only (always on).** Entity extraction and deterministic timeline checks.
+Nothing leaves the server.
+
+**Tier 2 — claim verification.** Asks Google Gemini whether a company/place/date combination
+is contradicted by public record. Enable with a key:
 
 ```powershell
 $env:GEMINI_API_KEY = "your-key"
 ```
 
 Only the generated question is transmitted (for example, *Was "Acme Freight, LLC" in
-operation, and present at Dallas, TX, on 2019-03-01?*). Document text, page images, and the
-file itself never leave the server. Model-sourced findings are capped at medium severity,
-carry `ai_generated: true`, and cannot by themselves drive a report to red.
+operation, and present at Dallas, TX, on 2019-03-01?*). No document content is sent.
+
+**Tier 3 — full document analysis.** Uploads rendered page images and extracted text to
+Google for comprehensive review: date logic, arithmetic that does not reconcile, text
+overlays, graphic manipulation, and font mismatches. Because this transmits the exhibit
+itself, it needs a second opt-in on top of the key:
+
+```powershell
+$env:CONTEXTUAL_MULTIMODAL = "true"
+```
+
+> **Do not enable tier 3 for sealed, privileged, or otherwise restricted evidence.** Page
+> images of the exhibit are sent to a third-party service. Confirm this is permissible under
+> your court's rules on electronic evidence handling before turning it on.
+
+Across tiers 2 and 3, model-sourced findings are capped at **medium** severity, have their
+confidence discounted (a model reporting 92% lands at 60%), carry `ai_generated: true`, and
+are filed under the `contextual` category so they are never mistaken for the deterministic
+image or text measurements. They cannot drive a report to red on their own. The HTML report
+labels each one "AI-Assisted Research Lead".
 
 **Frontend**:
 

@@ -4,16 +4,36 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app import __version__
+from app.config import settings
 from app.engines.contextual_logic import analyze_contextual
 from app.engines.image_forensics import analyze_image_forensics
 from app.engines.metadata import analyze_metadata
 from app.engines.ocr_text import analyze_ocr_text
 from app.engines.pdf_integrity import analyze_pdf_integrity
 from app.engines.structural import analyze_structural
-from app.ingestion import sha256_file, sniff_type
+from app.ingestion import load_image, render_pdf_pages, sha256_file, sniff_type
 from app.models import AuditTrail, Finding, FontUsage, PageDimension, Report, TimelineEvent
 from app.report import executive_summary, pick_top_findings, recommended_actions, render_html, render_pdf, score_risk
 from app.storage import job_dir, update_job
+
+
+def _pages_for_contextual(source: Path) -> list:
+    """Render pages for tier-3 document analysis, and only then.
+
+    Rendering is skipped entirely when multimodal analysis is disabled so a default
+    install pays no extra cost and uploads nothing.
+    """
+    if not (settings.contextual_multimodal and settings.gemini_api_key):
+        return []
+    suffix = source.suffix.lower()
+    try:
+        if suffix == ".pdf":
+            return render_pdf_pages(source, max_pages=settings.contextual_max_pages)
+        if suffix in {".jpg", ".jpeg", ".png", ".gif"}:
+            return [load_image(source)]
+    except Exception:
+        return []
+    return []
 
 
 def run_pipeline(job_id: str, source: Path, submitted_by: str = "court-staff") -> Report:
@@ -39,7 +59,11 @@ def run_pipeline(job_id: str, source: Path, submitted_by: str = "court-staff") -
 
     update_job(job_id, stage="contextual", percent=88, message="Checking entities and timeline logic…")
     doc_meta = (metadata.extras.get("metadata") or {}).get("document") or {}
-    contextual = analyze_contextual(ocr.extras.pop("full_text", ""), doc_meta)
+    contextual = analyze_contextual(
+        ocr.extras.pop("full_text", ""),
+        doc_meta,
+        pages=_pages_for_contextual(source),
+    )
 
     update_job(job_id, stage="generating_report", percent=94, message="Compiling the authenticity report…")
 
