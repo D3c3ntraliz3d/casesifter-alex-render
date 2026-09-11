@@ -279,10 +279,7 @@ def analyze_contextual(
     # Debug logging: check configuration at entry
     gemini_key_status = "set" if settings.gemini_api_key else "empty"
     num_pages = len(pages or [])
-    logger.debug(
-        f"analyze_contextual called: contextual_multimodal={settings.contextual_multimodal}, "
-        f"gemini_api_key={gemini_key_status}, pages_received={num_pages}"
-    )
+    print(f"[CONTEXTUAL_DEBUG] contextual_multimodal={settings.contextual_multimodal}, gemini_api_key={gemini_key_status}, pages_received={num_pages}")
     
     if not (text or "").strip() and not pages:
         return ModuleResult(
