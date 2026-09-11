@@ -183,10 +183,9 @@ FRAUD_SCHEMA = {
     "required": ["findings"],
 }
 
-FRAUD_PROMPT = """You are assisting a court clerk reviewing a document exhibit for signs of
-alteration. You are given the rendered page images and the text extracted from the file.
+FRAUD_PROMPT = """Assume this document may contain fraud or alteration. Aggressively analyze the page images and extracted text for ANY signs of document manipulation, forgery, or inconsistency. Do not give the document the benefit of the doubt. Find evidence of fraud or report empty findings.
 
-Report only observations you can point to directly in the material provided. Examine:
+Examine:
 
 1. date_inconsistency — dates that contradict each other or the document's own narrative
    (a signature predating the agreement, a service period outside the billing period, a
