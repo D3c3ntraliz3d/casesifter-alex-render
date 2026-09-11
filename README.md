@@ -47,18 +47,24 @@ $env:GEMINI_API_KEY = "your-key"
 Only the generated question is transmitted (for example, *Was "Acme Freight, LLC" in
 operation, and present at Dallas, TX, on 2019-03-01?*). No document content is sent.
 
-**Tier 3 — full document analysis.** Uploads rendered page images and extracted text to
-Google for comprehensive review: date logic, arithmetic that does not reconcile, text
-overlays, graphic manipulation, and font mismatches. Because this transmits the exhibit
+**Tier 3 — full document analysis.** Uploads the original file natively (the PDF or image
+itself, not a re-render) along with the extracted text for comprehensive review: date logic,
+arithmetic that does not reconcile, text overlays, graphic manipulation, and font mismatches.
+Sending the original preserves vector text, embedded fonts, and per-object layering, which are
+the artifacts an overlay or paste tends to leave behind. Because this transmits the exhibit
 itself, it needs a second opt-in on top of the key:
 
 ```powershell
 $env:CONTEXTUAL_MULTIMODAL = "true"
 ```
 
-> **Do not enable tier 3 for sealed, privileged, or otherwise restricted evidence.** Page
-> images of the exhibit are sent to a third-party service. Confirm this is permissible under
-> your court's rules on electronic evidence handling before turning it on.
+> **Do not enable tier 3 for sealed, privileged, or otherwise restricted evidence.** The
+> exhibit file is sent to a third-party service. Confirm this is permissible under your
+> court's rules on electronic evidence handling before turning it on.
+
+PDF, JPEG, PNG, GIF, and WebP are sent natively. Office formats have no native equivalent, and
+files over `CONTEXTUAL_MAX_UPLOAD_MB` (default 15) exceed the inline request limit; both cases
+fall back to text-only analysis and record the reason in the module's extras.
 
 Across tiers 2 and 3, model-sourced findings are capped at **medium** severity, have their
 confidence discounted (a model reporting 92% lands at 60%), carry `ai_generated: true`, and

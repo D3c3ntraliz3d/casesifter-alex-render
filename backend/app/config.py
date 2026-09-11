@@ -39,12 +39,11 @@ class Settings(BaseSettings):
     contextual_window: int = 400
 
     # Contextual engine, tier 3: full document analysis. Requires a second, deliberate
-    # opt-in because it uploads rendered page images and extracted text to Google.
+    # opt-in because it uploads the original file and extracted text to Google.
     # Leave false for sealed, privileged, or otherwise restricted evidence.
     contextual_multimodal: bool = False
-    contextual_max_pages: int = 4
-    contextual_image_max_px: int = 1600
-    contextual_image_quality: int = 80
+    # Inline request bodies are capped by the API; a larger exhibit degrades to text-only.
+    contextual_max_upload_mb: int = 15
     contextual_max_ai_findings: int = 12
     gemini_document_timeout_s: int = 90
 

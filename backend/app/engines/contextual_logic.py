@@ -12,11 +12,11 @@ Three tiers, each requiring more explicit opt-in than the last:
    e.g. 'Was "Acme Freight, LLC" in operation on 2019-03-01?'. No document
    content is transmitted.
 3. Document analysis (needs CONTEXTUAL_MULTIMODAL=true in addition to the key).
-   Sends rendered page images and extracted text to Google for comprehensive
-   review: date logic, arithmetic, text overlays, graphic manipulation, font
-   mismatches. This transmits the exhibit itself to a third party, so it is off
-   by default and must be enabled deliberately. Do not enable it for sealed,
-   privileged, or otherwise restricted evidence.
+   Uploads the original file natively (the PDF or image itself, not a re-render)
+   along with the extracted text for comprehensive review: date logic, arithmetic,
+   text overlays, graphic manipulation, font mismatches. This transmits the exhibit
+   itself to a third party, so it is off by default and must be enabled deliberately.
+   Do not enable it for sealed, privileged, or otherwise restricted evidence.
 
 Evidentiary weight. A language model's assertion is a research lead, not proof.
 Every model-sourced finding is capped at medium severity, has its confidence
@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import io
 import json
 import logging
 import re
@@ -36,12 +35,10 @@ import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 
 from dateutil import parser as dateparser
-
-if TYPE_CHECKING:
-    from PIL.Image import Image as PILImage
 
 from app.config import settings
 from app.engines import finding, timed_module
@@ -117,6 +114,19 @@ ORG_MARKERS = {
 
 GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
+# Formats Gemini accepts natively. Sending the original file rather than a re-render
+# preserves vector text, embedded fonts, and per-object layering, all of which are the
+# very artifacts an overlay or paste leaves behind. Office formats have no native
+# equivalent, so those exhibits fall back to text-only analysis.
+NATIVE_MIME_TYPES = {
+    ".pdf": "application/pdf",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
+
 VERDICT_SCHEMA = {
     "type": "object",
     "properties": {
@@ -183,7 +193,7 @@ FRAUD_SCHEMA = {
     "required": ["findings"],
 }
 
-FRAUD_PROMPT = """Assume this document may contain fraud or alteration. Aggressively analyze the page images and extracted text for ANY signs of document manipulation, forgery, or inconsistency. Do not give the document the benefit of the doubt. Find evidence of fraud or report empty findings.
+FRAUD_PROMPT = """Assume this document may contain fraud or alteration. Aggressively analyze the attached file and extracted text for ANY signs of document manipulation, forgery, or inconsistency. Do not give the document the benefit of the doubt. Find evidence of fraud or report empty findings.
 
 Examine:
 
@@ -268,32 +278,30 @@ class Entities:
 def analyze_contextual(
     text: str,
     doc_meta: dict[str, Any] | None = None,
-    pages: list["PILImage"] | None = None,
+    source_file: Path | None = None,
 ) -> ModuleResult:
     """Entry point matching the other engines: returns a ModuleResult of Findings.
 
-    ``pages`` are page images already rendered by the pipeline. They are used only for
-    tier-3 document analysis and are ignored unless CONTEXTUAL_MULTIMODAL is enabled.
+    ``source_file`` is the original exhibit on disk. It is uploaded natively for tier-3
+    document analysis and is ignored unless CONTEXTUAL_MULTIMODAL is enabled.
     """
-    # Debug logging: check configuration at entry
     gemini_key_status = "set" if settings.gemini_api_key else "empty"
-    num_pages = len(pages or [])
-    print(f"[CONTEXTUAL_DEBUG] contextual_multimodal={settings.contextual_multimodal}, gemini_api_key={gemini_key_status}, pages_received={num_pages}")
-    
-    if not (text or "").strip() and not pages:
+    print(f"[CONTEXTUAL_DEBUG] contextual_multimodal={settings.contextual_multimodal}, gemini_api_key={gemini_key_status}, source_file={source_file}")
+
+    if not (text or "").strip() and source_file is None:
         return ModuleResult(
             name="contextual_logic",
             status="skipped",
-            summary="No extractable text or page images to analyze.",
+            summary="No extractable text or source file to analyze.",
             extras={"skipped": True, "reason": "no_content"},
         )
-    return timed_module("contextual_logic", lambda: _run(text, doc_meta or {}, pages or []))
+    return timed_module("contextual_logic", lambda: _run(text, doc_meta or {}, source_file))
 
 
 def _run(
-    text: str, doc_meta: dict[str, Any], pages: list["PILImage"]
+    text: str, doc_meta: dict[str, Any], source_file: Path | None
 ) -> tuple[list[Finding], dict[str, Any]]:
-    print(f"[_RUN_DEBUG] Starting contextual analysis. text_len={len(text)}, pages={len(pages)}")
+    print(f"[_RUN_DEBUG] Starting contextual analysis. text_len={len(text)}, source_file={source_file}")
     entities = extract_entities(text)
     findings = check_internal_timeline(entities, doc_meta)
     claims = build_claims(entities)
@@ -316,7 +324,7 @@ def _run(
     # two remote calls, so a rate limit or outage does not consume the budget on claims.
     if settings.contextual_multimodal:
         print(f"[GEMINI_CALL_DEBUG] About to call Gemini for document analysis")
-        document_findings, status = _run_document_analysis(text, pages, extras)
+        document_findings, status = _run_document_analysis(text, source_file, extras)
         findings.extend(document_findings)
         print(f"[GEMINI_RESPONSE_DEBUG] Findings generated: {len(findings)}")
         extras["document_analysis"] = status
@@ -508,8 +516,10 @@ def check_internal_timeline(entities: Entities, doc_meta: dict[str, Any]) -> lis
     return findings
 
 
-def analyze_document(text: str, pages: list["PILImage"]) -> dict[str, Any]:
-    """Tier 3: send page images and text to Gemini for comprehensive alteration review.
+def analyze_document(
+    text: str, file_base64: str | None, mime_type: str | None
+) -> dict[str, Any]:
+    """Tier 3: send the original file and extracted text to Gemini for alteration review.
 
     This transmits the exhibit's content to a third party. The caller is responsible for
     checking settings.contextual_multimodal before calling.
@@ -517,18 +527,10 @@ def analyze_document(text: str, pages: list["PILImage"]) -> dict[str, Any]:
     parts: list[dict[str, Any]] = [
         {"text": FRAUD_PROMPT.format(text=(text or "")[: settings.contextual_max_chars])}
     ]
-    for index, page in enumerate(pages[: settings.contextual_max_pages], start=1):
-        parts.append({"text": f"Page {index} image:"})
-        parts.append(
-            {
-                "inline_data": {
-                    "mime_type": "image/jpeg",
-                    "data": _encode_page(page),
-                }
-            }
-        )
+    if file_base64 and mime_type:
+        parts.append({"inline_data": {"mime_type": mime_type, "data": file_base64}})
 
-    print(f"[DOC_ANALYSIS_PROMPT_DEBUG] About to call Gemini with {len(parts)} parts")
+    print(f"[DOC_ANALYSIS_PROMPT_DEBUG] About to call Gemini with {len(parts)} parts, mime_type={mime_type}")
     body = _post_gemini(
         {
             "contents": [{"role": "user", "parts": parts}],
@@ -548,26 +550,35 @@ def analyze_document(text: str, pages: list["PILImage"]) -> dict[str, Any]:
     return {
         "findings": raw_findings,
         "overall_note": str(parsed.get("overall_note", ""))[:500],
-        "pages_sent": min(len(pages), settings.contextual_max_pages),
+        "file_sent": mime_type if file_base64 else None,
         "model": settings.gemini_model,
     }
 
 
 def _run_document_analysis(
-    text: str, pages: list["PILImage"], extras: dict[str, Any]
+    text: str, source_file: Path | None, extras: dict[str, Any]
 ) -> tuple[list[Finding], str]:
-    print(f"[DOC_ANALYSIS_DEBUG] Received {len(pages)} pages, text length: {len(text)}")
-    if not pages and not (text or "").strip():
+    """Encode the exhibit for native upload, then hand it to analyze_document.
+
+    A format Gemini cannot read natively, or a file too large for an inline request,
+    degrades to text-only analysis rather than failing the module.
+    """
+    file_base64, mime_type, note = _encode_source_file(source_file)
+    if note:
+        extras["document_analysis_note"] = note
+    print(f"[DOC_ANALYSIS_DEBUG] source_file={source_file}, mime_type={mime_type}, text length: {len(text)}")
+
+    if file_base64 is None and not (text or "").strip():
         return [], "no_content"
     try:
-        result = analyze_document(text, pages)
+        result = analyze_document(text, file_base64, mime_type)
     except Exception as exc:
         extras["document_analysis_error"] = str(exc)
         return [_verification_unavailable(exc, stage="document analysis")], "error"
 
     extras["document_analysis_result"] = {
         "count": len(result["findings"]),
-        "pages_sent": result["pages_sent"],
+        "file_sent": result["file_sent"],
         "overall_note": result["overall_note"],
     }
     findings: list[Finding] = []
@@ -578,19 +589,32 @@ def _run_document_analysis(
     return findings, "enabled"
 
 
-def _encode_page(page: "PILImage") -> str:
-    """Downscale and JPEG-encode a page so a multi-page request stays within request limits."""
-    working = page.convert("RGB")
-    longest = max(working.width, working.height)
-    limit = settings.contextual_image_max_px
-    if longest > limit:
-        scale = limit / longest
-        working = working.resize(
-            (max(1, int(working.width * scale)), max(1, int(working.height * scale)))
-        )
-    buffer = io.BytesIO()
-    working.save(buffer, format="JPEG", quality=settings.contextual_image_quality)
-    return base64.b64encode(buffer.getvalue()).decode("ascii")
+def _encode_source_file(source_file: Path | None) -> tuple[str | None, str | None, str | None]:
+    """Base64-encode the exhibit for native upload.
+
+    Returns (data, mime_type, note). Any of the first two being None means the file is
+    not being sent and the note explains why, for the record in extras.
+    """
+    if source_file is None:
+        return None, None, None
+    suffix = source_file.suffix.lower()
+    mime_type = NATIVE_MIME_TYPES.get(suffix)
+    if mime_type is None:
+        return None, None, f"{suffix or 'this format'} has no native Gemini equivalent; analyzed text only."
+    try:
+        size = source_file.stat().st_size
+        limit = settings.contextual_max_upload_mb * 1024 * 1024
+        if size > limit:
+            return (
+                None,
+                None,
+                f"File is {size / 1048576:.1f} MB, over the {settings.contextual_max_upload_mb} MB "
+                "inline upload limit; analyzed text only.",
+            )
+        with open(source_file, "rb") as handle:
+            return base64.b64encode(handle.read()).decode("utf-8"), mime_type, None
+    except OSError as exc:
+        return None, None, f"Could not read the file for upload: {exc}"
 
 
 def _post_gemini(payload: dict[str, Any], timeout: int | None = None) -> dict[str, Any]:
@@ -743,7 +767,7 @@ def _finding_from_analysis(
             "model": result.get("model"),
             "model_confidence": model_confidence,
             "model_severity": str(item.get("severity", "")).lower() or None,
-            "pages_sent": result.get("pages_sent"),
+            "file_sent": result.get("file_sent"),
             "ai_generated": True,
         },
         recommended_action=(
