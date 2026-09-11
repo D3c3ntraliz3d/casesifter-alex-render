@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Exhibit authenticity report — {{ report.audit.filename }}</title>
+  <style>
+    :root { --navy:#1a365d; --ink:#1a202c; --muted:#4a5568; --line:#e2e8f0; --paper:#f7f4ef; }
+    body { font-family: "Times New Roman", Times, serif; color: var(--ink); margin: 0; background: white; }
+    .wrap { max-width: 860px; margin: 0 auto; padding: 32px 28px 64px; }
+    h1 { font-size: 26px; color: var(--navy); margin: 0 0 4px; }
+    h2 { font-size: 18px; color: var(--navy); margin: 28px 0 10px; border-bottom: 1px solid var(--line); padding-bottom: 4px; }
+    .meta { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+    .badge { display: inline-block; padding: 6px 12px; font-weight: bold; letter-spacing: .02em; }
+    .green { background: #c6f6d5; color: #22543d; }
+    .yellow { background: #fefcbf; color: #744210; }
+    .red { background: #fed7d7; color: #742a2a; }
+    .finding { border: 1px solid var(--line); padding: 12px 14px; margin: 10px 0; }
+    .finding h3 { margin: 0 0 6px; font-size: 15px; color: var(--navy); }
+    .why { color: var(--muted); font-style: italic; }
+    img.evidence { max-width: 100%; border: 1px solid var(--line); margin-top: 8px; }
+    table { border-collapse: collapse; width: 100%; font-size: 13px; }
+    th, td { border: 1px solid var(--line); padding: 5px 8px; text-align: left; }
+    th { background: #edf2f7; }
+    .disclaimer { font-size: 12px; color: var(--muted); margin-top: 28px; }
+    ul { margin-top: 6px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Court Exhibit Scanner</h1>
+    <div class="meta">Authenticity verification report · {{ generated }} · software v{{ version }}</div>
+    <p><strong>File:</strong> {{ report.audit.filename }} &nbsp;|&nbsp; <strong>SHA-256:</strong> {{ report.audit.sha256 }}</p>
+    <p>
+      <span class="badge {{ report.risk_level }}">{{ risk_label }} ({{ report.risk_score }}/100)</span>
+    </p>
+
+    <h2>Executive summary</h2>
+    <p>{{ report.executive_summary }}</p>
+
+    <h2>Recommended actions</h2>
+    <ul>
+      {% for action in report.recommended_actions %}
+      <li>{{ action }}</li>
+      {% endfor %}
+    </ul>
+
+    <h2>Top findings</h2>
+    {% if report.top_findings %}
+      {% for item in report.top_findings %}
+      <div class="finding">
+        <h3>{{ item.title }} <small>({{ category_label.get(item.category, item.category) }}, {{ item.confidence|round(0) }}%)</small></h3>
+        <p>{{ item.explanation }}</p>
+        <p class="why">{{ item.why_suspicious }}</p>
+      </div>
+      {% endfor %}
+    {% else %}
+      <p>No material findings.</p>
+    {% endif %}
+
+    <h2>Detailed findings</h2>
+    {% for item in report.findings %}
+    <div class="finding">
+      <h3>{{ item.title }}</h3>
+      <p>
+        {{ category_label.get(item.category, item.category) }}
+        · {{ item.severity }}
+        · {{ item.confidence|round(0) }}% confidence
+        {% if item.page %}· page {{ item.page }}{% endif %}
+      </p>
+      <p>{{ item.explanation }}</p>
+      <p class="why">Why this is flagged: {{ item.why_suspicious }}</p>
+      {% if item.evidence and item.evidence.heatmap %}
+      <p><img class="evidence" src="{{ item.evidence.heatmap }}" alt="Forensic heatmap" /></p>
+      {% endif %}
+    </div>
+    {% else %}
+    <p>No automated findings were recorded.</p>
+    {% endfor %}
+
+    <h2>Timeline</h2>
+    {% if report.timeline %}
+    <table>
+      <thead><tr><th>Event</th><th>Timestamp</th><th>Source</th><th>Note</th></tr></thead>
+      <tbody>
+        {% for event in report.timeline %}
+        <tr>
+          <td>{{ event.label }}{% if event.anomaly %} ⚠{% endif %}</td>
+          <td>{{ event.timestamp or "—" }}</td>
+          <td>{{ event.source }}</td>
+          <td>{{ event.note or "" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p>No timeline events were extracted.</p>
+    {% endif %}
+
+    <h2>Page dimensions</h2>
+    {% if report.page_dimensions %}
+    <table>
+      <thead>
+        <tr><th>Page</th><th>W (pt)</th><th>H (pt)</th><th>W (px)</th><th>H (px)</th><th>DPI</th><th>Orientation</th></tr>
+      </thead>
+      <tbody>
+        {% for dim in report.page_dimensions %}
+        <tr>
+          <td>{{ dim.page }}</td>
+          <td>{{ dim.width_pts or "—" }}</td>
+          <td>{{ dim.height_pts or "—" }}</td>
+          <td>{{ dim.width_px or "—" }}</td>
+          <td>{{ dim.height_px or "—" }}</td>
+          <td>{{ dim.dpi or "—" }}</td>
+          <td>{{ dim.orientation or "—" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p>Not applicable for this file type.</p>
+    {% endif %}
+
+    <h2>Fonts</h2>
+    {% if report.fonts %}
+    <table>
+      <thead><tr><th>Font</th><th>Pages</th><th>Sizes</th><th>Sample</th></tr></thead>
+      <tbody>
+        {% for font in report.fonts %}
+        <tr>
+          <td>{{ font.name }}</td>
+          <td>{{ font.pages|join(", ") }}</td>
+          <td>{{ font.sizes|join(", ") }}</td>
+          <td>{{ font.sample or "" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p>No embedded font inventory (typical for images and scans).</p>
+    {% endif %}
+
+    <h2>Audit trail</h2>
+    <table>
+      <tr><th>Scanned at</th><td>{{ report.audit.scanned_at }}</td></tr>
+      <tr><th>Submitted by</th><td>{{ report.audit.submitted_by }}</td></tr>
+      <tr><th>Version</th><td>{{ report.audit.analysis_version }}</td></tr>
+      <tr><th>Modules</th><td>{{ report.audit.modules_run|join(", ") }}</td></tr>
+      <tr><th>Size</th><td>{{ report.audit.file_size_bytes }} bytes</td></tr>
+    </table>
+
+    <p class="disclaimer">{{ report.disclaimer }}</p>
+  </div>
+</body>
+</html>
