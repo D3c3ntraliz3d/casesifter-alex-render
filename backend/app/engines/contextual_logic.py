@@ -529,6 +529,7 @@ def analyze_document(text: str, pages: list["PILImage"]) -> dict[str, Any]:
             }
         )
 
+    print(f"[DOC_ANALYSIS_PROMPT_DEBUG] About to call Gemini with {len(parts)} parts")
     body = _post_gemini(
         {
             "contents": [{"role": "user", "parts": parts}],
@@ -540,6 +541,7 @@ def analyze_document(text: str, pages: list["PILImage"]) -> dict[str, Any]:
         },
         timeout=settings.gemini_document_timeout_s,
     )
+    print(f"[DOC_ANALYSIS_RESPONSE_DEBUG] Received response from Gemini: {str(body)[:500]}")
     parsed = _parse_json_payload(body)
     raw_findings = parsed.get("findings")
     if not isinstance(raw_findings, list):
@@ -555,6 +557,7 @@ def analyze_document(text: str, pages: list["PILImage"]) -> dict[str, Any]:
 def _run_document_analysis(
     text: str, pages: list["PILImage"], extras: dict[str, Any]
 ) -> tuple[list[Finding], str]:
+    print(f"[DOC_ANALYSIS_DEBUG] Received {len(pages)} pages, text length: {len(text)}")
     if not pages and not (text or "").strip():
         return [], "no_content"
     try:
