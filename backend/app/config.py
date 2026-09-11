@@ -25,6 +25,16 @@ class Settings(BaseSettings):
     ela_quality: int = 90
     ela_scale: int = 18
 
+    # Contextual engine. External verification stays off until a key is supplied,
+    # because it sends generated questions to a third party.
+    gemini_api_key: str | None = None
+    gemini_model: str = "gemini-2.5-flash"
+    gemini_timeout_s: int = 20
+    contextual_max_chars: int = 40_000
+    contextual_max_claims: int = 5
+    contextual_min_confidence: int = 70
+    contextual_window: int = 400
+
     @property
     def jobs_dir(self) -> Path:
         return self.data_dir / "jobs"

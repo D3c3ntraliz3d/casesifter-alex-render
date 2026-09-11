@@ -5,7 +5,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-Category = Literal["metadata", "image", "text", "pdf_structure", "page_anomalies"]
+Category = Literal[
+    "metadata", "image", "text", "pdf_structure", "page_anomalies", "contextual"
+]
 Severity = Literal["info", "low", "medium", "high", "critical"]
 RiskLevel = Literal["green", "yellow", "red"]
 JobStatus = Literal["queued", "running", "complete", "failed"]

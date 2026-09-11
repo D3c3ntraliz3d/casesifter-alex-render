@@ -37,6 +37,7 @@ CATEGORY_LABEL = {
     "text": "Text / OCR",
     "pdf_structure": "PDF structure",
     "page_anomalies": "Page anomalies",
+    "contextual": "Contextual logic",
 }
 
 

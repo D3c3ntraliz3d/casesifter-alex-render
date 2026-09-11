@@ -10,6 +10,7 @@ const STAGES = [
   ["structural", "Page structure"],
   ["image_forensics", "Image forensics"],
   ["ocr_text", "Text / OCR"],
+  ["contextual", "Contextual logic"],
   ["generating_report", "Report"],
   ["complete", "Complete"],
 ];
@@ -28,6 +29,7 @@ const CATEGORY = {
   text: "Text / OCR",
   pdf_structure: "PDF structure",
   page_anomalies: "Page anomalies",
+  contextual: "Contextual logic",
 };
 
 const RISK = {

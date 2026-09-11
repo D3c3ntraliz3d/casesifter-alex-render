@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app import __version__
+from app.engines.contextual_logic import analyze_contextual
 from app.engines.image_forensics import analyze_image_forensics
 from app.engines.metadata import analyze_metadata
 from app.engines.ocr_text import analyze_ocr_text
@@ -33,12 +34,16 @@ def run_pipeline(job_id: str, source: Path, submitted_by: str = "court-staff") -
     update_job(job_id, stage="image_forensics", percent=60, message="Running image manipulation detection…")
     images = analyze_image_forensics(source, job_id)
 
-    update_job(job_id, stage="ocr_text", percent=82, message="Extracting text and checking fonts…")
+    update_job(job_id, stage="ocr_text", percent=78, message="Extracting text and checking fonts…")
     ocr = analyze_ocr_text(source, metadata.extras)
 
-    update_job(job_id, stage="generating_report", percent=92, message="Compiling the authenticity report…")
+    update_job(job_id, stage="contextual", percent=88, message="Checking entities and timeline logic…")
+    doc_meta = (metadata.extras.get("metadata") or {}).get("document") or {}
+    contextual = analyze_contextual(ocr.extras.pop("full_text", ""), doc_meta)
 
-    modules = [metadata, pdf, structural, images, ocr]
+    update_job(job_id, stage="generating_report", percent=94, message="Compiling the authenticity report…")
+
+    modules = [metadata, pdf, structural, images, ocr, contextual]
     findings: list[Finding] = []
     for module in modules:
         findings.extend(module.findings)
@@ -60,6 +65,8 @@ def run_pipeline(job_id: str, source: Path, submitted_by: str = "court-staff") -
         "page_dimensions": structural.extras.get("page_dimensions") or [],
         "origin_guess": (pdf.extras or {}).get("origin_guess"),
         "ela_artifacts": images.extras.get("artifacts") or [],
+        "entities": (contextual.extras or {}).get("entities"),
+        "external_verification": (contextual.extras or {}).get("external_verification"),
     }
 
     risk_level, risk_score = score_risk(findings)

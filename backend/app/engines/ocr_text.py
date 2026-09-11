@@ -57,6 +57,7 @@ def _run(path: Path, metadata_extras: dict[str, Any]) -> tuple[list[Finding], di
         ],
         "fonts": [f.model_dump() for f in fonts],
         "char_count": len(full_text),
+        "full_text": full_text,
     }
 
     if suffix == ".pdf":

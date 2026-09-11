@@ -11,7 +11,8 @@ Upload a PDF, Word, Excel, or image exhibit. The scanner:
 3. Compares page sizes, rotation, and scan resolution
 4. Runs JPEG error-level analysis and copy-move (clone) detection, with heatmaps
 5. Extracts text, fonts, and hidden/invisible text
-6. Produces a Green / Yellow / Red report with confidence scores, a timeline, and HTML / PDF / JSON export
+6. Extracts entities (organizations, dates, locations) and checks timeline logic
+7. Produces a Green / Yellow / Red report with confidence scores, a timeline, and HTML / PDF / JSON export
 
 Informational notes (for example, missing EXIF on a phone screenshot) do **not** by themselves raise the risk level.
 
@@ -28,6 +29,22 @@ uvicorn app.main:app --reload --port 8000
 ```
 
 Optional: install [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) for image text extraction. PDFs with embedded text still analyze without it.
+
+### Contextual verification (opt-in, off by default)
+
+The contextual engine always extracts entities and checks timeline logic locally. It can
+additionally ask Google Gemini whether a company/place/date combination is contradicted by
+public record. That step is **disabled unless you set an API key**, because it sends data to
+a third party:
+
+```powershell
+$env:GEMINI_API_KEY = "your-key"
+```
+
+Only the generated question is transmitted (for example, *Was "Acme Freight, LLC" in
+operation, and present at Dallas, TX, on 2019-03-01?*). Document text, page images, and the
+file itself never leave the server. Model-sourced findings are capped at medium severity,
+carry `ai_generated: true`, and cannot by themselves drive a report to red.
 
 **Frontend**:
 
@@ -65,7 +82,7 @@ Max file size defaults to 100 MB (`MAX_FILE_MB`).
 ## Project layout
 
 ```
-backend/app/engines/   metadata, image_forensics, ocr_text, pdf_integrity, structural
+backend/app/engines/   metadata, image_forensics, ocr_text, pdf_integrity, structural, contextual_logic
 backend/app/report/    scoring, HTML/PDF export
 frontend/src/           upload, progress, report viewer
 ```
