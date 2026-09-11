@@ -154,6 +154,13 @@ h1, h2, h3, .serif { font-family: "Libre Baskerville", Georgia, serif; }
 .sev.medium { color: var(--yellow); }
 .sev.low, .sev.info { color: var(--muted); }
 .why { color: var(--muted); font-style: italic; }
+.ai-lead {
+  font-size: 12px;
+  color: var(--muted);
+  border-left: 3px solid var(--gold);
+  padding-left: 8px;
+  margin: 8px 0;
+}
 .heatmap { max-width: 100%; border: 1px solid var(--line); margin-top: 10px; }
 .conf {
   height: 6px;

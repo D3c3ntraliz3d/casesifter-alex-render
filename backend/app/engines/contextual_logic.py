@@ -29,7 +29,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import logging
 import re
 import urllib.error
 import urllib.request
@@ -44,8 +43,6 @@ from app.config import settings
 from app.engines import finding, timed_module
 from app.models import Finding, ModuleResult
 
-logger = logging.getLogger(__name__)
-
 ORG_SUFFIXES = (
     r"Inc|Incorporated|LLC|L\.L\.C|LLP|L\.L\.P|LP|PLLC|PC|P\.C|Corp|Corporation|"
     r"Company|Co|Ltd|Limited|Holdings|Group|Partners|Associates|Bank|Trust|"
@@ -55,6 +52,42 @@ ORG_SUFFIXES = (
 # \s+ here swallows the preceding heading (e.g. "INVOICE Meridian Freight Holdings").
 ORG_RE = re.compile(
     rf"\b((?:[A-Z][A-Za-z&'’\-\.]{{1,24}},?[ \t]+){{1,5}}(?:{ORG_SUFFIXES})\.?)(?=[\s,;:.)]|$)"
+)
+
+# Banks and utilities often appear without LLC/Inc suffixes, so the suffix regex misses them.
+# Matching these known exhibit issuers unlocks tier-2 public-record questions (e.g. whether
+# National Grid served Brooklyn before the KeySpan acquisition).
+KNOWN_ISSUERS = (
+    "National Grid",
+    "Nationalgrid",
+    "Verizon",
+    "Citibank",
+    "Citi Bank",
+    "KeySpan",
+    "Con Edison",
+    "Bank of America",
+    "Chase",
+    "JPMorgan",
+    "Wells Fargo",
+    "Capital One",
+    "PSEG",
+    "AT&T",
+    "T-Mobile",
+    "Spectrum",
+    "Comcast",
+)
+# Issuers whose service territory is New York–centric; never pair them with a Florida address
+# when a NY location is also present in the exhibit.
+NY_MARKET_ISSUERS = {
+    "National Grid",
+    "Con Edison",
+    "Verizon",
+    "KeySpan",
+    "PSEG",
+}
+KNOWN_ISSUER_RE = re.compile(
+    r"\b(" + "|".join(re.escape(name) for name in sorted(KNOWN_ISSUERS, key=len, reverse=True)) + r")\b",
+    re.I,
 )
 
 STATE_ABBR = (
@@ -144,8 +177,9 @@ Question: {question}
 
 Answer only from well-established public knowledge, and follow these rules exactly:
 - Answer "contradicted" only when public record clearly shows the combination was
-  impossible: the organization did not exist yet, had already dissolved, or the
-  named place did not exist on that date.
+  impossible: the organization did not exist yet, had already dissolved, had not yet
+  entered that city/market (for example a utility brand that acquired the local company
+  later), or the named place did not exist on that date.
 - Answer "supported" only when public record clearly confirms it.
 - Answer "unverifiable" for anything else. Small, private, or local businesses are
   almost always unverifiable. Never guess, and never infer from the name alone.
@@ -159,6 +193,8 @@ ANALYSIS_TYPES = (
     "graphic_manipulation",
     "font_mismatch",
     "logical_inconsistency",
+    "spelling_anomaly",
+    "historical_impossibility",
 )
 
 FRAUD_SCHEMA = {
@@ -193,16 +229,28 @@ FRAUD_SCHEMA = {
     "required": ["findings"],
 }
 
-FRAUD_PROMPT = """Assume this document may contain fraud or alteration. Aggressively analyze the attached file and extracted text for ANY signs of document manipulation, forgery, or inconsistency. Do not give the document the benefit of the doubt. Find evidence of fraud or report empty findings.
+FRAUD_PROMPT = """Assume this court exhibit may contain fraud or alteration. Aggressively analyze
+the attached file and extracted text for ANY signs of document manipulation, forgery, or
+inconsistency. Do not give the document the benefit of the doubt.
+
+CRITICAL — multi-statement exhibits:
+This PDF may contain several distinct statements (for example Citibank, National Grid, and
+Verizon) stapled as one exhibit. Review EVERY page and EVERY distinct statement separately.
+Do NOT stop after finding issues on one statement. Report every distinct issue on every
+statement that has one. An exhibit with three forged statements should produce findings for
+all three, not only the most obvious page.
 
 Examine:
 
 1. date_inconsistency — dates that contradict each other or the document's own narrative
    (a signature predating the agreement, a service period outside the billing period, a
-   sequence that cannot have happened in that order).
-2. math_error — arithmetic that does not add up: line items that do not sum to the stated
-   subtotal, a tax or discount that does not match the stated rate, a balance that is not
-   total minus payments. State the numbers you used.
+   due date years after the statement date, a payment month that cannot fall in the billing
+   cycle, a sequence that cannot have happened in that order).
+2. math_error — arithmetic that does not add up on ANY statement: line items that do not sum
+   to the stated subtotal, a tax or discount that does not match the stated rate, a balance
+   that is not total minus payments, running balances that skip, opening balance plus credits
+   minus debits that do not equal the closing balance. Check bank statements (Citibank, Chase,
+   etc.) as carefully as utility bills. State the numbers you used.
 3. text_overlay — text that appears pasted over other content: misaligned baselines,
    different background tone behind a value, a figure or name that sits at a different
    angle or weight than its row, visible patching around an amount.
@@ -213,19 +261,32 @@ Examine:
 6. logical_inconsistency — internal contradictions in the document's own content (a party
    named inconsistently, a total described in words that differs from the numeral, terms
    that reference an attachment that is absent).
+7. spelling_anomaly — a place name, party name, or branded field that is misspelled in a way
+   an authentic issuer statement would not print (for example "AVNTURA" instead of
+   "Aventura"). Distinguish this from ordinary OCR garbling of an otherwise correct image:
+   only flag when the letters on the page themselves spell the wrong word.
+8. historical_impossibility — a well-established public fact makes the statement impossible
+   as a contemporaneous record: the named issuer did not yet serve that city/market on that
+   statement date, the company did not exist yet, or had already exited that market. Example:
+   a National Grid residential bill for Brooklyn dated before National Grid acquired KeySpan
+   and entered the NYC market (August 2007). Use only well-established public facts; if unsure,
+   omit rather than guess.
 
 Rules you must follow:
 - Report nothing unless you can cite the specific page and the specific text or region.
   Put the exact words or numbers in "quoted_evidence".
-- Return an empty "findings" array when the document looks ordinary. An empty result is a
-  correct and expected answer. Do not invent concerns to appear thorough.
+- Name the issuer in the title when the exhibit has more than one statement
+  (e.g. "Citibank math error on page 3", "National Grid market timeline on page 4").
+- Return an empty "findings" array ONLY when every page and every statement looks ordinary.
+  Empty is correct for a clean document; it is incorrect when other statements still have
+  unresolved issues.
 - Do not flag normal document features: scan noise, JPEG softness, skew from a flatbed,
   letterhead in a display typeface, a handwritten signature differing from printed text,
-  rounded currency, or ordinary OCR garbling.
+  rounded currency, or ordinary OCR garbling of a correctly printed word.
 - "confidence" is 0-100 for that specific observation. Use under 50 when you are unsure.
 - "severity" reflects how much the observation would matter if confirmed by a human.
-- Be specific in "title" (name the field and page), and explain in "why_suspicious" why an
-  authentic document would not normally look this way.
+- Be specific in "title" (name the issuer, field, and page), and explain in "why_suspicious"
+  why an authentic document would not normally look this way.
 
 Extracted text from the file:
 ---
@@ -285,9 +346,6 @@ def analyze_contextual(
     ``source_file`` is the original exhibit on disk. It is uploaded natively for tier-3
     document analysis and is ignored unless CONTEXTUAL_MULTIMODAL is enabled.
     """
-    gemini_key_status = "set" if settings.gemini_api_key else "empty"
-    print(f"[CONTEXTUAL_DEBUG] contextual_multimodal={settings.contextual_multimodal}, gemini_api_key={gemini_key_status}, source_file={source_file}")
-
     if not (text or "").strip() and source_file is None:
         return ModuleResult(
             name="contextual_logic",
@@ -301,7 +359,6 @@ def analyze_contextual(
 def _run(
     text: str, doc_meta: dict[str, Any], source_file: Path | None
 ) -> tuple[list[Finding], dict[str, Any]]:
-    print(f"[_RUN_DEBUG] Starting contextual analysis. text_len={len(text)}, source_file={source_file}")
     entities = extract_entities(text)
     findings = check_internal_timeline(entities, doc_meta)
     claims = build_claims(entities)
@@ -323,10 +380,8 @@ def _run(
     # Tier 3: full document review. Runs first because it is the more informative of the
     # two remote calls, so a rate limit or outage does not consume the budget on claims.
     if settings.contextual_multimodal:
-        print(f"[GEMINI_CALL_DEBUG] About to call Gemini for document analysis")
         document_findings, status = _run_document_analysis(text, source_file, extras)
         findings.extend(document_findings)
-        print(f"[GEMINI_RESPONSE_DEBUG] Findings generated: {len(findings)}")
         extras["document_analysis"] = status
     else:
         extras["document_analysis"] = "disabled"
@@ -369,12 +424,33 @@ def extract_entities(text: str) -> Entities:
         if name:
             entities.organizations.append(Mention(text=name, kind="organization", start=match.start()))
 
+    for match in KNOWN_ISSUER_RE.finditer(window):
+        name = _canonical_issuer(match.group(1))
+        entities.organizations.append(Mention(text=name, kind="organization", start=match.start()))
+
     for match in LOCATION_RE.finditer(window):
         city = _clean_city(match.group(1))
         if not city:
             continue
         entities.locations.append(
             Mention(text=f"{city}, {match.group(2)}", kind="location", start=match.start())
+        )
+
+    # Scanned utility bills often glue city and state ("BROOKLYNNY") without a comma.
+    for match in re.finditer(
+        rf"\b(Brooklyn|Queens|Bronx|Manhattan|Staten[ \t]?Island|Aventura|Miami|Dallas|"
+        rf"Houston|Chicago|Boston|Philadelphia|Baltimore|Newark)[ \t,]*({STATE_ABBR})\b",
+        window,
+        re.I,
+    ):
+        raw_city = re.sub(r"\s+", " ", match.group(1)).strip()
+        city = "Staten Island" if raw_city.lower().startswith("staten") else raw_city.title()
+        entities.locations.append(
+            Mention(text=f"{city}, {match.group(2).upper()}", kind="location", start=match.start())
+        )
+    for match in re.finditer(r"\b(BROOKLYN)(NY)\b", window, re.I):
+        entities.locations.append(
+            Mention(text="Brooklyn, NY", kind="location", start=match.start())
         )
 
     seen_spans: set[int] = set()
@@ -390,6 +466,23 @@ def extract_entities(text: str) -> Entities:
                 Mention(text=match.group(1), kind="date", start=match.start(), normalized=iso)
             )
 
+    # Compact statement dates common on utility bills: "Apr 07 '07" / "Apr.16, 2007"
+    for match in re.finditer(
+        r"\b((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2}"
+        r"(?:,|\s+)?\s*(?:'\d{2}|\d{4}|\d{2}))\b",
+        window,
+        re.I,
+    ):
+        if match.start() in seen_spans:
+            continue
+        iso = _normalize_date(match.group(1))
+        if not iso:
+            continue
+        seen_spans.add(match.start())
+        entities.dates.append(
+            Mention(text=match.group(1), kind="date", start=match.start(), normalized=iso)
+        )
+
     return entities
 
 
@@ -399,7 +492,8 @@ def build_claims(entities: Entities) -> list[Claim]:
     The location is the one nearest that organization's own mention rather than nearest
     the date, which otherwise attaches a party to the counterparty's address. The date is
     the earliest mentioned near any occurrence of the organization, since the earliest date
-    is what a not-yet-existing entity would contradict.
+    is what a not-yet-existing entity would contradict. If no date is nearby (common on
+    multi-page scanned exhibits), fall back to the earliest body date in the file.
     """
     by_org: dict[str, list[Mention]] = {}
     for mention in entities.organizations:
@@ -407,25 +501,46 @@ def build_claims(entities: Entities) -> list[Claim]:
 
     claims: list[Claim] = []
     seen: set[str] = set()
+    body_dates = [d for d in entities.dates if d.normalized]
 
     for name, mentions in by_org.items():
+        if name.lower() in ORG_STOPWORDS or name.lower() == "account services":
+            continue
         anchor = mentions[0]
         location = _nearest(entities.locations, anchor.start)
+        if name in NY_MARKET_ISSUERS:
+            ny_locs = [loc for loc in entities.locations if loc.text.upper().endswith(", NY")]
+            if ny_locs:
+                location = _nearest(ny_locs, anchor.start)
+            elif location and not location.text.upper().endswith(", NY"):
+                # Do not ask whether a NY utility served Aventura, FL.
+                location = None
         nearby = [
             d
-            for d in entities.dates
-            if d.normalized
-            and any(abs(d.start - m.start) <= settings.contextual_window for m in mentions)
+            for d in body_dates
+            if any(abs(d.start - m.start) <= settings.contextual_window * 3 for m in mentions)
         ]
+        if not nearby and body_dates:
+            nearby = list(body_dates)
         if not nearby:
             continue
-        date = min(nearby, key=lambda d: d.normalized or "")
+        # Prefer statement-era dates over the NYSCEF / clerk filing stamp.
+        era = [d for d in nearby if (d.normalized or "") < "2020-01-01"]
+        date = min(era or nearby, key=lambda d: d.normalized or "")
 
         place = location.text if location else None
+        if place is None and name in NY_MARKET_ISSUERS:
+            brooklyn = next(
+                (loc for loc in entities.locations if "brooklyn" in loc.text.lower()),
+                None,
+            )
+            if brooklyn:
+                place = brooklyn.text
         if place:
             question = (
-                f'Was the organization "{name}" in operation, and present at '
-                f"{place}, on {date.normalized}?"
+                f'Was the organization "{name}" authorized to issue residential utility or '
+                f"banking statements for customers at {place} on {date.normalized}? "
+                f"In particular, was it operating in that city/market on that date?"
             )
         else:
             question = f'Was the organization "{name}" in operation on {date.normalized}?'
@@ -530,7 +645,6 @@ def analyze_document(
     if file_base64 and mime_type:
         parts.append({"inline_data": {"mime_type": mime_type, "data": file_base64}})
 
-    print(f"[DOC_ANALYSIS_PROMPT_DEBUG] About to call Gemini with {len(parts)} parts, mime_type={mime_type}")
     body = _post_gemini(
         {
             "contents": [{"role": "user", "parts": parts}],
@@ -542,7 +656,6 @@ def analyze_document(
         },
         timeout=settings.gemini_document_timeout_s,
     )
-    print(f"[DOC_ANALYSIS_RESPONSE_DEBUG] Received response from Gemini: {str(body)[:500]}")
     parsed = _parse_json_payload(body)
     raw_findings = parsed.get("findings")
     if not isinstance(raw_findings, list):
@@ -566,7 +679,6 @@ def _run_document_analysis(
     file_base64, mime_type, note = _encode_source_file(source_file)
     if note:
         extras["document_analysis_note"] = note
-    print(f"[DOC_ANALYSIS_DEBUG] source_file={source_file}, mime_type={mime_type}, text length: {len(text)}")
 
     if file_base64 is None and not (text or "").strip():
         return [], "no_content"
@@ -694,6 +806,8 @@ ANALYSIS_TITLES = {
     "graphic_manipulation": "Possible graphic manipulation",
     "font_mismatch": "Font or type mismatch",
     "logical_inconsistency": "Internal inconsistency",
+    "spelling_anomaly": "Spelling or name anomaly",
+    "historical_impossibility": "Historical / market timeline conflict",
 }
 
 # The model may propose any severity; nothing it reports is allowed above medium.
@@ -829,6 +943,27 @@ def _verification_unavailable(exc: Exception, stage: str = "fact verification") 
         why_suspicious="Not an authenticity issue; it records a gap in coverage for the audit trail.",
         confidence=0,
     )
+
+
+def _canonical_issuer(raw: str) -> str:
+    lowered = re.sub(r"\s+", " ", raw).strip().lower()
+    aliases = {
+        "nationalgrid": "National Grid",
+        "national grid": "National Grid",
+        "citi bank": "Citibank",
+        "citibank": "Citibank",
+        "verizon": "Verizon",
+        "keyspan": "KeySpan",
+        "con edison": "Con Edison",
+        "bank of america": "Bank of America",
+        "wells fargo": "Wells Fargo",
+        "capital one": "Capital One",
+        "jp morgan": "JPMorgan",
+        "jpmorgan": "JPMorgan",
+        "at&t": "AT&T",
+        "t-mobile": "T-Mobile",
+    }
+    return aliases.get(lowered, raw.strip().title())
 
 
 def _clean_org(raw: str) -> str | None:

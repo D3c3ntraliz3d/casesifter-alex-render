@@ -341,6 +341,7 @@ function ReportViewer({ job, report, findings, tab, setTab, onReset }) {
 
 function FindingCard({ item }) {
   const heat = item.evidence?.heatmap;
+  const aiLead = Boolean(item.evidence?.ai_generated);
   return (
     <article className="finding">
       <header>
@@ -350,6 +351,12 @@ function FindingCard({ item }) {
       <p className="footnote">{CATEGORY[item.category] || item.category}{item.page ? ` · page ${item.page}` : ""}</p>
       <p>{item.explanation}</p>
       <p className="why">{item.why_suspicious}</p>
+      {aiLead && (
+        <p className="ai-lead">
+          <strong>AI-Assisted Research Lead:</strong> This finding is based on an automated
+          model review, not definitive evidence. Verify independently before relying on it.
+        </p>
+      )}
       {item.recommended_action && <p><strong>Suggested next step:</strong> {item.recommended_action}</p>}
       <div className="conf"><span style={{ width: `${item.confidence}%` }} /></div>
       {heat && <img className="heatmap" src={heat} alt="Forensic overlay" />}

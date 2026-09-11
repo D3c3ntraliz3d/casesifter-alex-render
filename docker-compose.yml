@@ -3,8 +3,14 @@ services:
     build: ./backend
     ports:
       - "8000:8000"
+    env_file:
+      - .env
     environment:
       MAX_FILE_MB: "100"
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.6-flash}
+      CONTEXTUAL_MULTIMODAL: ${CONTEXTUAL_MULTIMODAL:-false}
+      CONTEXTUAL_MAX_UPLOAD_MB: ${CONTEXTUAL_MAX_UPLOAD_MB:-15}
     volumes:
       - exhibit-data:/app/data
     restart: unless-stopped
