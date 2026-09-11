@@ -30,6 +30,7 @@ import base64
 import hashlib
 import io
 import json
+import logging
 import re
 import urllib.error
 import urllib.request
@@ -45,6 +46,8 @@ if TYPE_CHECKING:
 from app.config import settings
 from app.engines import finding, timed_module
 from app.models import Finding, ModuleResult
+
+logger = logging.getLogger(__name__)
 
 ORG_SUFFIXES = (
     r"Inc|Incorporated|LLC|L\.L\.C|LLP|L\.L\.P|LP|PLLC|PC|P\.C|Corp|Corporation|"
@@ -273,6 +276,14 @@ def analyze_contextual(
     ``pages`` are page images already rendered by the pipeline. They are used only for
     tier-3 document analysis and are ignored unless CONTEXTUAL_MULTIMODAL is enabled.
     """
+    # Debug logging: check configuration at entry
+    gemini_key_status = "set" if settings.gemini_api_key else "empty"
+    num_pages = len(pages or [])
+    logger.debug(
+        f"analyze_contextual called: contextual_multimodal={settings.contextual_multimodal}, "
+        f"gemini_api_key={gemini_key_status}, pages_received={num_pages}"
+    )
+    
     if not (text or "").strip() and not pages:
         return ModuleResult(
             name="contextual_logic",
