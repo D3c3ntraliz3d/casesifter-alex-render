@@ -79,19 +79,7 @@ def _run(path: Path) -> tuple[list[Finding], dict[str, Any]]:
         )
 
     if javascript:
-        findings.append(
-            finding(
-                fid="pdf-javascript",
-                category="pdf_structure",
-                severity="high",
-                title="PDF contains JavaScript or an automatic action",
-                explanation="Embedded scripts or open-actions can change what a viewer displays versus what is printed or extracted.",
-                why_suspicious="Scripts have no place in a typical court exhibit and can hide or swap content.",
-                confidence=88,
-                evidence={"details": javascript},
-                recommended_action="Open the file in a JavaScript-disabled viewer and print to PDF before relying on it.",
-            )
-        )
+        findings.append(_javascript_finding(javascript, native_vs_scan))
 
     if embedded:
         findings.append(
@@ -229,6 +217,98 @@ def _has_javascript(catalog, raw: bytes) -> dict[str, Any] | None:
     return hits or None
 
 
+def _javascript_finding(javascript: dict[str, Any], origin: dict[str, Any]) -> Finding:
+    """Severity depends on whether the exhibit looks scanned vs digitally born.
+
+    Scanned court exhibits often pick up /OpenAction or /JS tokens from e-filing or
+    scanner software. That is a container note, not evidence someone altered the
+    photographed page. Digitally born PDFs with a real JavaScript name tree are
+    treated more seriously.
+    """
+    scan_heavy = bool(origin.get("scan_heavy"))
+    strong_js = bool(javascript.get("names_javascript") or javascript.get("raw_javascript_token"))
+    evidence = {
+        "details": javascript,
+        "scan_heavy": scan_heavy,
+        "origin_guess": origin.get("guess"),
+        "raster_pages": origin.get("raster_pages"),
+    }
+
+    if scan_heavy:
+        return finding(
+            fid="pdf-javascript",
+            category="pdf_structure",
+            severity="info",
+            title="PDF container has an automatic action or script token",
+            explanation=(
+                "This file looks like a scan of printed pages (most pages contain embedded "
+                "page images) and also has a PDF automatic-action or JavaScript token. "
+                "That combination is common after scanning, merging, or e-filing tools. "
+                "It is unlikely to change the photographed statement content itself, though "
+                "a viewer could still run an action when the file is opened."
+            ),
+            why_suspicious=(
+                "Not primary evidence of alteration on the scanned page. It records that the "
+                "PDF wrapper is interactive or tool-processed."
+            ),
+            confidence=35,
+            evidence=evidence,
+            recommended_action=(
+                "Treat as a container note. If you need to rule out viewer tricks, open the "
+                "file in a JavaScript-disabled viewer or print to a flat PDF and compare."
+            ),
+        )
+
+    if strong_js:
+        return finding(
+            fid="pdf-javascript",
+            category="pdf_structure",
+            severity="high",
+            title="PDF contains JavaScript or an automatic action",
+            explanation=(
+                "This digitally born PDF includes JavaScript and/or automatic actions that can "
+                "change what a viewer displays versus what is printed or extracted."
+            ),
+            why_suspicious="Scripts have no place in a typical court exhibit and can hide or swap content.",
+            confidence=88,
+            evidence=evidence,
+            recommended_action="Open the file in a JavaScript-disabled viewer and print to PDF before relying on it.",
+        )
+
+    return finding(
+        fid="pdf-javascript",
+        category="pdf_structure",
+        severity="medium",
+        title="PDF has an automatic open-action",
+        explanation=(
+            "The PDF catalog declares an open-action or additional action. That can change "
+            "initial view behavior; it is less definitive than an embedded JavaScript name tree."
+        ),
+        why_suspicious="Automatic actions are uncommon on clean exhibit PDFs and deserve a quick check.",
+        confidence=62,
+        evidence=evidence,
+        recommended_action="Open in a JavaScript-disabled viewer and confirm the visible pages match a printed copy.",
+    )
+
+
+def _page_has_raster_image(page) -> bool:
+    """True when the page embeds at least one Image XObject (typical of a scan)."""
+    try:
+        resources = page.get("/Resources")
+        resources = resources.get_object() if isinstance(resources, IndirectObject) else resources
+        xobj = resources.get("/XObject") if isinstance(resources, DictionaryObject) else None
+        xobj = xobj.get_object() if isinstance(xobj, IndirectObject) else xobj
+        if not isinstance(xobj, DictionaryObject):
+            return False
+        for _name, ref in xobj.items():
+            obj = ref.get_object() if isinstance(ref, IndirectObject) else ref
+            if isinstance(obj, DictionaryObject) and obj.get("/Subtype") == "/Image":
+                return True
+    except Exception:
+        return False
+    return False
+
+
 def _list_embedded(reader) -> list[str]:
     names: list[str] = []
     try:
@@ -313,12 +393,16 @@ def _annotations(reader) -> dict[str, Any]:
 def _native_or_image_pdf(reader) -> dict[str, Any]:
     image_pages = 0
     text_pages = 0
+    raster_pages = 0
     for page in reader.pages:
         try:
             text = page.extract_text() or ""
         except Exception:
             text = ""
         has_text = len(text.strip()) > 30
+        has_raster = _page_has_raster_image(page)
+        if has_raster:
+            raster_pages += 1
         has_xobject = False
         try:
             resources = page.get("/Resources")
@@ -340,9 +424,13 @@ def _native_or_image_pdf(reader) -> dict[str, Any]:
         guess = "hybrid"
     else:
         guess = "native-text"
+    # OCR'd scans still embed page images, so raster share is the reliable scan signal.
+    scan_heavy = raster_pages / total >= 0.5 or guess == "image-only"
     return {
         "guess": guess,
         "pages": len(reader.pages),
         "image_pages": image_pages,
         "text_pages": text_pages,
+        "raster_pages": raster_pages,
+        "scan_heavy": scan_heavy,
     }
