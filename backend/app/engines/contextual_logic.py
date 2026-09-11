@@ -55,8 +55,8 @@ ORG_RE = re.compile(
 )
 
 # Banks and utilities often appear without LLC/Inc suffixes, so the suffix regex misses them.
-# Matching these known exhibit issuers unlocks tier-2 public-record questions (e.g. whether
-# National Grid served Brooklyn before the KeySpan acquisition).
+# Matching known exhibit issuers unlocks tier-2 public-record questions
+# (was issuer X operating at place Y on date Z?) without asserting any market-entry fact.
 KNOWN_ISSUERS = (
     "National Grid",
     "Nationalgrid",
@@ -234,8 +234,8 @@ the attached file and extracted text for ANY signs of document manipulation, for
 inconsistency. Do not give the document the benefit of the doubt.
 
 CRITICAL — multi-statement exhibits:
-This PDF may contain several distinct statements (for example Citibank, National Grid, and
-Verizon) stapled as one exhibit. Review EVERY page and EVERY distinct statement separately.
+This PDF may contain several distinct statements (bank, utility, telecom, or similar)
+stapled as one exhibit. Review EVERY page and EVERY distinct statement separately.
 Do NOT stop after finding issues on one statement. Report every distinct issue on every
 statement that has one. An exhibit with three forged statements should produce findings for
 all three, not only the most obvious page.
@@ -249,8 +249,8 @@ Examine:
 2. math_error — arithmetic that does not add up on ANY statement: line items that do not sum
    to the stated subtotal, a tax or discount that does not match the stated rate, a balance
    that is not total minus payments, running balances that skip, opening balance plus credits
-   minus debits that do not equal the closing balance. Check bank statements (Citibank, Chase,
-   etc.) as carefully as utility bills. State the numbers you used.
+   minus debits that do not equal the closing balance. Check bank statements as carefully as
+   utility bills. State the numbers you used.
 3. text_overlay — text that appears pasted over other content: misaligned baselines,
    different background tone behind a value, a figure or name that sits at a different
    angle or weight than its row, visible patching around an amount.
@@ -262,21 +262,18 @@ Examine:
    named inconsistently, a total described in words that differs from the numeral, terms
    that reference an attachment that is absent).
 7. spelling_anomaly — a place name, party name, or branded field that is misspelled in a way
-   an authentic issuer statement would not print (for example "AVNTURA" instead of
-   "Aventura"). Distinguish this from ordinary OCR garbling of an otherwise correct image:
-   only flag when the letters on the page themselves spell the wrong word.
+   an authentic issuer statement would not print (letters on the page spell the wrong word,
+   not ordinary OCR garbling of a correctly printed word).
 8. historical_impossibility — a well-established public fact makes the statement impossible
    as a contemporaneous record: the named issuer did not yet serve that city/market on that
-   statement date, the company did not exist yet, or had already exited that market. Example:
-   a National Grid residential bill for Brooklyn dated before National Grid acquired KeySpan
-   and entered the NYC market (August 2007). Use only well-established public facts; if unsure,
-   omit rather than guess.
+   statement date, the company did not exist yet, or had already exited that market. Use only
+   well-established public facts; if unsure, omit rather than guess.
 
 Rules you must follow:
 - Report nothing unless you can cite the specific page and the specific text or region.
   Put the exact words or numbers in "quoted_evidence".
 - Name the issuer in the title when the exhibit has more than one statement
-  (e.g. "Citibank math error on page 3", "National Grid market timeline on page 4").
+  (e.g. "Bank statement math error on page 2", "Utility market timeline on page 4").
 - Return an empty "findings" array ONLY when every page and every statement looks ordinary.
   Empty is correct for a clean document; it is incorrect when other statements still have
   unresolved issues.

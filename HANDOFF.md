@@ -19,7 +19,7 @@ Court Exhibit Scanner — automated indicators of document alteration for court 
 
 - **Tier 1 — Local forensics** (metadata, PDF integrity, structural, image forensics, OCR/text, plus local entity/timeline checks in contextual): **WORKING**
 - **Tier 2 — Entity timeline verification via Gemini** (questions only, no document content): **BUILT and exercised** on real jobs; never positively confirmed with a contradiction finding on the bank/utility exhibit (`external_verification: no_claims`)
-- **Tier 3 — Comprehensive document analysis via Gemini**: **WORKING** on multi-statement exhibits. Job `97178e25ee914adf82c96338dbc05c50` on Exhibit S returned Citibank spelling (`AVNTURA`), National Grid market timeline (pre-KeySpan Brooklyn), National Grid math, Verizon date + math, plus a tier-2 National Grid public-record contradiction. Remaining gap vs Gemini web: Citibank arithmetic is still intermittent.
+- **Tier 3 — Comprehensive document analysis via Gemini**: **WORKING** on multi-statement exhibits. After removing National Grid/KeySpan/Brooklyn prompt priming (job `67e297f11e96462e92ac876343daf7a4`), tier 3 still found Verizon date issues and National Grid math, but **did not** emit `historical_impossibility` — that category had been prompt-coached. Tier 2 still returned a National Grid Brooklyn public-record contradiction when asked the generic “operating in that market on that date?” claim (no KeySpan dates in the prompt). Citibank spelling/math remain intermittent vs Gemini web.
 
 ---
 
