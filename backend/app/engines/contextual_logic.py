@@ -294,6 +294,7 @@ def analyze_contextual(
 def _run(
     text: str, doc_meta: dict[str, Any], pages: list["PILImage"]
 ) -> tuple[list[Finding], dict[str, Any]]:
+    print(f"[_RUN_DEBUG] Starting contextual analysis. text_len={len(text)}, pages={len(pages)}")
     entities = extract_entities(text)
     findings = check_internal_timeline(entities, doc_meta)
     claims = build_claims(entities)
@@ -315,8 +316,10 @@ def _run(
     # Tier 3: full document review. Runs first because it is the more informative of the
     # two remote calls, so a rate limit or outage does not consume the budget on claims.
     if settings.contextual_multimodal:
+        print(f"[GEMINI_CALL_DEBUG] About to call Gemini for document analysis")
         document_findings, status = _run_document_analysis(text, pages, extras)
         findings.extend(document_findings)
+        print(f"[GEMINI_RESPONSE_DEBUG] Findings generated: {len(findings)}")
         extras["document_analysis"] = status
     else:
         extras["document_analysis"] = "disabled"
