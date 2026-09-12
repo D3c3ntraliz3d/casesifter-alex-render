@@ -328,3 +328,54 @@ table.data select {
   margin: 16px 0;
   font-size: 14px;
 }
+
+.risk-summary {
+  display: grid;
+  gap: 10px;
+}
+.risk-drop {
+  border: 1px solid var(--line);
+  background: #fffcf7;
+  padding: 0;
+}
+.risk-drop > summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  user-select: none;
+}
+.risk-drop > summary::-webkit-details-marker { display: none; }
+.risk-drop[open] > summary { border-bottom: 1px solid var(--line); }
+.risk-chip {
+  font-size: 13px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+}
+.risk-chip.red { color: var(--red); background: var(--red-bg); border-color: #e2b4b4; }
+.risk-chip.yellow { color: var(--yellow); background: var(--yellow-bg); border-color: #e2d4a4; }
+.risk-chip.green { color: var(--green); background: var(--green-bg); border-color: #b7d4c2; }
+.risk-count {
+  min-width: 2rem;
+  text-align: center;
+  font-family: "Libre Baskerville", Georgia, serif;
+  font-size: 20px;
+  color: var(--navy);
+}
+.risk-links {
+  list-style: none;
+  margin: 0;
+  padding: 8px 14px 12px;
+  display: grid;
+  gap: 8px;
+}
+.risk-links li {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}

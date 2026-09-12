@@ -406,6 +406,13 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
     }
   }
 
+  const scanned = docs.filter((d) => d.status === "complete" && d.risk_level);
+  const byRisk = {
+    red: scanned.filter((d) => d.risk_level === "red"),
+    yellow: scanned.filter((d) => d.risk_level === "yellow"),
+    green: scanned.filter((d) => d.risk_level === "green"),
+  };
+
   return (
     <>
       <div className="card">
@@ -452,6 +459,12 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
           Set the Kind column before re-scanning if auto-detect was wrong.
         </p>
       </div>
+
+      <CaseRiskSummary
+        byRisk={byRisk}
+        pendingCount={docs.filter((d) => d.status !== "complete").length}
+        onOpenReport={onOpenReport}
+      />
 
       <div className="card">
         <div className="row" style={{ justifyContent: "space-between", marginBottom: 12 }}>
@@ -549,6 +562,52 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
         </table>
       </div>
     </>
+  );
+}
+
+function CaseRiskSummary({ byRisk, pendingCount, onOpenReport }) {
+  const groups = [
+    { key: "red", label: "High risk", docs: byRisk.red },
+    { key: "yellow", label: "Moderate risk", docs: byRisk.yellow },
+    { key: "green", label: "Low risk", docs: byRisk.green },
+  ];
+
+  return (
+    <div className="card">
+      <p className="kicker">Case summary</p>
+      <h2 className="serif" style={{ margin: "4px 0 8px" }}>Reports by risk</h2>
+      <p className="footnote" style={{ marginBottom: 14 }}>
+        Open a group to jump straight to a document report.
+        {pendingCount > 0 ? ` ${pendingCount} file(s) still scanning or not yet complete.` : ""}
+      </p>
+      <div className="risk-summary">
+        {groups.map((group) => (
+          <details key={group.key} className={`risk-drop risk-${group.key}`} open={group.key === "red" && group.docs.length > 0}>
+            <summary>
+              <span className={`risk-chip ${group.key}`}>{group.label}</span>
+              <span className="risk-count">{group.docs.length}</span>
+            </summary>
+            {group.docs.length === 0 ? (
+              <p className="footnote" style={{ margin: "8px 0 0" }}>No reports in this band yet.</p>
+            ) : (
+              <ul className="risk-links">
+                {group.docs.map((doc) => (
+                  <li key={doc.id}>
+                    <button type="button" className="linkish" onClick={() => onOpenReport(doc)}>
+                      {doc.display_name || doc.original_filename}
+                    </button>
+                    <span className="footnote">
+                      {doc.doc_kind || "untyped"}
+                      {doc.risk_score != null ? ` · score ${doc.risk_score}` : ""}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </details>
+        ))}
+      </div>
+    </div>
   );
 }
 
