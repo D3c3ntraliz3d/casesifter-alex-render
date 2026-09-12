@@ -21,6 +21,16 @@ from app.config import settings
 from app.engines import finding
 from app.engines.contextual_logic import _generation_config, _parse_json_payload, _post_gemini
 from app.models import Finding
+from app.evidence_tier import (
+    TIER_ADVOCACY,
+    TIER_EVIDENCE,
+    claim_tier,
+    classify_tier,
+    counter_label,
+    evidence_is_probative,
+    find_internal_evidence_defects,
+    is_self_undercut,
+)
 from app.scan_profile import COURT_FILING_KINDS
 
 CONTRADICTION_TYPES = (
@@ -209,9 +219,10 @@ VERIFY_SCHEMA = {
 }
 
 CANDIDATE_PROMPT = """Propose candidate claim/evidence pairs from any practice area.
-A claim is a factual assertion by a party, witness, or counsel. Evidence is
-another statement or record about a discrete fact. Do not assign a final
-gotcha label. Do not use practice-area templates. Quote only from the text.
+A claim is a factual assertion by a party, witness, or counsel. Evidence must be
+a sworn, documentary, or entered-court record about a discrete fact — not another
+motion, brief, proposed order, or attorney affirmation. Two opposing arguments
+are not a pair. Do not assign a final gotcha label. Quote only from the text.
 
 Claims:
 {claims}
@@ -234,6 +245,9 @@ If any step is uncertain, fail that step. Prefer reject over accept.
    contested issue, or damages. Reject incidental details.
 4. TEXTUAL GROUNDING — every step must be in the two quotes. If you need
    unstated context, fail this step.
+5. EVIDENCE, NOT ADVOCACY — fail the pair if the counter-quote is only another
+   party's argument (a motion, proposed order, or attorney affirmation) rather
+   than a sworn or documentary record.
 
 contradiction_type must be one of: factual_contradiction, chronology_inconsistency,
 material_omission, procedural_foundational, admission_against_interest.
@@ -258,7 +272,7 @@ def find_gotchas(
     is_filing = (doc_kind or "").lower() in COURT_FILING_KINDS
 
     if is_filing:
-        claims = extract_claims(text, display_name, document_id)
+        claims = extract_claims(text, display_name, document_id, doc_kind=doc_kind)
         evidence = retrieve_evidence(others, snaps, claims)
     else:
         claims = []
@@ -271,6 +285,7 @@ def find_gotchas(
                     excerpt,
                     doc.get("display_name") or doc.get("original_filename") or "",
                     doc["id"],
+                    doc_kind=doc.get("doc_kind"),
                 )
             )
         this_doc = next((doc for doc in docs if doc["id"] == document_id), None)
@@ -282,20 +297,42 @@ def find_gotchas(
         )
 
     empty = {"candidates": 0, "accepted": 0, "rejected": []}
-    if not claims or not evidence:
+    internals = find_internal_evidence_defects(
+        text=text,
+        source=display_name,
+        document_id=document_id,
+        doc_kind=doc_kind,
+    )
+    if not claims and not internals:
+        return [], empty
+    if not evidence and not internals:
         return [], empty
 
-    candidates = propose_candidates(claims, evidence)
-    accepted, rejected = verify_candidates(candidates)
-    findings = [_to_finding(item) for item in accepted[:6] if _shippable(item)]
+    candidates = propose_candidates(claims, evidence) if claims and evidence else []
+    accepted, rejected = verify_candidates(candidates, case_docs=docs)
+    for item in internals:
+        accepted.append(
+            {
+                **item,
+                "contradiction_type": "chronology_inconsistency",
+                "verification": _force_internal_pass(item),
+            }
+        )
+    findings = [_to_finding(item, case_docs=docs) for item in accepted[:6] if _shippable(item, docs)]
     return findings, {
-        "candidates": len(candidates),
+        "candidates": len(candidates) + len(internals),
         "accepted": len(findings),
         "rejected": rejected,
     }
 
 
-def extract_claims(text: str, source: str, document_id: str, limit: int = 12) -> list[dict[str, Any]]:
+def extract_claims(
+    text: str,
+    source: str,
+    document_id: str,
+    limit: int = 12,
+    doc_kind: str | None = None,
+) -> list[dict[str, Any]]:
     claims: list[dict[str, Any]] = []
     seen: set[str] = set()
     for sentence in _sentences(text):
@@ -305,7 +342,14 @@ def extract_claims(text: str, source: str, document_id: str, limit: int = 12) ->
         if key in seen:
             continue
         seen.add(key)
-        claims.append({"quote": sentence.strip()[:400], "source": source, "document_id": document_id})
+        claims.append(
+            {
+                "quote": sentence.strip()[:400],
+                "source": source,
+                "document_id": document_id,
+                "doc_kind": doc_kind,
+            }
+        )
         if len(claims) >= limit:
             break
     return claims
@@ -326,6 +370,8 @@ def retrieve_evidence(
         text = (snaps.get(doc["id"]) or {}).get("text_excerpt") or ""
         if not text and fallback_text:
             text = fallback_text
+        if classify_tier(doc, text, doc.get("display_name") or "", doc.get("doc_kind")) != TIER_EVIDENCE:
+            continue
         snippets = _snippets(text, tokens)
         if not snippets:
             continue
@@ -333,6 +379,8 @@ def retrieve_evidence(
             {
                 "source": doc.get("display_name") or doc.get("original_filename"),
                 "document_id": doc["id"],
+                "doc_kind": doc.get("doc_kind"),
+                "tier": TIER_EVIDENCE,
                 "snippets": snippets[:3],
             }
         )
@@ -360,11 +408,26 @@ def propose_candidates(
     return usable[:12]
 
 
-def verify_candidates(candidates: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def verify_candidates(
+    candidates: list[dict[str, Any]],
+    case_docs: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     accepted: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     model_results = _ask_verify(candidates) if settings.gemini_api_key and candidates else {}
     for idx, candidate in enumerate(candidates):
+        if not evidence_is_probative(candidate, case_docs):
+            rejected.append(
+                _reject_record(
+                    candidate,
+                    {
+                        "pass": False,
+                        "failed_step": "evidence_tier",
+                        "gate": "advocacy_not_evidence",
+                    },
+                )
+            )
+            continue
         local = verify_pair(candidate)
         verdict = merge_verdicts(candidate, local, model_results.get(idx))
         record = {**candidate, "verification": verdict}
@@ -565,9 +628,12 @@ def _token_candidates(claims: list[dict[str, Any]], evidence: list[dict[str, Any
                         "claim_quote": quote,
                         "claim_source": claim["source"],
                         "claim_document_id": claim.get("document_id"),
+                        "claim_kind": claim.get("doc_kind"),
                         "evidence_quote": snippet[:320],
                         "evidence_source": item["source"],
                         "document_id": item.get("document_id"),
+                        "evidence_kind": item.get("doc_kind"),
+                        "evidence_tier": item.get("tier") or TIER_EVIDENCE,
                         "why_it_may_matter": "",
                     }
                 )
@@ -631,37 +697,59 @@ def _ask_verify(candidates: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
     return out
 
 
-def _to_finding(item: dict[str, Any]) -> Finding:
+def _to_finding(item: dict[str, Any], case_docs: list[dict[str, Any]] | None = None) -> Finding:
     vtype = _canonical_type(item.get("contradiction_type"), item.get("verification") or {}) or "factual_contradiction"
     verify = item.get("verification") or {}
     seed = f"gotcha|{item.get('claim_quote')}|{item.get('evidence_quote')}"
     fid = "ctx-gotcha-" + hashlib.sha1(seed.encode("utf-8")).hexdigest()[:10]
-    severity = "high" if vtype in {"procedural_foundational", "admission_against_interest"} else "medium"
+    ev_tier = TIER_EVIDENCE if evidence_is_probative(item, case_docs) else TIER_ADVOCACY
+    c_tier = claim_tier(item, case_docs)
+    self_hit = bool(item.get("self_undercut") or is_self_undercut(item))
+    if self_hit:
+        severity = "high"
+        confidence = 88.0
+        title = "Apparent self-contradiction"
+    elif ev_tier == TIER_EVIDENCE and c_tier == TIER_EVIDENCE:
+        severity = "high"
+        confidence = 82.0
+        title = TYPE_LABELS[vtype]
+    else:
+        severity = "medium"
+        confidence = 70.0
+        title = TYPE_LABELS[vtype]
+    if vtype in {"procedural_foundational", "admission_against_interest"} and severity != "high":
+        severity = "high"
+        confidence = max(confidence, 82.0)
     fact_named = str((verify.get("same_fact") or {}).get("fact_named") or "").strip()
     direction_reason = str((verify.get("directionality") or {}).get("reason") or "").strip()
     material_reason = str((verify.get("materiality") or {}).get("reason") or "").strip()
     attorney_why = _attorney_why(fact_named, direction_reason, material_reason, item.get("why_it_may_matter"))
+    ev_label = counter_label(ev_tier)
     return finding(
         fid=fid,
         category="gotcha",
         severity=severity,  # type: ignore[arg-type]
-        title=TYPE_LABELS[vtype],
+        title=title,
         explanation=(
             f"CLAIM ({item.get('claim_source') or 'filing'}): “{item.get('claim_quote')}” "
-            f"EVIDENCE ({item.get('evidence_source') or 'record'}): “{item.get('evidence_quote')}”"
+            f"{ev_label.upper()} ({item.get('evidence_source') or 'record'}): “{item.get('evidence_quote')}”"
         ),
         why_suspicious=attorney_why or direction_reason,
-        confidence=82.0 if severity == "high" else 70.0,
+        confidence=confidence,
         evidence={
             "gotcha": True,
             "verified": True,
-            "gotcha_level": TYPE_LABELS[vtype],
+            "gotcha_level": title,
             "contradiction_type": vtype,
             "analysis_type": "gotcha",
             "claim_quote": item.get("claim_quote"),
             "claim_source": item.get("claim_source"),
             "evidence_quote": item.get("evidence_quote"),
             "evidence_source": item.get("evidence_source"),
+            "evidence_label": ev_label,
+            "evidence_tier": ev_tier,
+            "claim_tier": c_tier,
+            "self_undercut": self_hit,
             "fact_named": fact_named,
             "direction_reason": direction_reason,
             "materiality_reason": material_reason,
@@ -696,13 +784,37 @@ def _attorney_why(
     return " ".join(parts)
 
 
-def _shippable(item: dict[str, Any]) -> bool:
+def _shippable(item: dict[str, Any], case_docs: list[dict[str, Any]] | None = None) -> bool:
     verify = item.get("verification") or {}
     if not verify.get("pass") or not _complete_pass(verify):
         return False
     if not (item.get("claim_quote") and item.get("evidence_quote")):
         return False
+    if not evidence_is_probative(item, case_docs):
+        return False
     return _canonical_type(item.get("contradiction_type"), verify) in CONTRADICTION_TYPES
+
+
+def _force_internal_pass(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "same_fact": {"pass": True, "fact_named": "stated weekday versus calendar date", "reason": "Same date is named two ways."},
+        "directionality": {
+            "pass": True,
+            "evidence_asserts": item.get("evidence_quote"),
+            "runs": "against",
+            "reason": "The calendar does not match the weekday written in the record.",
+        },
+        "materiality": {
+            "pass": True,
+            "tier": "foundation",
+            "reason": "A sworn or documentary date that names the wrong weekday is foundational.",
+        },
+        "textual_grounding": {"pass": True, "reason": "The date and weekday are in the pulled sentence."},
+        "contradiction_type": "chronology_inconsistency",
+        "pass": True,
+        "failed_step": None,
+        "gate": "internal_tier1",
+    }
 
 
 def _reject_record(candidate: dict[str, Any], verdict: dict[str, Any]) -> dict[str, Any]:

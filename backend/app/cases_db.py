@@ -274,6 +274,10 @@ def add_document(
     stored_path: str,
     sha256: str | None = None,
 ) -> dict[str, Any]:
+    from app.auto_title import uniquify_display_name
+
+    taken = [item.get("display_name") or "" for item in list_documents(case_id)]
+    display_name = uniquify_display_name(display_name, taken, original_filename)
     doc_id = uuid.uuid4().hex
     now = utcnow_iso()
     with connect() as conn:
@@ -337,8 +341,24 @@ def update_document(document_id: str, **fields: Any) -> dict[str, Any] | None:
         "risk_score",
     }
     updates = {k: v for k, v in fields.items() if k in allowed}
+    current = get_document(document_id)
+    if current is None:
+        return None
+    if "display_name" in updates:
+        from app.auto_title import uniquify_display_name
+
+        siblings = [
+            item.get("display_name") or ""
+            for item in list_documents(current["case_id"])
+            if item.get("id") != document_id
+        ]
+        updates["display_name"] = uniquify_display_name(
+            str(updates["display_name"] or ""),
+            siblings,
+            current.get("original_filename") or "",
+        )
     if not updates:
-        return get_document(document_id)
+        return current
     cols = ", ".join(f"{k} = ?" for k in updates)
     with connect() as conn:
         cur = conn.execute(
@@ -438,7 +458,9 @@ def list_prior_snapshots(case_id: str, exclude_document_id: str) -> list[dict[st
 
 def list_case_gotchas(case_id: str) -> list[dict[str, Any]]:
     from app.case_consistency import dedupe_gotchas
+    from app.evidence_tier import evidence_is_probative
 
+    docs = list_documents(case_id)
     out: list[dict[str, Any]] = []
     for snap in list_case_snapshots(case_id):
         for item in snap.get("findings_summary") or []:
@@ -446,14 +468,15 @@ def list_case_gotchas(case_id: str) -> list[dict[str, Any]]:
                 continue
             if not item.get("verified"):
                 continue
-            out.append(
-                {
-                    **item,
-                    "document_id": snap.get("document_id"),
-                    "display_name": snap.get("display_name") or snap.get("original_filename"),
-                    "scan_job_id": None,
-                }
-            )
+            record = {
+                **item,
+                "document_id": item.get("document_id") or snap.get("document_id"),
+                "display_name": snap.get("display_name") or snap.get("original_filename"),
+                "scan_job_id": None,
+            }
+            if not evidence_is_probative(record, docs):
+                continue
+            out.append(record)
     return dedupe_gotchas(out)
 
 

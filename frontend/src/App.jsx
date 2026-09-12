@@ -970,9 +970,13 @@ function CaseGotchaBoard({ caseId, documents, onOpenReport }) {
             )}
             {item.evidence_quote && (
               <p className="gotcha-quote">
-                <strong>Evidence:</strong> “{item.evidence_quote}”
+                <strong>{item.evidence_label || (item.evidence_tier === 2 ? "Opposing assertion" : "Evidence")}:</strong>{" "}
+                “{item.evidence_quote}”
                 {item.evidence_source ? ` — ${item.evidence_source}` : ""}
               </p>
+            )}
+            {item.self_undercut && (
+              <p className="footnote">This party’s own record appears to undercut their claim.</p>
             )}
             {(item.attorney_why || item.materiality_reason || item.fact_named) && (
               <p className="gotcha-why">
@@ -1801,9 +1805,13 @@ function FindingCard({ item, docKind }) {
             {item.evidence.claim_source ? ` — ${item.evidence.claim_source}` : ""}
           </p>
           <p className="gotcha-quote">
-            <strong>Evidence:</strong> “{item.evidence.evidence_quote}”
+            <strong>{item.evidence.evidence_label || "Evidence"}:</strong>{" "}
+            “{item.evidence.evidence_quote}”
             {item.evidence.evidence_source ? ` — ${item.evidence.evidence_source}` : ""}
           </p>
+          {item.evidence.self_undercut && (
+            <p className="footnote">This party’s own record appears to undercut their claim.</p>
+          )}
         </>
       ) : (
         <p>{item.explanation}</p>

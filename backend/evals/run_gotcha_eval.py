@@ -7,6 +7,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from app.case_consistency import aggregate_fact_conflicts, dedupe_gotchas
+from app.evidence_tier import classify_tier, evidence_is_probative, find_internal_evidence_defects
 from app.gotcha import (
     RETIRED_TYPES,
     _token_candidates,
@@ -33,8 +34,8 @@ def evaluate_pairs() -> dict:
         name = area["area"]
         for pair in area["pairs"]:
             verdict = verify_pair(pair)
-            flagged = bool(verdict.get("pass"))
-            failed = verdict.get("failed_step")
+            flagged = bool(verdict.get("pass")) and evidence_is_probative(pair)
+            failed = None if flagged else (verdict.get("failed_step") if not verdict.get("pass") else "evidence_tier")
             expected = pair.get("expect_fail")
             ok = (pair["label"] == "tp" and flagged) or (pair["label"] == "fp" and not flagged)
             stats = by_area[name]
@@ -207,6 +208,42 @@ def score_independence() -> dict:
     }
 
 
+def evaluate_tiers() -> dict:
+    motion_vs_motion = evidence_is_probative(
+        {
+            "claim_kind": "motion",
+            "evidence_kind": "motion",
+            "evidence_quote": "The process server did not attempt service at 1739 46th Street.",
+            "evidence_source": "Motion to Dismiss",
+        }
+    )
+    proposed = classify_tier(
+        {"doc_kind": "order", "display_name": "Proposed Order"},
+        "Defendants were duly served as recited in this proposed order.",
+        "Proposed Order",
+        "order",
+    )
+    aos = classify_tier(
+        {"doc_kind": "affidavit", "display_name": "Affidavit of Service"},
+        "sworn to before a notary",
+        "Affidavit of Service",
+        "affidavit",
+    )
+    internals = find_internal_evidence_defects(
+        text="I served Jane Doe on Monday, March 3, 2024 at 6:15 p.m. at 5616 14th Avenue.",
+        source="Affidavit of Service",
+        document_id="aos-1",
+        doc_kind="affidavit",
+    )
+    return {
+        "motion_vs_motion_blocked": motion_vs_motion is False,
+        "proposed_order_is_advocacy": proposed == 2,
+        "affidavit_of_service_is_evidence": aos == 1,
+        "weekday_internal_hit": len(internals) == 1,
+        "all_pass": False,
+    }
+
+
 def evaluate_dedupe() -> dict:
     snaps = [
         {
@@ -256,12 +293,15 @@ def evaluate_dedupe() -> dict:
 def evaluate() -> dict:
     dedupe = evaluate_dedupe()
     dedupe["all_pass"] = all(dedupe[key] for key in dedupe if key != "all_pass")
+    tiers = evaluate_tiers()
+    tiers["all_pass"] = all(tiers[key] for key in tiers if key != "all_pass")
     return {
         "pairs": evaluate_pairs(),
         "pipeline": evaluate_pipeline(),
         "unverified_paths": evaluate_unverified_paths(),
         "score_independence": score_independence(),
         "dedupe": dedupe,
+        "tiers": tiers,
     }
 
 
@@ -281,7 +321,14 @@ def main() -> None:
     print("UNVERIFIED PATHS", result["unverified_paths"])
     print("SCORE INDEPENDENCE", result["score_independence"])
     print("DEDUPE", result["dedupe"])
-    failed = bool(misses or pipe["misses"] or not result["unverified_paths"]["all_pass"] or not result["dedupe"]["all_pass"])
+    print("TIERS", result["tiers"])
+    failed = bool(
+        misses
+        or pipe["misses"]
+        or not result["unverified_paths"]["all_pass"]
+        or not result["dedupe"]["all_pass"]
+        or not result["tiers"]["all_pass"]
+    )
     if not result["score_independence"]["title_does_not_matter"]:
         failed = True
     if not result["score_independence"]["unverified_does_not_score"]:

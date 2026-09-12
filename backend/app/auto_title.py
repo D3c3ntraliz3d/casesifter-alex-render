@@ -1,10 +1,9 @@
-"""Heuristics to propose a display name / document kind for an uploaded filing."""
+"""Heuristics to propose a unique display name / document kind for an uploaded filing."""
 
 from __future__ import annotations
 
 import re
 from pathlib import Path
-
 
 KIND_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
     ("complaint", re.compile(r"\b(verified\s+)?complaint\b", re.I), "Complaint"),
@@ -14,7 +13,6 @@ KIND_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
     ("order", re.compile(r"\b(order|decision\s+and\s+order)\b", re.I), "Order"),
     ("affidavit", re.compile(r"\baffidavit\b", re.I), "Affidavit"),
     ("affirmation", re.compile(r"\baffirmation\b", re.I), "Affirmation"),
-    ("exhibit", re.compile(r"\bexhibit\s*[\"']?([A-Z0-9\-]+)", re.I), "Exhibit"),
     ("letter", re.compile(r"\b(cover\s+)?letter\b", re.I), "Letter"),
     ("stipulation", re.compile(r"\bstipulation\b", re.I), "Stipulation"),
     ("transcript", re.compile(r"\b(transcript|deposition)\b", re.I), "Transcript"),
@@ -22,38 +20,173 @@ KIND_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
     ("summons", re.compile(r"\bsummons\b", re.I), "Summons"),
 ]
 
+# Filename like EXHIBIT_S__83 or Exhibit S_41 — letter plus the docket/file number.
+EXHIBIT_FILE_RE = re.compile(
+    r"(?i)(?:^|[\s_\-])exhibit[\s_\-]*"
+    r"([A-Za-z0-9]{1,4}(?:-[A-Za-z0-9]{1,3})?)"
+    r"(?:[\s_\-]+(\d{1,4}))?"
+    r"(?=$|[\s_\-.(])"
+)
+
 
 def propose_document_title(
     filename: str,
     text_sample: str = "",
 ) -> tuple[str, str | None]:
-    """Return (display_name, doc_kind) from filename + early page text."""
-    stem = Path(filename).stem
+    """Return (display_name, doc_kind). Filename wins over body text."""
+    stem = _stem(filename)
+    exhibit = exhibit_title_from_filename(filename)
+    if exhibit:
+        return _truncate(exhibit), "exhibit"
+
     cleaned = re.sub(r"[_\-]+", " ", stem)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    haystack = f"{cleaned}\n{text_sample[:4000]}"
+    # Kind may come from the file body; the visible name stays filename-based
+    # so two uploads cannot collapse to the same short label.
+    kind = _kind_from_text(f"{cleaned}\n{text_sample[:4000]}")
+    if kind == "motion":
+        motion = _motion_title(cleaned) or _motion_title(text_sample[:4000])
+        if motion:
+            return _truncate(_with_file_number(motion, stem)), "motion"
+    if kind:
+        label = {
+            "complaint": "Complaint",
+            "answer": "Answer",
+            "order": "Order",
+            "affidavit": "Affidavit",
+            "affirmation": "Affirmation",
+            "letter": "Letter",
+            "stipulation": "Stipulation",
+            "transcript": "Transcript",
+            "bill": "Statement",
+            "summons": "Summons",
+        }.get(kind, kind.title())
+        titled = _filename_title(cleaned)
+        name = titled if _keeps_file_identity(titled, stem) else f"{label} — {titled}"
+        return _truncate(_with_file_number(name, stem)), kind
 
-    for kind, pattern, label in KIND_PATTERNS:
-        match = pattern.search(haystack)
-        if not match:
-            continue
-        if kind == "motion" and match.lastindex:
-            detail = re.sub(r"\s+", " ", match.group(1)).strip(" .")
-            title = f"Motion to {detail.title()}" if detail else "Motion"
-            return _truncate(title), kind
-        if kind == "exhibit" and match.lastindex:
-            tag = match.group(1).upper()
-            return _truncate(f"Exhibit {tag}"), kind
-        # Prefer a readable label; keep distinctive stem fragments when helpful.
-        if kind == "exhibit":
-            return _truncate(f"Exhibit — {cleaned}"), kind
-        return _truncate(label if len(cleaned) < 8 else f"{label} — {cleaned}"), kind
-
-    # Filename already looks like a court-style name.
     if re.search(r"\b(exhibit|complaint|motion|affidavit)\b", cleaned, re.I):
-        return _truncate(cleaned.title() if cleaned.islower() else cleaned), None
+        return _truncate(_with_file_number(cleaned, stem)), None
 
-    return _truncate(cleaned or filename), None
+    return _truncate(_with_file_number(cleaned or filename, stem)), None
+
+
+def exhibit_title_from_filename(filename: str) -> str | None:
+    stem = _stem(filename)
+    match = EXHIBIT_FILE_RE.search(stem)
+    if not match:
+        return None
+    tag = match.group(1).upper()
+    number = match.group(2)
+    if number:
+        return f"Exhibit {tag}_{number}"
+    return f"Exhibit {tag}"
+
+
+def uniquify_display_name(
+    name: str,
+    existing: list[str] | set[str],
+    filename: str = "",
+) -> str:
+    """Guarantee a case-unique display name. Prefer the filename's S_## token."""
+    proposed = (name or "").strip() or exhibit_title_from_filename(filename) or _stem(filename) or "Untitled document"
+    exhibit = exhibit_title_from_filename(filename)
+    if exhibit:
+        proposed = exhibit
+    taken = {_norm_name(item) for item in existing if item}
+    if _norm_name(proposed) not in taken:
+        return _truncate(proposed)
+    numbered = _with_file_number(proposed, _stem(filename))
+    if _norm_name(numbered) not in taken:
+        return _truncate(numbered)
+    suffix = 2
+    while True:
+        candidate = f"{proposed} ({suffix})"
+        if _norm_name(candidate) not in taken:
+            return _truncate(candidate)
+        suffix += 1
+
+
+def _stem(filename: str) -> str:
+    stem = Path(filename or "").stem
+    return re.sub(r"\s*\(\d+\)\s*$", "", stem).strip()
+
+
+def _kind_from_text(haystack: str) -> str | None:
+    for kind, pattern, _label in KIND_PATTERNS:
+        if pattern.search(haystack):
+            return kind
+    return None
+
+
+def _motion_title(text: str) -> str | None:
+    match = re.search(r"\bmotion\s+to\s+([a-z][a-z\s]{2,40})", text or "", re.I)
+    if not match:
+        return None
+    detail = re.sub(r"\s+", " ", match.group(1)).strip(" .")
+    return f"Motion to {detail.title()}" if detail else "Motion"
+
+
+def _filename_title(cleaned: str) -> str:
+    if cleaned.islower():
+        return cleaned.title()
+    return cleaned
+
+
+def _keeps_file_identity(title: str, stem: str) -> bool:
+    number = _trailing_number(stem)
+    if number and re.search(rf"(?:^|[\s_]){re.escape(number)}(?:$|[\s_])", title):
+        return True
+    return len(title) >= 16
+
+
+def _with_file_number(title: str, stem: str) -> str:
+    number = _trailing_number(stem)
+    if not number:
+        return title
+    if re.search(rf"(?:^|[\s_]|No\.?\s*){re.escape(number)}(?:$|[\s_.])", title):
+        return title
+    if title.lower().startswith("exhibit "):
+        return f"{title}_{number}"
+    return f"{title} {number}"
+
+
+def _trailing_number(stem: str) -> str | None:
+    match = re.search(r"(?:^|[\s_\-])(\d{1,4})$", stem or "")
+    return match.group(1) if match else None
+
+
+def _norm_name(value: str) -> str:
+    return re.sub(r"\s+", " ", (value or "").strip().lower())
+
+
+def retitle_case_documents(case_id: str) -> list[dict[str, str]]:
+    """Rebuild display names from original filenames so no two files share a name."""
+    from app import cases_db
+
+    docs = cases_db.list_documents(case_id)
+    taken: list[str] = []
+    changes: list[dict[str, str]] = []
+    for doc in docs:
+        filename = doc.get("original_filename") or ""
+        proposed, kind = propose_document_title(filename, "")
+        unique = uniquify_display_name(proposed, taken, filename)
+        taken.append(unique)
+        fields: dict[str, str] = {}
+        if unique != (doc.get("display_name") or ""):
+            fields["display_name"] = unique
+        if kind == "exhibit" and (doc.get("doc_kind") or "").lower() != "exhibit":
+            fields["doc_kind"] = "exhibit"
+        if fields:
+            cases_db.update_document(doc["id"], **fields)
+            changes.append(
+                {
+                    "id": doc["id"],
+                    "before": doc.get("display_name") or "",
+                    "after": unique,
+                }
+            )
+    return changes
 
 
 def _truncate(value: str, limit: int = 120) -> str:

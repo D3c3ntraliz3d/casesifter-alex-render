@@ -159,6 +159,8 @@ def is_material_finding(item: Finding) -> bool:
     if evidence.get("ai_generated"):
         return analysis in MAJOR_AI_TYPES
     if item.category == "gotcha":
+        if evidence.get("evidence_tier") == 2:
+            return False
         return bool(evidence.get("gotcha") and evidence.get("verified")) and item.severity in {
             "medium",
             "high",

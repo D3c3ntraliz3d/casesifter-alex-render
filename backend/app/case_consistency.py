@@ -92,6 +92,13 @@ def findings_summary(findings: list[Finding]) -> list[dict[str, Any]]:
                 "direction_reason": (item.evidence or {}).get("direction_reason"),
                 "materiality_reason": (item.evidence or {}).get("materiality_reason"),
                 "attorney_why": (item.evidence or {}).get("attorney_why"),
+                "evidence_label": (item.evidence or {}).get("evidence_label"),
+                "evidence_tier": (item.evidence or {}).get("evidence_tier"),
+                "self_undercut": (item.evidence or {}).get("self_undercut"),
+                "document_id": (item.evidence or {}).get("prior_document_id")
+                or item.evidence.get("document_id")
+                if isinstance(item.evidence, dict)
+                else None,
             }
         )
     return summary

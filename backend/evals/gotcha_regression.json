@@ -171,6 +171,45 @@
           "expect_fail": "same_fact"
         }
       ]
+    },
+    {
+      "area": "evidence_tier",
+      "pairs": [
+        {
+          "id": "tier-fp-motion-vs-motion",
+          "label": "fp",
+          "claim_quote": "I live at 5616 14th Avenue, 3rd Floor, and have lived there throughout this case.",
+          "claim_source": "Motion to Dismiss",
+          "claim_kind": "motion",
+          "evidence_quote": "The process server did not attempt service at 1739 46th Street, 3rd floor.",
+          "evidence_source": "Motion to Dismiss affirmation",
+          "evidence_kind": "motion",
+          "evidence_tier": 2,
+          "expect_fail": "evidence_tier"
+        },
+        {
+          "id": "tier-fp-affidavit-vs-proposed-order",
+          "label": "fp",
+          "claim_quote": "I was not served via my daughter, the process server, nor from anyone.",
+          "claim_source": "Defendant affidavit",
+          "claim_kind": "affidavit",
+          "evidence_quote": "Defendants were duly served with the summons and complaint as recited in this proposed order.",
+          "evidence_source": "Proposed Order",
+          "evidence_kind": "order",
+          "expect_fail": "evidence_tier"
+        },
+        {
+          "id": "tier-tp-affidavit-vs-aos",
+          "label": "tp",
+          "claim_quote": "I was not served via my daughter, the process server, nor from anyone.",
+          "claim_source": "Defendant affidavit",
+          "claim_kind": "affidavit",
+          "evidence_quote": "Affidavit of service: on March 3, 2024 at 6:15 p.m. I served Jane Doe at 5616 14th Avenue by delivering a copy to her daughter, a person of suitable age.",
+          "evidence_source": "Affidavit of Service",
+          "evidence_kind": "affidavit",
+          "expect_fail": null
+        }
+      ]
     }
   ]
 }

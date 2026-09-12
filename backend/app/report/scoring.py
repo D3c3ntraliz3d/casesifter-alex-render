@@ -36,6 +36,10 @@ def score_risk(findings: list[Finding]) -> tuple[RiskLevel, int]:
         if item.category == "gotcha":
             gotcha_type = str((item.evidence or {}).get("contradiction_type") or "")
             weight *= TYPE_SCORE_WEIGHT.get(gotcha_type, 1.15)
+            if (item.evidence or {}).get("self_undercut"):
+                weight *= 1.2
+            elif (item.evidence or {}).get("evidence_tier") == 1 and (item.evidence or {}).get("claim_tier") == 1:
+                weight *= 1.1
         raw += int(weight)
     score = min(100, raw)
 
