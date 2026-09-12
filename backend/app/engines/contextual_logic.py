@@ -43,6 +43,7 @@ from dateutil import parser as dateparser
 
 from app.config import settings
 from app.engines import finding, timed_module
+from app.finding_policy import is_header_or_arrears_noise
 from app.models import Finding, ModuleResult
 
 ORG_SUFFIXES = (
@@ -120,7 +121,7 @@ DATE_RES = (
 # Court e-filing headers (NYSCEF and similar) stamp every page. Their dates are about
 # the filing event / case index year, not the exhibit's internal chronology.
 COURT_FILING_HEADER_RE = re.compile(
-    r"\b(?:NYSCEF|FILED:\s*[A-Z][A-Z .'-]*CLERK|RECEIVED\s+NYSCEF|INDEX\s+NO\.?)\b",
+    r"\b(?:NYSCEF|FILED:|RECEIVED\s+NYSCEF|INDEX\s+NO\.?|DOC(?:UMENT)?\.?\s*NO\.?)\b",
     re.I,
 )
 COURT_STAMP_DATE_CONTEXT_RE = re.compile(
@@ -128,6 +129,7 @@ COURT_STAMP_DATE_CONTEXT_RE = re.compile(
     r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}(?:\s+\d{1,2}:\d{2}\s*[AP]M)?)",
     re.I,
 )
+INDEX_YEAR_RE = re.compile(r"INDEX\s+NO\.?\s*[\dA-Z\-]+\s*/\s*(\d{2,4})", re.I)
 
 # Capitalized phrases that match the org pattern but are page furniture, not parties.
 ORG_STOPWORDS = {
@@ -263,8 +265,14 @@ Examine:
 
 1. date_inconsistency — dates that contradict each other or the document's own narrative
    (a signature predating the agreement, a service period outside the billing period, a
-   due date years after the statement date, a payment month that cannot fall in the billing
-   cycle, a sequence that cannot have happened in that order).
+   monthly bill whose due date is years after the statement date, a payment month that
+   cannot fall in the billing cycle, a sequence that cannot have happened in that order).
+   Do NOT treat a demand / default / right-to-cure / acceleration notice as inconsistent
+   merely because it recites an older missed installment or default date (for example a
+   2023 letter saying the next installment is still due on 02/28/2022). That is how
+   lenders show when payments stopped and that arrears remain. A past-due date that
+   predates the letter is expected. Only flag if the letter's own dates cannot coexist
+   (two different letter dates, a cure deadline before the letter was written, etc.).
 2. math_error — arithmetic that does not add up on ANY statement: line items that do not sum
    to the stated subtotal, a tax or discount that does not match the stated rate, a balance
    that is not total minus payments, running balances that skip, opening balance plus credits
@@ -309,9 +317,22 @@ Rules you must follow:
   (b) FILED / RECEIVED stamp date vs older dates printed in the exhibit body (bills, letters,
   statements from prior years commonly filed years later);
   (c) the stamp typeface/box differing from the scanned exhibit content underneath.
+  Treat FILED / INDEX / NYSCEF / RECEIVED lines as invisible. Never quote them. Never
+  compare their dates or the index-number year to any date in the body. If the only
+  “inconsistency” you can find uses those header dates, report nothing.
   Only flag dates that contradict each other inside the exhibit's own narrative, ignoring
   the e-filing header lines entirely when comparing chronology.
+- Do NOT flag default, breach, right-to-cure, acceleration, or collection letters for
+  citing an installment, payment, or default date that is months or years earlier than
+  the letter date. Court exhibits routinely prove when the borrower stopped paying.
+  "Next payment still due on [older date]" or "you have been in default since [older
+  date]" is ordinary arrears language, not a forged chronology.
 - "confidence" is 0-100 for that specific observation. Use under 50 when you are unsure.
+- You are briefing a busy attorney. Report ONLY stop-the-desk problems: arithmetic that
+  does not reconcile, pasted overlays, graphic splicing, or a well-established historical
+  impossibility on the exhibit itself. Do not report font mix, spelling, caption wording,
+  or other pleading nuances. Do not report the e-filing stamp date (or index year) versus
+  any date printed in the exhibit body — that mismatch is how courts file old records.
 - "severity" reflects how much the observation would matter if confirmed by a human.
 - Be specific in "title" (name the issuer, field, and page), and explain in "why_suspicious"
   why an authentic document would not normally look this way.
@@ -435,6 +456,8 @@ def _run(
             extras["document_analysis"] = status
         elif court_filing:
             extras["document_analysis"] = "skipped_court_filing"
+            extras["external_verification"] = "skipped_court_filing"
+            return findings, extras
         else:
             extras["document_analysis"] = "disabled"
 
@@ -623,10 +646,12 @@ def _court_stamp_date_spans(text: str) -> list[tuple[int, int]]:
     # Near each header token, ignore nearby mm/dd/yyyy stamps (INDEX / FILED / RECEIVED band).
     for header in COURT_FILING_HEADER_RE.finditer(text):
         left = max(0, header.start() - 40)
-        right = min(len(text), header.end() + 80)
+        right = min(len(text), header.end() + 140)
         window = text[left:right]
         for date_match in re.finditer(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b", window):
             spans.append((left + date_match.start(), left + date_match.end()))
+    for match in INDEX_YEAR_RE.finditer(text):
+        spans.append((match.start(1), match.end(1)))
     return spans
 
 
@@ -1035,6 +1060,8 @@ def _finding_from_analysis(
     analysis_type = str(item.get("analysis_type", "")).strip().lower()
     if analysis_type not in ANALYSIS_TYPES:
         return None
+    if analysis_type in {"font_mismatch", "logical_inconsistency", "spelling_anomaly"}:
+        return None
 
     observation = str(item.get("observation", "")).strip()
     why = str(item.get("why_suspicious", "")).strip()
@@ -1063,6 +1090,16 @@ def _finding_from_analysis(
         page_no = None
 
     quoted = str(item.get("quoted_evidence", "")).strip()[:300]
+    if is_header_or_arrears_noise(
+        {
+            "title": str(item.get("title") or ""),
+            "observation": observation,
+            "quoted_evidence": quoted,
+            "analysis_type": analysis_type,
+        }
+    ):
+        return None
+
     label = ANALYSIS_TITLES[analysis_type]
     title = str(item.get("title", "")).strip()[:120] or label
 

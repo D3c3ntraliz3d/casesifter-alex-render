@@ -58,7 +58,7 @@
     {% endif %}
 
     <h2>Detailed findings</h2>
-    {% for item in report.findings %}
+    {% for item in report.findings if item.severity != "info" %}
     <div class="finding">
       <h3>{{ item.title }}</h3>
       <p>

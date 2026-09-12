@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 
+from app.finding_policy import is_material_finding
 from app.models import Finding, Report, RiskLevel
 
 
@@ -17,8 +18,16 @@ SEVERITY_RANK = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 
 
 def score_risk(findings: list[Finding]) -> tuple[RiskLevel, int]:
-    """Conservative scoring: informational notes never turn a clean file red."""
-    actionable = [f for f in findings if f.severity != "info" and f.confidence >= 40]
+    """Only major issues move a file off green.
+
+    Packaging notes (e-filing stamps, page-size mix, AcroForm, scan clone texture,
+    create/modify gaps after NYSCEF restamp) do not interrupt an attorney.
+    """
+    actionable = [
+        f
+        for f in findings
+        if f.severity != "info" and f.confidence >= 40 and is_material_finding(f)
+    ]
     raw = 0
     for item in actionable:
         raw += int(SEVERITY_WEIGHT[item.severity] * (item.confidence / 100.0))
@@ -30,14 +39,14 @@ def score_risk(findings: list[Finding]) -> tuple[RiskLevel, int]:
         return "red", max(score, 70)
     if any(f.severity in {"medium", "high"} and f.confidence >= 55 for f in actionable):
         return "yellow", max(score, 35)
-    if sum(1 for f in actionable if f.severity == "low") >= 3:
-        return "yellow", max(score, 30)
     return "green", score
 
 
 def pick_top_findings(findings: list[Finding], limit: int = 3) -> list[Finding]:
+    material = [f for f in findings if is_material_finding(f)]
+    pool = material or [f for f in findings if f.severity != "info"]
     ranked = sorted(
-        [f for f in findings if f.severity != "info"],
+        pool,
         key=lambda f: (SEVERITY_RANK[f.severity], f.confidence),
         reverse=True,
     )
@@ -72,7 +81,7 @@ def recommended_actions(risk: RiskLevel, findings: list[Finding]) -> list[str]:
 
 
 def executive_summary(risk: RiskLevel, filename: str, findings: list[Finding]) -> str:
-    counts = Counter(f.severity for f in findings if f.severity != "info")
+    counts = Counter(f.severity for f in findings if is_material_finding(f))
     top = pick_top_findings(findings)
     if risk == "green":
         return (

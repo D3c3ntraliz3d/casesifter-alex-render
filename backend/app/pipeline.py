@@ -22,8 +22,9 @@ from app.engines.pdf_integrity import analyze_pdf_integrity
 from app.engines.structural import analyze_structural
 from app.ingestion import sha256_file, sniff_type
 from app.models import AuditTrail, Finding, FontUsage, ModuleResult, PageDimension, Report, TimelineEvent
+from app.finding_policy import triage_findings
 from app.report import executive_summary, pick_top_findings, recommended_actions, render_html, render_pdf, score_risk
-from app.scan_profile import PROFILE_COURT_FILING, PROFILE_FORENSIC, scan_profile_for_kind
+from app.scan_profile import PROFILE_COURT_FILING, peek_pdf_text, resolve_scan_profile
 from app.storage import job_dir, update_job
 from app.telemetry import emit_scan_outcomes
 
@@ -58,7 +59,8 @@ def run_pipeline(
     display_name: str | None = None,
     doc_kind: str | None = None,
 ) -> Report:
-    profile = scan_profile_for_kind(doc_kind)
+    peek_text = peek_pdf_text(source) if not (doc_kind or "").strip() else ""
+    profile = resolve_scan_profile(doc_kind, peek_text)
     court_filing = profile == PROFILE_COURT_FILING
 
     update_job(job_id, status="running", stage="ingesting", percent=5, message="Reading file and hashing contents…")
@@ -176,6 +178,8 @@ def run_pipeline(
             "prior_documents": len(priors),
             "alerts": len(consistency),
         }
+
+    findings = triage_findings(findings, profile)
 
     timeline = [TimelineEvent.model_validate(item) for item in (metadata.extras.get("timeline") or [])]
     dims: list[PageDimension] = []

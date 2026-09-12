@@ -144,9 +144,12 @@ def compare_to_case(
         if not shared_orgs:
             continue
 
+        # Pleadings reciting older exhibit dates/addresses is normal. Only compare
+        # exhibit-to-exhibit for location/date/amount conflicts.
+        filing_involved = new_is_filing or prior_is_filing
+
         # Same issuer / party, conflicting service locations (exhibit-style signal).
-        # Skip between two court filings — counsel vs property addresses differ by design.
-        if not (new_is_filing and prior_is_filing) and new_locs and prior_locs:
+        if not filing_involved and new_locs and prior_locs:
             only_new = sorted(new_locs - prior_locs)
             only_prior = sorted(prior_locs - new_locs)
             if only_new and only_prior and not (new_locs & prior_locs):
@@ -169,7 +172,7 @@ def compare_to_case(
                     )
                 )
 
-        if not (new_is_filing and prior_is_filing) and new_amount_values and prior_amounts:
+        if not filing_involved and new_amount_values and prior_amounts:
             if not (new_amount_values & prior_amounts) and len(new_amount_values) <= 6 and len(prior_amounts) <= 6:
                 findings.append(
                     _case_finding(
@@ -192,7 +195,7 @@ def compare_to_case(
 
         # Date conflicts: only for exhibit-style pairs with a substantive shared issuer.
         # Different signature dates across affirmations/motions in the same month are normal.
-        if not (new_is_filing and prior_is_filing) and new_dates and prior_dates:
+        if not filing_involved and new_dates and prior_dates:
             overlap_months = _month_keys(new_dates) & _month_keys(prior_dates)
             if overlap_months and new_dates != prior_dates:
                 conflicting_new = sorted(d for d in new_dates if d[:7] in overlap_months)[:4]

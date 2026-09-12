@@ -80,6 +80,7 @@ const COURT_FILING_KINDS = new Set([
 ]);
 
 function profileForKind(kind) {
+  if (!kind) return "auto (pleading vs exhibit)";
   return COURT_FILING_KINDS.has((kind || "").toLowerCase()) ? "court filing" : "exhibit forensic";
 }
 
@@ -533,7 +534,7 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
                       }
                     }}
                   >
-                    <option value="">Unknown (forensic)</option>
+                    <option value="">Unknown (auto: pleading vs exhibit)</option>
                     {DOC_KIND_OPTIONS.map(([value, label]) => (
                       <option key={value} value={value}>{label}</option>
                     ))}
