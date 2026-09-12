@@ -159,7 +159,7 @@ def is_material_finding(item: Finding) -> bool:
     if evidence.get("ai_generated"):
         return analysis in MAJOR_AI_TYPES
     if item.category == "case_consistency":
-        return evidence.get("field") in {"amounts", "content_fingerprint"}
+        return bool(evidence.get("material")) and item.severity in {"medium", "high", "critical"}
     if item.id.startswith("img-ela-"):
         return item.severity in {"medium", "high"} and not evidence.get("scan_heavy")
     if item.id.startswith("img-copymove-"):
@@ -178,6 +178,9 @@ def triage_findings(findings: list[Finding], scan_profile: str) -> list[Finding]
     triaged: list[Finding] = []
     for item in cleaned:
         if is_material_finding(item) or item.severity == "info":
+            triaged.append(item)
+            continue
+        if item.category == "case_consistency" and item.severity == "low":
             triaged.append(item)
             continue
         triaged.append(

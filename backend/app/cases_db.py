@@ -108,6 +108,7 @@ def ensure_schema() -> None:
                     excerpt_hashes_json TEXT,
                     amounts_json TEXT,
                     text_excerpt TEXT,
+                    facts_json TEXT,
                     created_at TEXT NOT NULL,
                     FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
                 );
@@ -150,6 +151,8 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     snap_cols = {row[1] for row in conn.execute("PRAGMA table_info(scan_snapshots)")}
     if "text_excerpt" not in snap_cols:
         conn.execute("ALTER TABLE scan_snapshots ADD COLUMN text_excerpt TEXT")
+    if "facts_json" not in snap_cols:
+        conn.execute("ALTER TABLE scan_snapshots ADD COLUMN facts_json TEXT")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS case_messages (
@@ -365,6 +368,7 @@ def save_scan_snapshot(
     excerpt_hashes: list[str],
     amounts: list[dict[str, Any]],
     text_excerpt: str | None = None,
+    facts: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     snap_id = uuid.uuid4().hex
     now = utcnow_iso()
@@ -374,8 +378,9 @@ def save_scan_snapshot(
             """
             INSERT INTO scan_snapshots (
                 id, document_id, case_id, entities_json, findings_summary_json,
-                text_fingerprint, excerpt_hashes_json, amounts_json, text_excerpt, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                text_fingerprint, excerpt_hashes_json, amounts_json, text_excerpt,
+                facts_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 snap_id,
@@ -387,6 +392,7 @@ def save_scan_snapshot(
                 json.dumps(excerpt_hashes),
                 json.dumps(amounts),
                 (text_excerpt or "")[:24000] or None,
+                json.dumps(facts or []),
                 now,
             ),
         )
@@ -399,6 +405,7 @@ def _decode_snapshot(row: sqlite3.Row) -> dict[str, Any]:
     data["findings_summary"] = json.loads(data.pop("findings_summary_json") or "[]")
     data["excerpt_hashes"] = json.loads(data.pop("excerpt_hashes_json") or "[]")
     data["amounts"] = json.loads(data.pop("amounts_json") or "[]")
+    data["facts"] = json.loads(data.pop("facts_json") or "[]")
     data["text_excerpt"] = data.get("text_excerpt") or ""
     return data
 
@@ -448,6 +455,9 @@ def save_text_excerpt(document_id: str, case_id: str, excerpt: str) -> None:
     text = (excerpt or "")[:24000]
     if not text:
         return
+    from app.fact_extract import extract_facts
+
+    facts_json = json.dumps(extract_facts(text))
     now = utcnow_iso()
     with connect() as conn:
         existing = conn.execute(
@@ -456,16 +466,17 @@ def save_text_excerpt(document_id: str, case_id: str, excerpt: str) -> None:
         ).fetchone()
         if existing:
             conn.execute(
-                "UPDATE scan_snapshots SET text_excerpt = ? WHERE document_id = ?",
-                (text, document_id),
+                "UPDATE scan_snapshots SET text_excerpt = ?, facts_json = ? WHERE document_id = ?",
+                (text, facts_json, document_id),
             )
             return
         conn.execute(
             """
             INSERT INTO scan_snapshots (
                 id, document_id, case_id, entities_json, findings_summary_json,
-                text_fingerprint, excerpt_hashes_json, amounts_json, text_excerpt, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                text_fingerprint, excerpt_hashes_json, amounts_json, text_excerpt,
+                facts_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 uuid.uuid4().hex,
@@ -477,6 +488,7 @@ def save_text_excerpt(document_id: str, case_id: str, excerpt: str) -> None:
                 "[]",
                 "[]",
                 text,
+                facts_json,
                 now,
             ),
         )

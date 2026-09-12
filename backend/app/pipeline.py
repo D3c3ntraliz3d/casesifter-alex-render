@@ -13,6 +13,7 @@ from app.case_consistency import (
     findings_summary,
     text_fingerprint,
 )
+from app.fact_extract import extract_facts
 from app.config import settings
 from app.engines.contextual_logic import analyze_contextual
 from app.engines.image_forensics import analyze_image_forensics
@@ -148,15 +149,17 @@ def run_pipeline(
 
     entities = (contextual.extras or {}).get("entities") or {}
     amounts = extract_amounts(full_text)
+    facts = extract_facts(full_text)
     fingerprint = text_fingerprint(full_text)
     hashes = excerpt_hashes(full_text)
+    fact_matrix: list[dict[str, Any]] = []
 
     if case_id and document_id:
         update_job(
             job_id,
             stage="case_consistency",
             percent=92,
-            message="Comparing against prior documents in this case…",
+            message="Comparing labeled facts against prior documents in this case…",
         )
         cases_db.save_scan_snapshot(
             document_id=document_id,
@@ -167,10 +170,11 @@ def run_pipeline(
             excerpt_hashes=hashes,
             amounts=amounts,
             text_excerpt=full_text[:24000],
+            facts=facts,
         )
         priors = cases_db.list_prior_snapshots(case_id, exclude_document_id=document_id)
         name = display_name or source.name
-        consistency = compare_to_case(
+        consistency, fact_matrix = compare_to_case(
             new_document_id=document_id,
             new_display_name=name,
             new_entities=entities,
@@ -178,11 +182,16 @@ def run_pipeline(
             new_fingerprint=fingerprint,
             prior_snapshots=priors,
             new_doc_kind=doc_kind,
+            new_facts=facts,
+            new_text=full_text,
+            case_documents=cases_db.list_documents(case_id),
         )
         findings.extend(consistency)
         contextual.extras["case_consistency"] = {
             "prior_documents": len(priors),
             "alerts": len(consistency),
+            "facts": facts,
+            "fact_matrix": fact_matrix,
         }
 
     findings = triage_findings(findings, profile)
@@ -207,6 +216,8 @@ def run_pipeline(
         "entities": entities,
         "external_verification": (contextual.extras or {}).get("external_verification"),
         "case_consistency": (contextual.extras or {}).get("case_consistency"),
+        "facts": facts,
+        "fact_matrix": fact_matrix,
         "scan_profile": profile,
         "doc_kind": doc_kind,
     }
@@ -281,6 +292,7 @@ def run_pipeline(
             excerpt_hashes=hashes,
             amounts=amounts,
             text_excerpt=full_text[:24000],
+            facts=facts,
         )
         emit_scan_outcomes(doc_kind=doc_kind, findings=findings, risk_level=risk_level)
 

@@ -1,0 +1,14 @@
+---
+description: Flag only material cross-document contradictions in LawSifter
+alwaysApply: true
+---
+
+# Material case contradictions
+
+Compare the **same labeled fact** across filings (loan amount to loan amount, rate to rate). Do not flag formatting, abbreviations, or unlabeled dollar dumps.
+
+**Flag (RED):** loan amount differs by >$1,000 or >0.5%; interest rate by >0.1 points; monthly payment by >$50 or >3%; outstanding balance by >$5,000 or >1.5%; fees by >10% or >$1,000; dates in a different month/year; referenced exhibit attached/annexed but missing from the case; actually different party (not an alias).
+
+**Do not flag:** WaMu / Washington Mutual / J. Garcia vs Jose Garcia; $385,000 vs $385,500; same month different day unless a notice or foreclosure deadline; NYSCEF header dates vs body dates; counsel letterhead.
+
+Every material flag needs an exact quote from each document, why it matters, and what to open next.

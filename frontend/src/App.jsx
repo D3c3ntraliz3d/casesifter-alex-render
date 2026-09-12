@@ -1490,7 +1490,60 @@ function ReportViewer({
 
           {tab === "comparison" && (
             <>
-              <h3 className="serif">Page dimensions</h3>
+              <h3 className="serif">Facts in this document</h3>
+              {(report.comparison?.facts || []).length === 0 ? (
+                <p className="footnote">No labeled loan dates, rates, or amounts were extracted from this file.</p>
+              ) : (
+                <table className="data">
+                  <thead>
+                    <tr>
+                      <th>Fact</th>
+                      <th>This file</th>
+                      <th>Quoted as</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {report.comparison.facts.map((fact, idx) => (
+                      <tr key={`${fact.key}-${idx}`}>
+                        <td>{fact.label}</td>
+                        <td>{fact.display}</td>
+                        <td className="footnote">{fact.quote}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+              {(report.comparison?.fact_matrix || []).length > 0 && (
+                <>
+                  <h3 className="serif" style={{ marginTop: 20 }}>Compared to other filings</h3>
+                  <table className="data">
+                    <thead>
+                      <tr>
+                        <th>Fact</th>
+                        <th>This file</th>
+                        <th>Other document</th>
+                        <th>Match?</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {report.comparison.fact_matrix.map((row, idx) => (
+                        <tr key={`${row.key}-${row.prior_document_id || idx}`}>
+                          <td>{row.label}</td>
+                          <td>{row.this_display}</td>
+                          <td>
+                            {row.prior_display}
+                            <div className="footnote">{row.prior_name}</div>
+                          </td>
+                          <td>
+                            {row.flag === "red" ? "RED — material" : row.flag === "yellow" ? "YELLOW — verify" : "Match"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </>
+              )}
+              <h3 className="serif" style={{ marginTop: 20 }}>Page dimensions</h3>
               <table className="data">
                 <thead>
                   <tr>

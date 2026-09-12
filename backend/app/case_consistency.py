@@ -1,11 +1,12 @@
 """Compare a newly scanned document against prior case snapshots.
 
-Emits findings on the *new* document that name the conflicting prior file and fact.
+Only MATERIAL contradictions interrupt the attorney: the same labeled fact
+(loan amount, rate, payment, balance, key date) that exceeds Claude's thresholds,
+a referenced exhibit that is not in the case, or a near-duplicate upload.
 
-Court filings share counsel letterhead (e.g. "Partners, PLLC") and many different
-signature / service dates in the same month. Those must not fan out into hundreds of
-false "inconsistent with Doc X" alerts. Comparisons require a substantive shared party
-or issuer — not counsel alone.
+Name abbreviations (WaMu / Washington Mutual) and same-month day shifts are
+not flags. Court filings are compared on labeled facts — that is how a motion
+disagrees with a statement of material facts.
 """
 
 from __future__ import annotations
@@ -15,6 +16,12 @@ import re
 from typing import Any
 
 from app.engines import finding
+from app.fact_extract import (
+    FACT_META,
+    extract_facts,
+    normalize_party,
+    referenced_exhibits,
+)
 from app.models import Finding
 from app.scan_profile import COURT_FILING_KINDS
 
@@ -32,6 +39,8 @@ COUNSEL_ORG_RE = re.compile(
     r"partners,?\s+pllc"
     r")\b"
 )
+
+EXHIBIT_NAME_RE = re.compile(r"(?i)\bexhibit\s+([A-Z0-9]{1,3})\b")
 
 
 def extract_amounts(text: str, limit: int = 12) -> list[dict[str, Any]]:
@@ -90,13 +99,45 @@ def compare_to_case(
     new_fingerprint: str | None,
     prior_snapshots: list[dict[str, Any]],
     new_doc_kind: str | None = None,
-) -> list[Finding]:
-    """Return case-consistency findings for the newly scanned document."""
+    new_facts: list[dict[str, Any]] | None = None,
+    new_text: str | None = None,
+    case_documents: list[dict[str, Any]] | None = None,
+) -> tuple[list[Finding], list[dict[str, Any]]]:
+    """Return (findings, fact matrix rows) for the newly scanned document."""
+    del new_amounts  # unlabeled dollar dumps are too noisy; labeled facts only
     findings: list[Finding] = []
+    matrix: list[dict[str, Any]] = []
+    facts = list(new_facts or [])
+    if not facts and new_text:
+        facts = extract_facts(new_text)
+    findings.extend(_internal_fact_conflicts(new_display_name, facts))
+
+    known_exhibits = _known_exhibits(case_documents, prior_snapshots, new_display_name)
+    for tag in referenced_exhibits(new_text or ""):
+        if tag in known_exhibits:
+            continue
+        findings.append(
+            _case_finding(
+                prior_id=None,
+                prior_name="case file",
+                field="missing_exhibit",
+                new_value=f"Exhibit {tag}",
+                prior_value="not in case",
+                title=f"Referenced Exhibit {tag} is not in this case",
+                explanation=(
+                    f"“{new_display_name}” refers to Exhibit {tag} as attached or annexed, "
+                    "but no document in this case is titled that exhibit."
+                ),
+                why="A motion that relies on a missing exhibit cannot be verified against the record you have.",
+                confidence=78,
+                severity="high",
+                material=True,
+                recommended_action=f"Upload Exhibit {tag} or confirm the reference is a docket citation only.",
+            )
+        )
+
     new_orgs = _substance_orgs(new_entities.get("organizations") or [])
     new_locs = {_norm(x) for x in (new_entities.get("locations") or []) if x}
-    new_dates = set(new_entities.get("dates") or [])
-    new_amount_values = {a["value"] for a in new_amounts if a.get("value")}
     new_is_filing = _is_court_filing_kind(new_doc_kind)
 
     for prior in prior_snapshots:
@@ -105,19 +146,16 @@ def compare_to_case(
         prior_entities = prior.get("entities") or {}
         prior_orgs = _substance_orgs(prior_entities.get("organizations") or [])
         prior_locs = {_norm(x) for x in (prior_entities.get("locations") or []) if x}
-        prior_dates = set(prior_entities.get("dates") or [])
-        prior_amounts = {a.get("value") for a in (prior.get("amounts") or []) if a.get("value")}
         prior_is_filing = _is_court_filing_kind(prior.get("doc_kind"))
+        prior_facts = list(prior.get("facts") or [])
+        if not prior_facts:
+            prior_facts = extract_facts(prior.get("text_excerpt") or "")
 
         shared_orgs = sorted(new_orgs & prior_orgs)
         same_fingerprint = bool(
             new_fingerprint and prior.get("text_fingerprint") and new_fingerprint == prior["text_fingerprint"]
         )
 
-        if not shared_orgs and not same_fingerprint:
-            continue
-
-        # Near-duplicate under a different name.
         if same_fingerprint:
             findings.append(
                 _case_finding(
@@ -135,21 +173,42 @@ def compare_to_case(
                     why="Re-uploads and e-filing re-stamps are common; silent duplicates can also hide a swap.",
                     confidence=62,
                     severity="info",
+                    material=False,
                 )
             )
 
-        # Two pleadings that only share counsel letterhead are not comparable for dates/locales.
-        if new_is_filing and prior_is_filing and not shared_orgs:
-            continue
-        if not shared_orgs:
-            continue
+        for row in _compare_facts(facts, prior_facts, prior_name):
+            matrix.append({"prior_document_id": prior_id, "prior_name": prior_name, **row})
+            if not row.get("flag"):
+                continue
+            findings.append(
+                _case_finding(
+                    prior_id=prior_id,
+                    prior_name=prior_name,
+                    field=row["key"],
+                    new_value=row["this_display"],
+                    prior_value=row["prior_display"],
+                    title=f"{row['severity_label']}: {row['label']} does not match “{prior_name}”",
+                    explanation=(
+                        f"{row['label']} in “{new_display_name}”: “{row['this_quote']}”. "
+                        f"In “{prior_name}”: “{row['prior_quote']}”. "
+                        f"Discrepancy: {row['discrepancy']}. "
+                        f"Materiality: {row['materiality']}."
+                    ),
+                    why=row["materiality"],
+                    confidence=row["confidence"],
+                    severity=row["severity"],
+                    material=row["flag"] == "red",
+                    recommended_action=(
+                        f"Open “{prior_name}” and this file. Verify which {row['label'].lower()} "
+                        "is the operative figure before relying on either filing."
+                    ),
+                )
+            )
 
-        # Pleadings reciting older exhibit dates/addresses is normal. Only compare
-        # exhibit-to-exhibit for location/date/amount conflicts.
+        # Exhibit-to-exhibit location split still matters; pleadings share many addresses.
         filing_involved = new_is_filing or prior_is_filing
-
-        # Same issuer / party, conflicting service locations (exhibit-style signal).
-        if not filing_involved and new_locs and prior_locs:
+        if not filing_involved and shared_orgs and new_locs and prior_locs:
             only_new = sorted(new_locs - prior_locs)
             only_prior = sorted(prior_locs - new_locs)
             if only_new and only_prior and not (new_locs & prior_locs):
@@ -169,62 +228,218 @@ def compare_to_case(
                         ),
                         why="The same account/issuer with disjoint service addresses can signal a swapped page.",
                         confidence=68,
+                        severity="medium",
+                        material=True,
                     )
                 )
 
-        if not filing_involved and new_amount_values and prior_amounts:
-            if not (new_amount_values & prior_amounts) and len(new_amount_values) <= 6 and len(prior_amounts) <= 6:
+        new_parties = {_party_key(n) for n in new_orgs}
+        prior_parties = {_party_key(n) for n in prior_orgs}
+        if new_parties and prior_parties and not (new_parties & prior_parties):
+            # Only when both look like lenders/servicers and nothing aliases together.
+            if _looks_like_lender_set(new_orgs) and _looks_like_lender_set(prior_orgs):
                 findings.append(
                     _case_finding(
                         prior_id=prior_id,
                         prior_name=prior_name,
-                        field="amounts",
-                        new_value=", ".join(sorted(new_amount_values)[:4]),
-                        prior_value=", ".join(sorted(x for x in prior_amounts if x)[:4]),
-                        title=f"Inconsistent with “{prior_name}” — amounts",
+                        field="parties",
+                        new_value=", ".join(sorted(new_orgs)[:3]),
+                        prior_value=", ".join(sorted(prior_orgs)[:3]),
+                        title=f"Different lender / issuer than “{prior_name}”",
                         explanation=(
-                            f"Documents that both reference {shared_orgs[0]} list non-overlapping "
-                            f"key amounts. This file: {', '.join(sorted(new_amount_values)[:4])}. "
-                            f"“{prior_name}”: {', '.join(sorted(x for x in prior_amounts if x)[:4])}."
+                            f"This file’s parties ({', '.join(sorted(new_orgs)[:3])}) do not alias "
+                            f"to the parties in “{prior_name}” ({', '.join(sorted(prior_orgs)[:3])}). "
+                            "WaMu / Washington Mutual style abbreviations are treated as the same entity."
                         ),
-                        why="Altered balances on a later-produced statement often disagree with an earlier exhibit.",
-                        confidence=58,
-                        severity="low",
+                        why="A swapped servicer or plaintiff name can change who has standing.",
+                        confidence=64,
+                        severity="medium",
+                        material=True,
                     )
                 )
 
-        # Date conflicts: only for exhibit-style pairs with a substantive shared issuer.
-        # Different signature dates across affirmations/motions in the same month are normal.
-        if not filing_involved and new_dates and prior_dates:
-            overlap_months = _month_keys(new_dates) & _month_keys(prior_dates)
-            if overlap_months and new_dates != prior_dates:
-                conflicting_new = sorted(d for d in new_dates if d[:7] in overlap_months)[:4]
-                conflicting_prior = sorted(d for d in prior_dates if d[:7] in overlap_months)[:4]
-                if set(conflicting_new) != set(conflicting_prior):
-                    findings.append(
-                        _case_finding(
-                            prior_id=prior_id,
-                            prior_name=prior_name,
-                            field="dates",
-                            new_value=", ".join(conflicting_new),
-                            prior_value=", ".join(conflicting_prior),
-                            title=f"Inconsistent with “{prior_name}” — dates",
-                            explanation=(
-                                f"Both files mention {shared_orgs[0]} with dates in the same month(s) "
-                                f"({', '.join(sorted(overlap_months)[:3])}) that do not match. "
-                                f"This file: {', '.join(conflicting_new)}. "
-                                f"“{prior_name}”: {', '.join(conflicting_prior)}."
-                            ),
-                            why="Edited statement dates often leave a twin exhibit with the original calendar.",
-                            confidence=70,
-                        )
-                    )
+    return findings[:12], matrix[:40]
 
-    return findings[:8]
+
+def _internal_fact_conflicts(doc_name: str, facts: list[dict[str, Any]]) -> list[Finding]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for fact in facts:
+        grouped.setdefault(fact["key"], []).append(fact)
+    out: list[Finding] = []
+    for key, items in grouped.items():
+        unique = _unique_facts(items)
+        if len(unique) < 2:
+            continue
+        row = _score_pair(unique[0], unique[1], key)
+        if not row or not row.get("flag"):
+            continue
+        out.append(
+            _case_finding(
+                prior_id=None,
+                prior_name=doc_name,
+                field=key,
+                new_value=row["this_display"],
+                prior_value=row["prior_display"],
+                title=f"{row['severity_label']}: {row['label']} conflicts inside this document",
+                explanation=(
+                    f"This file states both “{row['this_quote']}” and “{row['prior_quote']}”. "
+                    f"Discrepancy: {row['discrepancy']}. {row['materiality']}"
+                ),
+                why=row["materiality"],
+                confidence=row["confidence"],
+                severity=row["severity"],
+                material=row["flag"] == "red",
+                recommended_action="Reconcile the two figures in this filing before using either number.",
+            )
+        )
+    return out
+
+
+def _compare_facts(
+    new_facts: list[dict[str, Any]],
+    prior_facts: list[dict[str, Any]],
+    prior_name: str,
+) -> list[dict[str, Any]]:
+    del prior_name
+    rows: list[dict[str, Any]] = []
+    prior_by_key: dict[str, list[dict[str, Any]]] = {}
+    for fact in prior_facts:
+        prior_by_key.setdefault(fact["key"], []).append(fact)
+    seen: set[str] = set()
+    for fact in new_facts:
+        key = fact["key"]
+        if key in seen:
+            continue
+        counterparts = prior_by_key.get(key) or []
+        if not counterparts:
+            continue
+        seen.add(key)
+        best = None
+        for other in _unique_facts(counterparts):
+            row = _score_pair(fact, other, key)
+            if row is None:
+                continue
+            if best is None or (row.get("flag") == "red" and best.get("flag") != "red"):
+                best = row
+            elif row.get("flag") and not best.get("flag"):
+                best = row
+            elif best is None:
+                best = row
+        if best:
+            rows.append(best)
+    return rows
+
+
+def _score_pair(left: dict[str, Any], right: dict[str, Any], key: str) -> dict[str, Any] | None:
+    meta = FACT_META.get(key) or {}
+    kind = meta.get("kind") or left.get("kind")
+    label = meta.get("label") or left.get("label") or key
+    if kind == "money":
+        a, b = float(left["value"]), float(right["value"])
+        delta = abs(a - b)
+        baseline = max(a, b, 1.0)
+        pct = delta / baseline
+        over = delta > meta.get("abs", 0) or pct > meta.get("pct", 0)
+        borderline = (not over) and (delta > meta.get("abs", 0) * 0.6 or pct > meta.get("pct", 0) * 0.6)
+        discrepancy = f"${delta:,.2f} ({pct:.1%})"
+        materiality = (
+            f"{label} flags when the difference exceeds ${meta.get('abs', 0):,.0f} or {meta.get('pct', 0):.1%}."
+        )
+        return _row(left, right, key, label, discrepancy, materiality, over, borderline, confidence=82 if over else 55)
+    if kind == "rate":
+        a, b = float(left["value"]), float(right["value"])
+        delta = abs(a - b)
+        over = delta > meta.get("abs", 0.1)
+        borderline = (not over) and delta > 0.05
+        discrepancy = f"{delta:.3f} percentage points"
+        materiality = f"Interest rate flags when it differs by more than {meta.get('abs', 0.1)} points."
+        return _row(left, right, key, label, discrepancy, materiality, over, borderline, confidence=88 if over else 58)
+    if kind == "date":
+        if left.get("value") == right.get("value"):
+            return _row(left, right, key, label, "same date", "Dates match.", False, False, confidence=40)
+        same_month = left.get("month_key") and left.get("month_key") == right.get("month_key")
+        deadline = bool(meta.get("deadline"))
+        if same_month and not deadline:
+            return _row(
+                left,
+                right,
+                key,
+                label,
+                "same month, different day",
+                "Same month/year with a different day is not flagged unless the date is deadline-critical.",
+                False,
+                False,
+                confidence=30,
+            )
+        over = (left.get("month_key") != right.get("month_key")) or deadline
+        discrepancy = f"{left.get('display')} vs {right.get('display')}"
+        materiality = (
+            "Date flags when the month or year differs, or when a notice/foreclosure deadline day does not match."
+        )
+        return _row(left, right, key, label, discrepancy, materiality, over, False, confidence=76 if over else 40)
+    return None
+
+
+def _row(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    key: str,
+    label: str,
+    discrepancy: str,
+    materiality: str,
+    over: bool,
+    borderline: bool,
+    confidence: float,
+) -> dict[str, Any]:
+    if over:
+        flag, severity, severity_label = "red", "high", "RED FLAG"
+    elif borderline:
+        flag, severity, severity_label = "yellow", "low", "YELLOW FLAG"
+    else:
+        flag, severity, severity_label = None, "info", "MATCH"
+    return {
+        "key": key,
+        "label": label,
+        "this_display": left.get("display"),
+        "prior_display": right.get("display"),
+        "this_quote": left.get("quote") or left.get("display"),
+        "prior_quote": right.get("quote") or right.get("display"),
+        "discrepancy": discrepancy,
+        "materiality": materiality,
+        "flag": flag,
+        "severity": severity,
+        "severity_label": severity_label,
+        "confidence": confidence,
+        "match": not over and not borderline,
+    }
+
+
+def _unique_facts(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for item in items:
+        token = str(item.get("value"))
+        if token in seen:
+            continue
+        seen.add(token)
+        out.append(item)
+    return out
+
+
+def _known_exhibits(
+    case_documents: list[dict[str, Any]] | None,
+    priors: list[dict[str, Any]],
+    new_name: str,
+) -> set[str]:
+    tags: set[str] = set()
+    for source in list(case_documents or []) + list(priors) + [{"display_name": new_name}]:
+        hay = f"{source.get('display_name') or ''} {source.get('original_filename') or ''}"
+        for match in EXHIBIT_NAME_RE.finditer(hay):
+            tags.add(match.group(1).upper())
+    return tags
 
 
 def _substance_orgs(names: list[str]) -> set[str]:
-    """Organizations that are parties/issuers — not counsel letterhead."""
     out: set[str] = set()
     for name in names:
         if not name or _is_counsel_org(name):
@@ -241,10 +456,18 @@ def _is_counsel_org(name: str) -> bool:
         return True
     if COUNSEL_ORG_RE.search(n):
         return True
-    # Bare professional suffixes with almost no identity.
     if re.fullmatch(r"(partners|associates|attorneys?)(,?\s*(pllc|llp|llc|pc))?", n):
         return True
     return False
+
+
+def _looks_like_lender_set(names: set[str]) -> bool:
+    blob = " ".join(names)
+    return bool(re.search(r"(?i)\b(bank|trust|mortgage|loan|servic|credit|association|fargo|chase|wamu)\b", blob))
+
+
+def _party_key(name: str) -> str:
+    return normalize_party(name)
 
 
 def _is_court_filing_kind(kind: str | None) -> bool:
@@ -263,6 +486,8 @@ def _case_finding(
     why: str,
     confidence: float,
     severity: str = "medium",
+    material: bool = False,
+    recommended_action: str | None = None,
 ) -> Finding:
     seed = f"case|{prior_id}|{field}|{new_value}|{prior_value}"
     fid = "ctx-case-" + hashlib.sha1(seed.encode("utf-8")).hexdigest()[:10]
@@ -281,8 +506,10 @@ def _case_finding(
             "field": field,
             "new_value": new_value,
             "prior_value": prior_value,
+            "material": material,
         },
-        recommended_action=(
+        recommended_action=recommended_action
+        or (
             f"Open “{prior_name}” side by side with this file and confirm which fact is reliable "
             "before relying on either exhibit."
         ),
@@ -291,14 +518,3 @@ def _case_finding(
 
 def _norm(value: str) -> str:
     return re.sub(r"\s+", " ", value or "").strip().lower()
-
-
-def _year(iso: str) -> int | None:
-    try:
-        return int(str(iso)[:4])
-    except ValueError:
-        return None
-
-
-def _month_keys(dates: set[str]) -> set[str]:
-    return {d[:7] for d in dates if len(d) >= 7}
