@@ -301,7 +301,7 @@ export default function App() {
   return (
     <div className="app">
       <header className="masthead">
-        <button type="button" className="brand" onClick={() => { setView("cases"); setQuery(""); }}>
+        <button type="button" className="brand" onClick={() => { setBusy(false); setView("cases"); setQuery(""); }}>
           <div className="seal">LS</div>
           <div>
             <h1>LawSifter</h1>
@@ -341,7 +341,7 @@ export default function App() {
           )}
         </div>
         <nav className="mast-nav">
-          <button type="button" className={view !== "account" ? "on" : ""} onClick={() => setView("cases")}>
+          <button type="button" className={view !== "account" ? "on" : ""} onClick={() => { setBusy(false); setView("cases"); }}>
             Cases
           </button>
           <button type="button" className={view === "account" ? "on" : ""} onClick={() => { refreshEntitlement(); setView("account"); }}>
@@ -617,6 +617,7 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
   const [editingId, setEditingId] = useState(null);
   const [editName, setEditName] = useState("");
   const [docQuery, setDocQuery] = useState("");
+  const [uploadNote, setUploadNote] = useState("");
   const inputRef = useRef(null);
   const docs = caseData.documents || [];
   const visibleDocs = docs.filter((doc) =>
@@ -632,17 +633,18 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
     const rejected = files.filter((f) => !ACCEPTED.has(extensionOf(f.name))).map((f) => f.name);
     if (rejected.length) onError(`Skipped unsupported file(s): ${rejected.join(", ")}`);
     if (!valid.length) return;
-    setBusy(true);
     onError("");
     try {
-      for (const file of valid) {
-        await uploadCaseDocument(caseData.id, file, { autoScan: true });
+      for (let i = 0; i < valid.length; i += 1) {
+        setUploadNote(`Adding ${i + 1} of ${valid.length}: ${valid[i].name}`);
+        await uploadCaseDocument(caseData.id, valid[i], { autoScan: true });
+        await onRefresh();
       }
-      await onRefresh();
+      setUploadNote(`Added ${valid.length} file${valid.length === 1 ? "" : "s"}. Scans will finish in the background.`);
     } catch (err) {
       onError(err.message);
+      setUploadNote("");
     } finally {
-      setBusy(false);
       if (inputRef.current) inputRef.current.value = "";
     }
   }
@@ -685,7 +687,7 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
     <>
       <div className="card case-hero">
         <div className="toolbar tight">
-          <button className="text-link" type="button" onClick={onBack}>← All cases</button>
+          <button className="text-link" type="button" onClick={() => { setBusy(false); onBack(); }}>← All cases</button>
           <div className="row-actions">
             {caseData.archived_at ? (
               <button className="btn secondary" type="button" disabled={busy} onClick={onUnarchive}>
@@ -710,6 +712,7 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
           <span className="dot" />
           {caseData.court || "Court not set"}
         </p>
+        {uploadNote && <p className="footnote">{uploadNote}</p>}
         {caseData.archived_at ? (
           <p className="footnote">This matter is archived. Restore it to add filings.</p>
         ) : (

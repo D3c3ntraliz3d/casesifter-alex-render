@@ -38,6 +38,8 @@ from app.telemetry import flush_to_cloud, record_finding_feedback
 router = APIRouter()
 SAFE_ARTIFACT = re.compile(r"^[A-Za-z0-9._\-]+$")
 SAFE_ID = re.compile(r"^[a-f0-9]{16,64}$")
+# Bulk exhibit dumps used to start every scan at once and lock SQLite / the API.
+_SCAN_SLOTS = threading.Semaphore(2)
 
 
 @router.get("/health")
@@ -460,6 +462,18 @@ def _run_job(
     display_name: str | None,
     doc_kind: str | None,
 ) -> None:
+    if not _SCAN_SLOTS.acquire(timeout=600):
+        update_job(
+            job_id,
+            status="failed",
+            stage="failed",
+            percent=100,
+            message="Scan queue timed out.",
+            error="Another scan held the queue for too long.",
+        )
+        if document_id:
+            cases_db.update_document(document_id, status="failed")
+        return
     try:
         run_pipeline(
             job_id,
@@ -481,6 +495,8 @@ def _run_job(
         )
         if document_id:
             cases_db.update_document(document_id, status="failed")
+    finally:
+        _SCAN_SLOTS.release()
 
 
 async def _write_upload(file: UploadFile, dest: Path) -> None:

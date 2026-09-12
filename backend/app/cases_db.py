@@ -45,8 +45,10 @@ def case_dir(case_id: str) -> Path:
 @contextmanager
 def connect() -> Iterator[sqlite3.Connection]:
     ensure_schema()
-    conn = sqlite3.connect(str(db_path()), check_same_thread=False)
+    conn = sqlite3.connect(str(db_path()), timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 30000")
     conn.execute("PRAGMA foreign_keys = ON")
     try:
         yield conn
@@ -64,8 +66,10 @@ def ensure_schema() -> None:
         if _INITIALIZED and db_path().exists():
             return
         settings.data_dir.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(db_path()), check_same_thread=False)
+        conn = sqlite3.connect(str(db_path()), timeout=30, check_same_thread=False)
         try:
+            conn.execute("PRAGMA journal_mode = WAL")
+            conn.execute("PRAGMA busy_timeout = 30000")
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS cases (
