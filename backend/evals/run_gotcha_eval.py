@@ -21,7 +21,9 @@ from app.gotcha import (
     verify_candidates,
     verify_pair,
 )
+from app.engines.template_fabrication import find_template_leftovers, review_print_scan_ela
 from app.finding_policy import (
+    is_material_finding,
     is_recorded_instrument_math_noise,
     looks_like_recorded_instrument,
 )
@@ -505,6 +507,45 @@ def evaluate_recorded_math() -> dict:
     }
 
 
+def evaluate_template_fabrication() -> dict:
+    """Bought form → fill → print → scan is exhibit fraud; pleadings are out of scope."""
+    bill = (
+        "Con Edison statement. Account number [Account Number]. Amount due $140.00. "
+        "Customer: Your Company Name. Previous balance $100.00. www.example.com"
+    )
+    clean = (
+        "Con Edison statement. Account number 44122918. Amount due $140.00. "
+        "Previous balance $100.00. Payments $40.00. New charges $80.00."
+    )
+    pleading = "I enclose a sample of the notice previously served on the defendant."
+    hits = find_template_leftovers(bill, scan_profile="forensic", source="Exhibit S_12")
+    clean_hits = find_template_leftovers(clean, scan_profile="forensic", source="Exhibit S_12")
+    filing_hits = find_template_leftovers(bill, scan_profile="court_filing", source="Motion")
+    sample_of = find_template_leftovers(pleading, scan_profile="forensic", source="Exhibit A")
+    ela = Finding(
+        id="img-ela-page-1",
+        category="image",
+        severity="info",
+        title="Uneven recompression on scanned page page-1",
+        explanation="x",
+        why_suspicious="y",
+        confidence=32,
+        evidence={"ela_score": 44, "largest_blob_px": 1400, "scan_heavy": True},
+    )
+    upgraded = review_print_scan_ela([ela], clean, scan_profile="forensic")
+    buried = review_print_scan_ela([ela], "This indenture made the first day of June.", scan_profile="forensic")
+    return {
+        "leftover_template_flagged": len(hits) == 1 and hits[0].evidence.get("analysis_type") == "template_fabrication",
+        "leftover_is_material": bool(hits) and is_material_finding(hits[0]),
+        "clean_statement_quiet": clean_hits == [],
+        "court_filing_skipped": filing_hits == [],
+        "sample_of_notice_quiet": sample_of == [],
+        "statement_ela_upgraded": bool(upgraded) and upgraded[0].severity == "medium",
+        "non_statement_ela_stays_info": bool(buried) and buried[0].severity == "info",
+        "all_pass": False,
+    }
+
+
 def evaluate() -> dict:
     dedupe = evaluate_dedupe()
     dedupe["all_pass"] = all(dedupe[key] for key in dedupe if key != "all_pass")
@@ -516,6 +557,8 @@ def evaluate() -> dict:
     kinds["all_pass"] = all(kinds[key] for key in kinds if key not in {"all_pass", "rows"})
     recorded = evaluate_recorded_math()
     recorded["all_pass"] = all(recorded[key] for key in recorded if key != "all_pass")
+    templates = evaluate_template_fabrication()
+    templates["all_pass"] = all(templates[key] for key in templates if key != "all_pass")
     return {
         "pairs": evaluate_pairs(),
         "pipeline": evaluate_pipeline(),
@@ -526,6 +569,7 @@ def evaluate() -> dict:
         "tainted_support": tainted,
         "doc_kinds": kinds,
         "recorded_math": recorded,
+        "template_fabrication": templates,
     }
 
 
@@ -549,6 +593,7 @@ def main() -> None:
     print("TAINTED SUPPORT", result["tainted_support"])
     print("DOC KINDS", result["doc_kinds"])
     print("RECORDED MATH", result["recorded_math"])
+    print("TEMPLATE FABRICATION", result["template_fabrication"])
     failed = bool(
         misses
         or pipe["misses"]
@@ -558,6 +603,7 @@ def main() -> None:
         or not result["tainted_support"]["all_pass"]
         or not result["doc_kinds"]["all_pass"]
         or not result["recorded_math"]["all_pass"]
+        or not result["template_fabrication"]["all_pass"]
     )
     if not result["score_independence"]["title_does_not_matter"]:
         failed = True

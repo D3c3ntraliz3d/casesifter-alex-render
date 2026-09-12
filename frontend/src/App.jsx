@@ -125,6 +125,19 @@ function caseSearchText(item) {
     .toLowerCase();
 }
 
+function formatUpdatedAt(value) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
 function matchesQuery(text, query) {
   const q = query.trim().toLowerCase();
   if (!q) return true;
@@ -541,6 +554,7 @@ function CasesPage({ cases, archived, totalCount, archivedCount, query, busy, on
                 <th>Parties</th>
                 <th>Index</th>
                 <th>Court</th>
+                <th>Last update</th>
                 <th>Files</th>
                 <th className="actions-col"> </th>
               </tr>
@@ -568,6 +582,7 @@ function CasesPage({ cases, archived, totalCount, archivedCount, query, busy, on
                 <tr>
                   <th>Caption</th>
                   <th>Index</th>
+                  <th>Last update</th>
                   <th>Files</th>
                   <th className="actions-col"> </th>
                 </tr>
@@ -581,6 +596,7 @@ function CasesPage({ cases, archived, totalCount, archivedCount, query, busy, on
                       </button>
                     </td>
                     <td className="mono">{item.index_number || "—"}</td>
+                    <td className="muted nowrap">{formatUpdatedAt(item.updated_at)}</td>
                     <td className="num">{item.document_count || 0}</td>
                     <td className="row-actions" onClick={(e) => e.stopPropagation()}>
                       <button type="button" className="icon-btn" disabled={busy} title="Restore" onClick={() => onUnarchive(item)}>
@@ -615,6 +631,7 @@ function CaseRow({ item, busy, onOpen, onArchive, onDelete }) {
       </td>
       <td className="mono">{item.index_number || "—"}</td>
       <td className="muted">{item.court || "—"}</td>
+      <td className="muted nowrap">{formatUpdatedAt(item.updated_at)}</td>
       <td className="num">{item.document_count || 0}</td>
       <td className="row-actions" onClick={(e) => e.stopPropagation()}>
         <button type="button" className="icon-btn" disabled={busy} title="Archive" onClick={() => onArchive(item)}>

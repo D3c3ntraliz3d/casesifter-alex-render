@@ -24,6 +24,7 @@ from app.engines.pdf_integrity import analyze_pdf_integrity
 from app.engines.structural import analyze_structural
 from app.ingestion import sha256_file, sniff_type
 from app.models import AuditTrail, Finding, FontUsage, ModuleResult, PageDimension, Report, TimelineEvent
+from app.engines.template_fabrication import find_template_leftovers, review_print_scan_ela
 from app.finding_policy import triage_findings
 from app.report import executive_summary, pick_top_findings, recommended_actions, render_html, render_pdf, score_risk
 from app.scan_profile import PROFILE_COURT_FILING, peek_pdf_text, resolve_scan_profile
@@ -147,6 +148,16 @@ def run_pipeline(
     findings: list[Finding] = []
     for module in modules:
         findings.extend(module.findings)
+    if not court_filing:
+        findings.extend(
+            find_template_leftovers(
+                full_text,
+                scan_profile=profile,
+                source=display_name or source.name,
+                doc_kind=doc_kind,
+            )
+        )
+        findings = review_print_scan_ela(findings, full_text, scan_profile=profile)
 
     entities = (contextual.extras or {}).get("entities") or {}
     amounts = extract_amounts(full_text)

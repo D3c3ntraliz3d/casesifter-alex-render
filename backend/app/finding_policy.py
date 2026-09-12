@@ -72,6 +72,7 @@ MAJOR_AI_TYPES = frozenset(
         "historical_impossibility",
         # Body-vs-body chronology only. Header/filing comparisons are dropped first.
         "date_inconsistency",
+        "template_fabrication",
     }
 )
 
@@ -211,6 +212,8 @@ def is_material_finding(item: Finding) -> bool:
 
     evidence = item.evidence or {}
     analysis = str(evidence.get("analysis_type") or "")
+    if analysis == "template_fabrication" and item.severity in {"medium", "high", "critical"}:
+        return True
     if evidence.get("ai_generated"):
         return analysis in MAJOR_AI_TYPES
     if item.category == "gotcha":

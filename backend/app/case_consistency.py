@@ -35,7 +35,52 @@ COUNSEL_ORG_RE = re.compile(
     r")\b"
 )
 
-EXHIBIT_NAME_RE = re.compile(r"(?i)\bexhibit\s+([A-Z0-9]{1,3})\b")
+# Real NYSCEF exhibit filenames read "EXHIBIT(S) - A (Motion #1) Deed.pdf", not
+# "Exhibit A" — the old `exhibit\s+(tag)` pattern never matched past "(S) - " and
+# _known_exhibits() silently registered zero exhibits for every case, so every
+# affidavit that cited "Exhibit A"/"Exhibit 1" in its own text fired a false
+# "Referenced Exhibit X is not in this case" finding even when that exact exhibit
+# was uploaded. Tolerate the "(S)" plural marker and a short run of punctuation
+# (dash, space, parens) between "exhibit" and the tag.
+EXHIBIT_NAME_RE = re.compile(r"(?i)\bexhibit\b(?:\(s\))?[^A-Za-z0-9]{0,6}([A-Z0-9]{1,3})\b")
+
+# NYC ACRIS recording cover sheets ("CROSS REFERENCE DATA") cite the county
+# clerk's recording number as "CRFN: 2008000207462" — sometimes with no space
+# at all between the label and the digits, or between the digits and the next
+# word, when a scanned/re-rendered PDF's text layer drops whitespace at line
+# breaks (seen throughout NYSCEF exhibits). Matching bare digits after "CRFN"
+# handles both.
+CRFN_RE = re.compile(r"(?i)\bCRFN\b[:\s]*?(\d{10,20})")
+
+# Same whitespace-collapse problem shows up worst in scanned judgments: a real
+# example read "...it is\nORDEREDANDADJUDGED\nthat the...be cancelled\nand"
+# "discharged of record" with no spaces at several of those joins. Matching on
+# a whitespace-stripped copy of the text sidesteps that unpredictability
+# entirely instead of trying to enumerate which joins lose their space.
+DISCHARGE_ADJUDICATION_RE = re.compile(
+    r"orderedandadjudged.{0,1500}?cancell?edanddischargedofrecord"
+)
+
+# Distinguishes "the mortgage/complaint that names this recording number" from
+# "an exhibit that happens to mention it": the Summons/Complaint is what
+# establishes which recorded instrument this whole case is actually about.
+COMPLAINT_NAME_RE = re.compile(r"(?i)\bcomplaint\b")
+
+
+def _squash(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (text or "").lower())
+
+
+def _crfns_in(text: str) -> set[str]:
+    return {m.group(1) for m in CRFN_RE.finditer(text or "")}
+
+
+def _document_discharges_mortgage(text: str) -> bool:
+    return bool(DISCHARGE_ADJUDICATION_RE.search(_squash(text)))
+
+
+def _looks_like_complaint(name: str) -> bool:
+    return bool(COMPLAINT_NAME_RE.search(name or ""))
 
 
 def extract_amounts(text: str, limit: int = 12) -> list[dict[str, Any]]:
@@ -128,7 +173,38 @@ def compare_to_case(
     facts = list(new_facts or [])
     if not facts and new_text:
         facts = extract_facts(new_text)
+
+    # The recording number(s) the Complaint itself cites are what this case's
+    # loan/monthly-payment/balance facts are actually "operative" for. An
+    # exhibit that cites a *different* recording number (a bundled "Mortgages"
+    # exhibit covering some other lien on the property, a different lender, a
+    # different address entirely) legitimately restates its own different
+    # dollar figures — that is not the same fact disagreeing with itself, it
+    # is a different loan. Only exclude a document's money facts when it
+    # positively cites a recording number and none of them match the
+    # complaint's — silence on CRFN (the ordinary case for a plain affidavit
+    # or a Note that never quotes its own recording number) changes nothing.
+    complaint_crfns: set[str] = set()
+    for prior in prior_snapshots:
+        prior_name = prior.get("display_name") or prior.get("original_filename") or ""
+        if _looks_like_complaint(prior_name):
+            complaint_crfns |= _crfns_in(prior.get("text_excerpt") or "")
+    if _looks_like_complaint(new_display_name):
+        complaint_crfns |= _crfns_in(new_text or "")
+
+    if complaint_crfns:
+        this_crfns = _crfns_in(new_text or "")
+        if this_crfns and not (this_crfns & complaint_crfns):
+            facts = [f for f in facts if f.get("kind") != "money"]
+
     findings.extend(_internal_fact_conflicts(new_display_name, facts))
+    findings.extend(
+        _discharged_mortgage_findings(
+            new_text=new_text or "",
+            new_display_name=new_display_name,
+            prior_snapshots=prior_snapshots,
+        )
+    )
 
     known_exhibits = _known_exhibits(case_documents, prior_snapshots, new_display_name)
     for tag in referenced_exhibits(new_text or ""):
@@ -168,6 +244,10 @@ def compare_to_case(
         prior_facts = list(prior.get("facts") or [])
         if not prior_facts:
             prior_facts = extract_facts(prior.get("text_excerpt") or "")
+        if complaint_crfns:
+            prior_own_crfns = _crfns_in(prior.get("text_excerpt") or "")
+            if prior_own_crfns and not (prior_own_crfns & complaint_crfns):
+                prior_facts = [f for f in prior_facts if f.get("kind") != "money"]
 
         shared_orgs = sorted(new_orgs & prior_orgs)
         same_fingerprint = bool(
@@ -228,6 +308,77 @@ def compare_to_case(
                 )
 
     return findings[:12], matrix[:40]
+
+
+def _discharged_mortgage_findings(
+    *,
+    new_text: str,
+    new_display_name: str,
+    prior_snapshots: list[dict[str, Any]],
+) -> list[Finding]:
+    """Catch a mortgage foreclosure on a lien already discharged of record.
+
+    Confirmed against a real case: a "Mortgages" exhibit buried a certified
+    2016 judgment ordering the *exact* recording number the Complaint sues
+    on ("CRFN 2008000207462", $533,850.00) "cancelled and discharged of
+    record" years before this foreclosure was filed — the single most
+    material fact in the case — and none of the three analysis engines
+    flagged it; the exhibit scored "Low risk". This only flags when the same
+    CRFN shows up in one document with an explicit court-ordered discharge
+    and in another with no such language. It is not full chain-of-title
+    reasoning — confirm the actual recorded history before relying on it.
+    """
+    new_crfns = _crfns_in(new_text)
+    if not new_crfns:
+        return []
+    new_discharges = _document_discharges_mortgage(new_text)
+    out: list[Finding] = []
+    for prior in prior_snapshots:
+        prior_text = prior.get("text_excerpt") or ""
+        if not prior_text:
+            continue
+        prior_crfns = _crfns_in(prior_text)
+        shared = new_crfns & prior_crfns
+        if not shared:
+            continue
+        prior_discharges = _document_discharges_mortgage(prior_text)
+        if new_discharges == prior_discharges:
+            continue  # need exactly one side asserting the discharge
+        prior_name = prior.get("display_name") or prior.get("original_filename") or "prior document"
+        prior_id = prior.get("document_id")
+        discharging_name = new_display_name if new_discharges else prior_name
+        referencing_name = prior_name if new_discharges else new_display_name
+        for crfn in sorted(shared):
+            out.append(
+                _case_finding(
+                    prior_id=prior_id,
+                    prior_name=prior_name,
+                    field="mortgage_discharge",
+                    new_value=f"CRFN {crfn} discharged — {discharging_name}",
+                    prior_value=f"CRFN {crfn} relied on — {referencing_name}",
+                    title=f"Mortgage CRFN {crfn} may already be discharged of record",
+                    explanation=(
+                        f"“{discharging_name}” contains a court order adjudging the mortgage "
+                        f"recorded under CRFN {crfn} cancelled and discharged of record, while "
+                        f"“{referencing_name}” cites that same CRFN as if the lien is still in "
+                        "force. Confirm which is accurate before relying on either filing — "
+                        "foreclosing a mortgage that was already discharged of record is a "
+                        "complete defense."
+                    ),
+                    why=(
+                        "A prior court order discharging the exact recording number being "
+                        "foreclosed is one of the most material facts a case can contain."
+                    ),
+                    confidence=74,
+                    severity="high",
+                    material=True,
+                    recommended_action=(
+                        f"Pull the recorded chain of title for CRFN {crfn} and confirm whether "
+                        "the mortgage being foreclosed here was actually discharged."
+                    ),
+                )
+            )
+    return out
 
 
 def _internal_fact_conflicts(doc_name: str, facts: list[dict[str, Any]]) -> list[Finding]:
@@ -533,11 +684,28 @@ def dedupe_gotchas(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def aggregate_fact_conflicts(snapshots: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """One conflict per labeled fact, listing every file and value."""
+    # Same recording-number scoping as compare_to_case: a bundled exhibit
+    # citing a different CRFN than the Complaint describes a different loan,
+    # so its money facts should not be pooled with the case's operative
+    # loan_amount/monthly_payment/outstanding_balance figures. See the
+    # confirmed false positive this fixed: a Wells Fargo "Mortgages" exhibit
+    # on an unrelated lien/property produced three spurious "does not match
+    # across the case" high-risk cards for the real U.S. Bank loan.
+    complaint_crfns: set[str] = set()
+    for snap in snapshots:
+        name = snap.get("display_name") or snap.get("original_filename") or ""
+        if _looks_like_complaint(name):
+            complaint_crfns |= _crfns_in(snap.get("text_excerpt") or "")
+
     by_key: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = {}
     for snap in snapshots:
+        snap_crfns = _crfns_in(snap.get("text_excerpt") or "") if complaint_crfns else set()
+        excluded_money = bool(complaint_crfns and snap_crfns and not (snap_crfns & complaint_crfns))
         for fact in snap.get("facts") or []:
             key = str(fact.get("key") or "")
             if key not in GOTCHA_KEYS:
+                continue
+            if excluded_money and fact.get("kind") == "money":
                 continue
             by_key.setdefault(key, []).append((snap, fact))
 

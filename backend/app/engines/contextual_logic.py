@@ -216,6 +216,7 @@ ANALYSIS_TYPES = (
     "logical_inconsistency",
     "spelling_anomaly",
     "historical_impossibility",
+    "template_fabrication",
 )
 
 FRAUD_SCHEMA = {
@@ -299,6 +300,15 @@ Examine:
    as a contemporaneous record: the named issuer did not yet serve that city/market on that
    statement date, the company did not exist yet, or had already exited that market. Use only
    well-established public facts; if unsure, omit rather than guess.
+9. template_fabrication — a bought blank (bank statement, utility bill, invoice, pay stub,
+   or similar) filled in to help a party, then printed and scanned so it looks like a paper
+   original. Look for leftover template chrome (SPECIMEN, SAMPLE, Your Company Name,
+   lorem ipsum, [Account Number], example.com), typed-in name/amount/address sitting in a
+   different face or alignment than the printed form, a logo that does not match an issuer
+   statement from that period, or fields that look dropped into a stock grid. Print-then-scan
+   is the concealment step — still report leftover template language and field/chrome mismatch.
+   Do not treat an ordinary flatbed scan of a real issuer statement as this. Court filings
+   and recorded mortgages/deeds are out of scope.
 
 Rules you must follow:
 - Report nothing unless you can cite the specific page and the specific text or region.
@@ -333,10 +343,11 @@ Rules you must follow:
   date]" is ordinary arrears language, not a forged chronology.
 - "confidence" is 0-100 for that specific observation. Use under 50 when you are unsure.
 - You are briefing a busy attorney. Report ONLY stop-the-desk problems: arithmetic that
-  does not reconcile, pasted overlays, graphic splicing, or a well-established historical
-  impossibility on the exhibit itself. Do not report font mix, spelling, caption wording,
-  or other pleading nuances. Do not report the e-filing stamp date (or index year) versus
-  any date printed in the exhibit body — that mismatch is how courts file old records.
+  does not reconcile, pasted overlays, graphic splicing, leftover form-template language
+  or a filled-in bought template that was printed and scanned, or a well-established
+  historical impossibility on the exhibit itself. Do not report font mix, spelling, caption
+  wording, or other pleading nuances. Do not report the e-filing stamp date (or index year)
+  versus any date printed in the exhibit body — that mismatch is how courts file old records.
 - "severity" reflects how much the observation would matter if confirmed by a human.
 - Be specific in "title" (name the issuer, field, and page), and explain in "why_suspicious"
   why an authentic document would not normally look this way.
@@ -1044,6 +1055,7 @@ ANALYSIS_TITLES = {
     "logical_inconsistency": "Internal inconsistency",
     "spelling_anomaly": "Spelling or name anomaly",
     "historical_impossibility": "Historical / market timeline conflict",
+    "template_fabrication": "Possible bought-template exhibit",
 }
 
 # The model may propose any severity; nothing it reports is allowed above medium.

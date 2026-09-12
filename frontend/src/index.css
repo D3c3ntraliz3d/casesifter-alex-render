@@ -471,6 +471,7 @@ table.data tr:last-child td { border-bottom: 0; }
 table.data.cases td { vertical-align: middle; }
 table.data .muted { color: var(--muted); font-size: 13px; }
 table.data .mono { font-variant-numeric: tabular-nums; font-size: 13px; }
+table.data .nowrap { white-space: nowrap; }
 table.data .num { text-align: right; font-variant-numeric: tabular-nums; color: var(--navy); }
 table.data .matter-name { color: var(--navy); font-weight: 600; }
 table.data tr.click-row { cursor: pointer; }

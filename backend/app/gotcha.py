@@ -200,6 +200,7 @@ TAINTED_ANALYSIS = frozenset(
         "graphic_manipulation",
         "historical_impossibility",
         "date_inconsistency",
+        "template_fabrication",
     }
 )
 
