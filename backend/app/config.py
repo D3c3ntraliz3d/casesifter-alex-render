@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     contextual_max_upload_mb: int = 15
     contextual_max_ai_findings: int = 12
     gemini_document_timeout_s: int = 90
+    # Cap Gemini "thinking" to cut latency and token burn. Gemini 3.x uses thinkingLevel
+    # (minimal|low|medium|high). Gemini 2.5 Flash uses thinkingBudget (0 disables).
+    gemini_thinking_level: str = "minimal"
+    gemini_claim_thinking_level: str = "minimal"
 
     @property
     def jobs_dir(self) -> Path:

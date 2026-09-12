@@ -30,8 +30,10 @@ import base64
 import hashlib
 import json
 import re
+import threading
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -368,6 +370,13 @@ def _run(
         "external_verification": "disabled",
         "document_analysis": "disabled",
         "provider": None,
+        "gemini_usage": {
+            "prompt_tokens": 0,
+            "candidates_tokens": 0,
+            "thoughts_tokens": 0,
+            "total_tokens": 0,
+            "calls": 0,
+        },
     }
 
     if not settings.gemini_api_key:
@@ -375,42 +384,115 @@ def _run(
 
     extras["provider"] = f"google:{settings.gemini_model}"
 
-    # Tier 3: full document review. Runs first because it is the more informative of the
-    # two remote calls, so a rate limit or outage does not consume the budget on claims.
-    if settings.contextual_multimodal:
-        document_findings, status = _run_document_analysis(text, source_file, extras)
-        findings.extend(document_findings)
-        extras["document_analysis"] = status
-    else:
-        extras["document_analysis"] = "disabled"
+    try:
+        # Tier 3: full document review. Runs first because it is the more informative of the
+        # two remote calls, so a rate limit or outage does not consume the budget on claims.
+        if settings.contextual_multimodal:
+            document_findings, status = _run_document_analysis(text, source_file, extras)
+            findings.extend(document_findings)
+            extras["document_analysis"] = status
+        else:
+            extras["document_analysis"] = "disabled"
 
-    if extras["document_analysis"] == "error":
-        # The remote service is unreachable or rejecting requests; claim verification
-        # would fail the same way and only duplicate the notice.
-        extras["external_verification"] = "skipped_after_error"
+        if extras["document_analysis"] == "error":
+            # The remote service is unreachable or rejecting requests; claim verification
+            # would fail the same way and only duplicate the notice.
+            extras["external_verification"] = "skipped_after_error"
+            return findings, extras
+
+        pending_claims = [
+            claim
+            for claim in claims[: settings.contextual_max_claims]
+            if not _claim_covered_by_findings(claim, findings)
+        ]
+        skipped = len(claims[: settings.contextual_max_claims]) - len(pending_claims)
+        if skipped:
+            extras["claims_skipped_as_redundant"] = skipped
+
+        if not pending_claims:
+            extras["external_verification"] = "no_claims" if not claims else "skipped_redundant"
+            return findings, extras
+
+        extras["external_verification"] = "enabled"
+        claim_results = _verify_claims_parallel(pending_claims, extras)
+        saw_error = False
+        for claim, verdict, error in claim_results:
+            if error is not None:
+                extras["verifications"].append({"question": claim.question, "error": str(error)})
+                if not saw_error:
+                    findings.append(_verification_unavailable(error))
+                    saw_error = True
+                continue
+            record = {"question": claim.question, **verdict}
+            extras["verifications"].append(record)
+            contradiction = _finding_from_verdict(claim, verdict)
+            if contradiction:
+                findings.append(contradiction)
+
         return findings, extras
+    finally:
+        _finalize_gemini_usage(extras)
 
+
+def _claim_covered_by_findings(claim: Claim, findings: list[Finding]) -> bool:
+    """Skip tier-2 when tier-3 already flagged the same org for historical impossibility."""
+    org = (claim.organization or "").strip().lower()
+    if not org:
+        return False
+    for item in findings:
+        evidence = item.evidence or {}
+        if not evidence.get("ai_generated"):
+            continue
+        if evidence.get("analysis_type") != "historical_impossibility":
+            continue
+        blob = " ".join(
+            [
+                item.title or "",
+                item.explanation or "",
+                str(evidence.get("quoted_evidence") or ""),
+            ]
+        ).lower()
+        if org in blob:
+            return True
+        # Match shortened brand tokens ("national grid" vs "Nationalgrid").
+        compact_org = re.sub(r"[^a-z0-9]+", "", org)
+        compact_blob = re.sub(r"[^a-z0-9]+", "", blob)
+        if compact_org and compact_org in compact_blob:
+            return True
+    return False
+
+
+def _verify_claims_parallel(
+    claims: list[Claim], extras: dict[str, Any]
+) -> list[tuple[Claim, dict[str, Any] | None, Exception | None]]:
+    """Run claim checks concurrently; return results in the same order as ``claims``."""
     if not claims:
-        extras["external_verification"] = "no_claims"
-        return findings, extras
-
-    extras["external_verification"] = "enabled"
-
-    for claim in claims[: settings.contextual_max_claims]:
+        return []
+    if len(claims) == 1:
+        claim = claims[0]
         try:
-            verdict = verify_claim(claim.question)
+            verdict = verify_claim(claim.question, extras)
+            return [(claim, verdict, None)]
         except Exception as exc:
-            extras["verifications"].append({"question": claim.question, "error": str(exc)})
-            findings.append(_verification_unavailable(exc))
-            break
+            return [(claim, None, exc)]
 
-        record = {"question": claim.question, **verdict}
-        extras["verifications"].append(record)
-        contradiction = _finding_from_verdict(claim, verdict)
-        if contradiction:
-            findings.append(contradiction)
-
-    return findings, extras
+    ordered: list[tuple[Claim, dict[str, Any] | None, Exception | None]] = [
+        (claim, None, None) for claim in claims
+    ]
+    workers = min(len(claims), settings.contextual_max_claims)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(verify_claim, claim.question, extras): index
+            for index, claim in enumerate(claims)
+        }
+        for future in as_completed(futures):
+            index = futures[future]
+            claim = claims[index]
+            try:
+                ordered[index] = (claim, future.result(), None)
+            except Exception as exc:
+                ordered[index] = (claim, None, exc)
+    return ordered
 
 
 def extract_entities(text: str) -> Entities:
@@ -629,8 +711,69 @@ def check_internal_timeline(entities: Entities, doc_meta: dict[str, Any]) -> lis
     return findings
 
 
+def _thinking_config(level: str) -> dict[str, Any]:
+    """Cap Gemini thinking. Gemini 3.x uses thinkingLevel; 2.5 Flash uses thinkingBudget."""
+    level = (level or "minimal").strip().lower()
+    if level not in {"minimal", "low", "medium", "high"}:
+        level = "minimal"
+    model = (settings.gemini_model or "").lower()
+    if "2.5" in model:
+        # 0 disables thinking on 2.5 Flash when the caller asks for minimal.
+        budget = 0 if level == "minimal" else {"low": 512, "medium": 2048, "high": 8192}.get(level, 0)
+        return {"thinkingConfig": {"thinkingBudget": budget}}
+    return {"thinkingConfig": {"thinkingLevel": level}}
+
+
+def _generation_config(schema: dict[str, Any], thinking_level: str) -> dict[str, Any]:
+    config: dict[str, Any] = {
+        "temperature": 0,
+        "responseMimeType": "application/json",
+        "responseSchema": schema,
+    }
+    config.update(_thinking_config(thinking_level))
+    return config
+
+
+def _usage_from_body(body: dict[str, Any]) -> dict[str, int]:
+    meta = body.get("usageMetadata") or {}
+    return {
+        "prompt_tokens": int(meta.get("promptTokenCount") or 0),
+        "candidates_tokens": int(meta.get("candidatesTokenCount") or 0),
+        "thoughts_tokens": int(meta.get("thoughtsTokenCount") or 0),
+        "total_tokens": int(meta.get("totalTokenCount") or 0),
+    }
+
+
+def _accumulate_gemini_usage(extras: dict[str, Any] | None, body: dict[str, Any]) -> None:
+    if extras is None:
+        return
+    lock = extras.setdefault("_gemini_usage_lock", threading.Lock())
+    usage = _usage_from_body(body)
+    with lock:
+        bucket = extras.setdefault(
+            "gemini_usage",
+            {
+                "prompt_tokens": 0,
+                "candidates_tokens": 0,
+                "thoughts_tokens": 0,
+                "total_tokens": 0,
+                "calls": 0,
+            },
+        )
+        for key, value in usage.items():
+            bucket[key] = int(bucket.get(key) or 0) + value
+        bucket["calls"] = int(bucket.get("calls") or 0) + 1
+
+
+def _finalize_gemini_usage(extras: dict[str, Any]) -> None:
+    extras.pop("_gemini_usage_lock", None)
+
+
 def analyze_document(
-    text: str, file_base64: str | None, mime_type: str | None
+    text: str,
+    file_base64: str | None,
+    mime_type: str | None,
+    extras: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Tier 3: send the original file and extracted text to Gemini for alteration review.
 
@@ -646,14 +789,13 @@ def analyze_document(
     body = _post_gemini(
         {
             "contents": [{"role": "user", "parts": parts}],
-            "generationConfig": {
-                "temperature": 0,
-                "responseMimeType": "application/json",
-                "responseSchema": FRAUD_SCHEMA,
-            },
+            "generationConfig": _generation_config(
+                FRAUD_SCHEMA, settings.gemini_thinking_level
+            ),
         },
         timeout=settings.gemini_document_timeout_s,
     )
+    _accumulate_gemini_usage(extras, body)
     parsed = _parse_json_payload(body)
     raw_findings = parsed.get("findings")
     if not isinstance(raw_findings, list):
@@ -681,7 +823,7 @@ def _run_document_analysis(
     if file_base64 is None and not (text or "").strip():
         return [], "no_content"
     try:
-        result = analyze_document(text, file_base64, mime_type)
+        result = analyze_document(text, file_base64, mime_type, extras)
     except Exception as exc:
         extras["document_analysis_error"] = str(exc)
         return [_verification_unavailable(exc, stage="document analysis")], "error"
@@ -767,18 +909,17 @@ def _parse_json_payload(body: dict[str, Any]) -> dict[str, Any]:
     return parsed
 
 
-def verify_claim(question: str) -> dict[str, Any]:
+def verify_claim(question: str, extras: dict[str, Any] | None = None) -> dict[str, Any]:
     """Tier 2: ask Gemini to adjudicate one claim. Sends the question only, no document content."""
     body = _post_gemini(
         {
             "contents": [{"role": "user", "parts": [{"text": PROMPT.format(question=question)}]}],
-            "generationConfig": {
-                "temperature": 0,
-                "responseMimeType": "application/json",
-                "responseSchema": VERDICT_SCHEMA,
-            },
+            "generationConfig": _generation_config(
+                VERDICT_SCHEMA, settings.gemini_claim_thinking_level
+            ),
         }
     )
+    _accumulate_gemini_usage(extras, body)
     parsed = _parse_json_payload(body)
 
     verdict = str(parsed.get("verdict", "unverifiable")).lower()
