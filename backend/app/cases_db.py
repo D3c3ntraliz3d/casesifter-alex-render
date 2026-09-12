@@ -437,10 +437,14 @@ def list_prior_snapshots(case_id: str, exclude_document_id: str) -> list[dict[st
 
 
 def list_case_gotchas(case_id: str) -> list[dict[str, Any]]:
+    from app.case_consistency import dedupe_gotchas
+
     out: list[dict[str, Any]] = []
     for snap in list_case_snapshots(case_id):
         for item in snap.get("findings_summary") or []:
             if not item.get("gotcha") and item.get("analysis_type") != "gotcha":
+                continue
+            if not item.get("verified"):
                 continue
             out.append(
                 {
@@ -450,7 +454,13 @@ def list_case_gotchas(case_id: str) -> list[dict[str, Any]]:
                     "scan_job_id": None,
                 }
             )
-    return out
+    return dedupe_gotchas(out)
+
+
+def list_case_fact_conflicts(case_id: str) -> list[dict[str, Any]]:
+    from app.case_consistency import aggregate_fact_conflicts
+
+    return aggregate_fact_conflicts(list_case_snapshots(case_id))
 
 
 def list_case_snapshots(case_id: str) -> list[dict[str, Any]]:

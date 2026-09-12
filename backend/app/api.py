@@ -239,7 +239,10 @@ def api_list_case_gotchas(case_id: str):
                 "risk_level": (doc or {}).get("risk_level"),
             }
         )
-    return {"gotchas": items}
+    return {
+        "gotchas": items,
+        "fact_conflicts": cases_db.list_case_fact_conflicts(case_id),
+    }
 
 
 @router.get("/cases/{case_id}/chat")

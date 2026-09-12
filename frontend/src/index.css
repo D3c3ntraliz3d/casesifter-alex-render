@@ -773,6 +773,12 @@ table.data td.row-actions { width: 1%; text-align: right; }
   line-height: 1.45;
 }
 .gotcha-quote strong { color: var(--navy); }
+.gotcha-why {
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--ink);
+}
 .finding.gotcha-card {
   border-color: #c9a227;
   background: #fffdf6;

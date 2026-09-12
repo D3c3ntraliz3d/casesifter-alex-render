@@ -165,6 +165,9 @@ def is_material_finding(item: Finding) -> bool:
             "critical",
         }
     if item.category == "case_consistency":
+        # Cross-document labeled facts are one case-level alert, not N file scores.
+        if evidence.get("prior_document_id") and str(evidence.get("field") or "") != "missing_exhibit":
+            return False
         return bool(evidence.get("material")) and item.severity in {"medium", "high", "critical"}
     if item.id.startswith("img-ela-"):
         return item.severity in {"medium", "high"} and not evidence.get("scan_heavy")

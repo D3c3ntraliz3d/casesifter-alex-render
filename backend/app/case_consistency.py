@@ -88,6 +88,10 @@ def findings_summary(findings: list[Finding]) -> list[dict[str, Any]]:
                 "evidence_quote": (item.evidence or {}).get("evidence_quote"),
                 "claim_source": (item.evidence or {}).get("claim_source"),
                 "evidence_source": (item.evidence or {}).get("evidence_source"),
+                "fact_named": (item.evidence or {}).get("fact_named"),
+                "direction_reason": (item.evidence or {}).get("direction_reason"),
+                "materiality_reason": (item.evidence or {}).get("materiality_reason"),
+                "attorney_why": (item.evidence or {}).get("attorney_why"),
             }
         )
     return summary
@@ -182,32 +186,8 @@ def compare_to_case(
 
         for row in _compare_facts(facts, prior_facts, prior_name):
             matrix.append({"prior_document_id": prior_id, "prior_name": prior_name, **row})
-            if not row.get("flag"):
-                continue
-            findings.append(
-                _case_finding(
-                    prior_id=prior_id,
-                    prior_name=prior_name,
-                    field=row["key"],
-                    new_value=row["this_display"],
-                    prior_value=row["prior_display"],
-                    title=f"{row['severity_label']}: {row['label']} does not match “{prior_name}”",
-                    explanation=(
-                        f"{row['label']} in “{new_display_name}”: “{row['this_quote']}”. "
-                        f"In “{prior_name}”: “{row['prior_quote']}”. "
-                        f"Discrepancy: {row['discrepancy']}. "
-                        f"Materiality: {row['materiality']}."
-                    ),
-                    why=row["materiality"],
-                    confidence=row["confidence"],
-                    severity=row["severity"],
-                    material=row["flag"] == "red",
-                    recommended_action=(
-                        f"Open “{prior_name}” and this file. Verify which {row['label'].lower()} "
-                        "is the operative figure before relying on either filing."
-                    ),
-                )
-            )
+            # Cross-document fact mismatches are one case-level alert, not a
+            # per-file flag on every document that mentions the same number.
 
         # Exhibit-to-exhibit location split still matters; pleadings share many addresses.
         filing_involved = new_is_filing or prior_is_filing
@@ -489,3 +469,126 @@ def _case_finding(
 
 def _norm(value: str) -> str:
     return re.sub(r"\s+", " ", value or "").strip().lower()
+
+
+def _quote_key(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip().lower())[:240]
+
+
+def dedupe_gotchas(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One card per claim/evidence pair; later hits add related documents."""
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    order: list[tuple[str, str]] = []
+    for item in items:
+        claim = _quote_key(str(item.get("claim_quote") or item.get("title") or ""))
+        evidence = _quote_key(str(item.get("evidence_quote") or ""))
+        key = tuple(sorted((claim, evidence)))
+        related = {
+            "document_id": item.get("document_id"),
+            "display_name": item.get("display_name") or item.get("claim_source") or item.get("evidence_source"),
+        }
+        if key not in grouped:
+            grouped[key] = {
+                **item,
+                "related_documents": [related] if related.get("document_id") else [],
+            }
+            order.append(key)
+            continue
+        existing = grouped[key]
+        seen = {doc.get("document_id") for doc in existing.get("related_documents") or []}
+        if related.get("document_id") and related["document_id"] not in seen:
+            existing.setdefault("related_documents", []).append(related)
+    return [grouped[key] for key in order]
+
+
+def aggregate_fact_conflicts(snapshots: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One conflict per labeled fact, listing every file and value."""
+    by_key: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = {}
+    for snap in snapshots:
+        for fact in snap.get("facts") or []:
+            key = str(fact.get("key") or "")
+            if key not in GOTCHA_KEYS:
+                continue
+            by_key.setdefault(key, []).append((snap, fact))
+
+    out: list[dict[str, Any]] = []
+    for key, pairs in by_key.items():
+        variants: dict[str, dict[str, Any]] = {}
+        for snap, fact in pairs:
+            token = str(fact.get("value"))
+            doc_id = snap.get("document_id")
+            name = snap.get("display_name") or snap.get("original_filename") or "document"
+            bucket = variants.setdefault(
+                token,
+                {
+                    "value": token,
+                    "display": fact.get("display") or token,
+                    "quote": fact.get("quote") or fact.get("display"),
+                    "fact": fact,
+                    "documents": [],
+                },
+            )
+            if not any(doc.get("document_id") == doc_id for doc in bucket["documents"]):
+                bucket["documents"].append({"document_id": doc_id, "display_name": name})
+        if len(variants) < 2:
+            continue
+        flagged = False
+        worst = "low"
+        confidence = 70
+        unique_facts = [bucket["fact"] for bucket in variants.values()]
+        for idx, left in enumerate(unique_facts):
+            for right in unique_facts[idx + 1 :]:
+                row = _score_pair(left, right, key)
+                if row and row.get("flag"):
+                    flagged = True
+                    if row.get("severity") == "high":
+                        worst = "high"
+                        confidence = max(confidence, int(row.get("confidence") or 70))
+        if not flagged:
+            continue
+        meta = FACT_META.get(key) or {}
+        label = str(meta.get("label") or key)
+        related = []
+        seen_docs: set[str] = set()
+        for bucket in variants.values():
+            for doc in bucket["documents"]:
+                doc_id = str(doc.get("document_id") or "")
+                if doc_id and doc_id not in seen_docs:
+                    seen_docs.add(doc_id)
+                    related.append(doc)
+        variant_bits = [
+            f"{bucket['display']} in "
+            + ", ".join(f"“{doc['display_name']}”" for doc in bucket["documents"][:6])
+            for bucket in variants.values()
+        ]
+        out.append(
+            {
+                "id": "fact-" + hashlib.sha1(key.encode("utf-8")).hexdigest()[:10],
+                "title": f"{label} does not match across the case",
+                "gotcha_level": "Case fact conflict",
+                "contradiction_type": "factual_contradiction",
+                "verified": True,
+                "gotcha": False,
+                "analysis_type": "fact_conflict",
+                "field": key,
+                "severity": worst,
+                "confidence": confidence,
+                "attorney_why": (
+                    f"{label} appears as more than one operative figure. "
+                    + "; ".join(variant_bits)
+                    + ". Confirm which figure controls before relying on any filing."
+                ),
+                "variants": [
+                    {
+                        "display": bucket["display"],
+                        "quote": bucket["quote"],
+                        "documents": bucket["documents"],
+                    }
+                    for bucket in variants.values()
+                ],
+                "related_documents": related,
+                "document_id": related[0]["document_id"] if related else None,
+                "display_name": related[0]["display_name"] if related else None,
+            }
+        )
+    return out

@@ -55,7 +55,7 @@ const CATEGORY = {
   page_anomalies: "Page anomalies",
   contextual: "Contextual logic",
   case_consistency: "Case consistency",
-  gotcha: "Gotcha",
+  gotcha: "Apparent contradiction",
 };
 
 const RISK = {
@@ -881,36 +881,81 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
   );
 }
 
+function relatedDocs(item, documents) {
+  const fromApi = item.related_documents || [];
+  if (fromApi.length) {
+    return fromApi
+      .map((ref) => documents.find((d) => d.id === ref.document_id) || ref)
+      .filter((doc) => doc?.id || doc?.document_id);
+  }
+  const fallback = documents.find((d) => d.id === item.document_id);
+  return fallback ? [fallback] : [];
+}
+
 function CaseGotchaBoard({ caseId, documents, onOpenReport }) {
   const [gotchas, setGotchas] = useState([]);
+  const [factConflicts, setFactConflicts] = useState([]);
 
   useEffect(() => {
     let cancelled = false;
     listCaseGotchas(caseId)
-      .then((items) => {
-        if (!cancelled) setGotchas(items);
+      .then((data) => {
+        if (cancelled) return;
+        setGotchas(data.gotchas || []);
+        setFactConflicts(data.factConflicts || []);
       })
       .catch(() => {
-        if (!cancelled) setGotchas([]);
+        if (cancelled) return;
+        setGotchas([]);
+        setFactConflicts([]);
       });
     return () => {
       cancelled = true;
     };
   }, [caseId, documents]);
 
-  if (gotchas.length === 0) return null;
+  const total = gotchas.length + factConflicts.length;
+  if (total === 0) return null;
 
   return (
     <div className="card gotcha-board">
       <p className="kicker">Gotcha finder</p>
       <h2 className="serif" style={{ margin: "4px 0 8px" }}>
-        {gotchas.length} lie{gotchas.length === 1 ? "" : "s"} the record may prove
+        {total} apparent contradiction{total === 1 ? "" : "s"} worth verifying
       </h2>
       <p className="footnote" style={{ marginBottom: 8 }}>
-        Only claim-versus-evidence contradictions. Open the source to verify the quotes.
+        Each conflict is listed once, with every file that states it. Candidates for review,
+        not findings of fact. Confirm the quoted language before relying on any of them.
       </p>
+      {factConflicts.map((item) => (
+        <div key={item.id || item.field} className="gotcha-item">
+          <h3>{item.title}</h3>
+          <p className="footnote">{item.gotcha_level || "Case fact conflict"}</p>
+          {(item.variants || []).map((variant) => (
+            <p key={variant.display} className="gotcha-quote">
+              <strong>{variant.display}:</strong>
+              {variant.quote ? ` “${variant.quote}”` : ""}
+              {" — "}
+              {(variant.documents || []).map((doc) => doc.display_name).join("; ")}
+            </p>
+          ))}
+          {item.attorney_why && <p className="gotcha-why">{item.attorney_why}</p>}
+          <div className="actions" style={{ marginTop: 8 }}>
+            {relatedDocs(item, documents).map((doc) => {
+              const id = doc.id || doc.document_id;
+              const live = documents.find((d) => d.id === id);
+              if (!live) return null;
+              return (
+                <button key={id} className="btn gold" type="button" onClick={() => onOpenReport(live)}>
+                  Open {live.display_name || live.original_filename}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ))}
       {gotchas.map((item) => {
-        const doc = documents.find((d) => d.id === item.document_id);
+        const sources = relatedDocs(item, documents);
         return (
           <div key={`${item.id || item.title}-${item.document_id}`} className="gotcha-item">
             <h3>{item.title}</h3>
@@ -929,11 +974,26 @@ function CaseGotchaBoard({ caseId, documents, onOpenReport }) {
                 {item.evidence_source ? ` — ${item.evidence_source}` : ""}
               </p>
             )}
-            {doc && (
-              <button className="btn gold" type="button" onClick={() => onOpenReport(doc)}>
-                Open report
-              </button>
+            {(item.attorney_why || item.materiality_reason || item.fact_named) && (
+              <p className="gotcha-why">
+                {item.attorney_why
+                  || [item.fact_named && `Same fact: ${item.fact_named}.`, item.materiality_reason]
+                      .filter(Boolean)
+                      .join(" ")}
+              </p>
             )}
+            <div className="actions" style={{ marginTop: 8 }}>
+              {sources.map((doc) => {
+                const id = doc.id || doc.document_id;
+                const live = documents.find((d) => d.id === id);
+                if (!live) return null;
+                return (
+                  <button key={id} className="btn gold" type="button" onClick={() => onOpenReport(live)}>
+                    Open {live.display_name || live.original_filename}
+                  </button>
+                );
+              })}
+            </div>
           </div>
         );
       })}
@@ -1410,8 +1470,16 @@ function ReportViewer({
   onOpenReport,
   onError,
 }) {
-  const material = findings.filter((f) => f.severity !== "info");
-  const caseAlerts = findings.filter((f) => f.category === "case_consistency");
+  const isCrossDocFact = (item) => Boolean(
+    item.category === "case_consistency"
+    && item.evidence?.prior_document_id
+    && item.evidence?.field
+    && item.evidence.field !== "missing_exhibit"
+  );
+  const visibleFindings = findings.filter((f) => !isCrossDocFact(f));
+  const material = visibleFindings.filter((f) => f.severity !== "info");
+  const caseAlerts = visibleFindings.filter((f) => f.category === "case_consistency");
+  const hiddenCrossDoc = findings.length - visibleFindings.length;
   const [showDoc, setShowDoc] = useState(true);
   const fileUrl = caseId && documentId
     ? documentFileUrl(caseId, documentId)
@@ -1435,6 +1503,12 @@ function ReportViewer({
             {caseAlerts.length > 0 && (
               <p className="footnote" style={{ marginTop: 8 }}>
                 {caseAlerts.length} case-consistency alert{caseAlerts.length === 1 ? "" : "s"} vs prior filings.
+              </p>
+            )}
+            {hiddenCrossDoc > 0 && (
+              <p className="footnote" style={{ marginTop: 4 }}>
+                Labeled fact mismatches (rate, payment, dates) are listed once on the case page,
+                with every file that states them.
               </p>
             )}
             {report.comparison?.scan_profile && (
@@ -1502,8 +1576,8 @@ function ReportViewer({
             <div className="grid-2">
               <div>
                 <h3 className="serif">Top findings</h3>
-                {(report.top_findings || []).length === 0 && <p>No material findings.</p>}
-                {(report.top_findings || []).map((item) => (
+                {(report.top_findings || []).filter((item) => !isCrossDocFact(item)).length === 0 && <p>No material findings.</p>}
+                {(report.top_findings || []).filter((item) => !isCrossDocFact(item)).map((item) => (
                   <FindingCard key={item.id} item={item} docKind={docKind} />
                 ))}
               </div>
@@ -1521,11 +1595,11 @@ function ReportViewer({
 
           {tab === "findings" && (
             <div>
-              <p className="footnote">{material.length} material finding(s), {findings.length} total including notes.</p>
-              {findings.map((item) => (
+              <p className="footnote">{material.length} material finding(s), {visibleFindings.length} total including notes.</p>
+              {visibleFindings.map((item) => (
                 <FindingCard key={item.id} item={item} docKind={docKind} />
               ))}
-              {findings.length === 0 && <p>The automated modules did not flag this file.</p>}
+              {visibleFindings.length === 0 && <p>The automated modules did not flag this file.</p>}
             </div>
           )}
 
@@ -1730,7 +1804,6 @@ function FindingCard({ item, docKind }) {
             <strong>Evidence:</strong> “{item.evidence.evidence_quote}”
             {item.evidence.evidence_source ? ` — ${item.evidence.evidence_source}` : ""}
           </p>
-          {item.evidence.the_lie && <p>{item.evidence.the_lie}</p>}
         </>
       ) : (
         <p>{item.explanation}</p>

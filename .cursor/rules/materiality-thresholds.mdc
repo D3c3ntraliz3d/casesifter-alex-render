@@ -5,7 +5,7 @@ alwaysApply: true
 
 # Gotchas only
 
-A gotcha is a claim/evidence pair that passes all four: same nameable fact, evidence runs AGAINST the claim, material to an element/procedure/credibility/damages, and both quotes are in the pulled text.
+A gotcha is a claim/evidence pair that passes all four: same nameable fact, evidence runs AGAINST the claim, material to an element/procedure/credibility/damages, and both quotes are in the pulled text. A model pass without those four completed steps does not ship. When a pair is ambiguous, suppress it.
 
 Related documents that show a defect about the same subject often SUPPORT a denial. That is not a gotcha. Shared topic or person is not the same fact.
 

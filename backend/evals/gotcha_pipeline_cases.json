@@ -1,0 +1,69 @@
+{
+  "cases": [
+    {
+      "id": "pipe-contract-buried-weld",
+      "area": "contracts",
+      "label": "tp",
+      "filing_name": "Affidavit in Opposition",
+      "filing_text": "The company states there were no prior complaints about the weld. Production continued on the original schedule.",
+      "exhibits": [
+        {
+          "name": "Exhibit 14 customer file",
+          "text": "Cover sheet and routine shipping notes. Buried footnote: on March 2, 2023 the customer emailed that the weld failed again and requested a replacement joint."
+        }
+      ]
+    },
+    {
+      "id": "pipe-family-caregiver",
+      "area": "family_law",
+      "label": "tp",
+      "filing_name": "Parenting affidavit",
+      "filing_text": "I have been the child's primary caregiver every weekday since 2022. I take the child to school and collect the child after dismissal.",
+      "exhibits": [
+        {
+          "name": "School sign-out log",
+          "text": "Attendance remarks. School sign-out log: father picked up the child four weekdays in March 2023; mother is listed as emergency contact only."
+        }
+      ]
+    },
+    {
+      "id": "pipe-proc-settlement",
+      "area": "civil_procedure_example",
+      "label": "tp",
+      "filing_name": "Defendant affirmation",
+      "filing_text": "After agreeing to cancel collection, the other side continued to send monthly demand statements to my home.",
+      "exhibits": [
+        {
+          "name": "Stipulation of settlement",
+          "text": "The stipulation of settlement cancels collection on the account and discharges it as of January 18, 2024."
+        }
+      ]
+    },
+    {
+      "id": "pipe-pi-duty-place",
+      "area": "personal_injury",
+      "label": "fp",
+      "filing_name": "Bill of particulars",
+      "filing_text": "The property owner promised to keep the walkway in good repair throughout the winter season.",
+      "exhibits": [
+        {
+          "name": "Incident report",
+          "text": "The incident report lists the walkway address as 200 Smith Street, Brooklyn, near the stoop."
+        }
+      ]
+    },
+    {
+      "id": "pipe-crim-defective-warning",
+      "area": "criminal",
+      "label": "fp",
+      "filing_name": "Suppression motion",
+      "filing_text": "I never received the required warning before questioning at the precinct.",
+      "exhibits": [
+        {
+          "name": "Suppression decision",
+          "text": "The suppression court found the warning defective and the statement inadmissible."
+        }
+      ]
+    }
+  ]
+}

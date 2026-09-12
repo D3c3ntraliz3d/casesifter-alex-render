@@ -18,6 +18,13 @@
           "expect_fail": null
         },
         {
+          "id": "contract-tp-buried-complaint",
+          "label": "tp",
+          "claim_quote": "There were no prior complaints about the weld.",
+          "evidence_quote": "Exhibit 14 footnote: on March 2, 2023 the customer emailed that the weld failed again.",
+          "expect_fail": null
+        },
+        {
           "id": "contract-fp-same-topic-support",
           "label": "fp",
           "claim_quote": "The seller never delivered conforming goods under section 12.",
@@ -29,6 +36,13 @@
           "label": "fp",
           "claim_quote": "Acme Corp never authorized the wire.",
           "evidence_quote": "Acme Corp's registered office is listed on the secretary of state printout.",
+          "expect_fail": "same_fact"
+        },
+        {
+          "id": "contract-fp-related-party-address",
+          "label": "fp",
+          "claim_quote": "The expert never inspected the failed joint.",
+          "evidence_quote": "The expert's letterhead lists a downtown office address.",
           "expect_fail": "same_fact"
         }
       ]
@@ -95,7 +109,40 @@
           "label": "fp",
           "claim_quote": "The interview occurred on 3/15/09.",
           "evidence_quote": "The detective's memo says the interview occurred on March 15, 2009.",
+          "expect_fail": "materiality"
+        }
+      ]
+    },
+    {
+      "area": "family_law",
+      "pairs": [
+        {
+          "id": "fam-tp-caregiver",
+          "label": "tp",
+          "claim_quote": "I have been the child's primary caregiver every weekday since 2022.",
+          "evidence_quote": "School sign-out log: father picked up the child four weekdays in March 2023; mother is listed as emergency contact only.",
+          "expect_fail": null
+        },
+        {
+          "id": "fam-tp-undisclosed-account",
+          "label": "tp",
+          "claim_quote": "I disclosed all accounts in the sworn net worth statement.",
+          "evidence_quote": "Bank letter: joint account 4491 was opened in 2019 and is not listed on the net worth statement.",
+          "expect_fail": null
+        },
+        {
+          "id": "fam-fp-vacated-order",
+          "label": "fp",
+          "claim_quote": "I never received the parenting-time order.",
+          "evidence_quote": "The court later vacated that parenting-time order as untimely and insufficient.",
           "expect_fail": "directionality"
+        },
+        {
+          "id": "fam-fp-school-staff",
+          "label": "fp",
+          "claim_quote": "The child attends PS 12 every weekday.",
+          "evidence_quote": "PS 12's principal is listed as Ms. Rivera on the district directory.",
+          "expect_fail": "same_fact"
         }
       ]
     },
