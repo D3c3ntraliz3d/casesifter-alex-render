@@ -140,6 +140,7 @@ class DocumentUpdate(BaseModel):
 
 class CaseChatBody(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
+    focus_document_id: str | None = None
 
 
 class LicenseBody(BaseModel):

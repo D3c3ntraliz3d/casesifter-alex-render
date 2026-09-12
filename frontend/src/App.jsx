@@ -434,6 +434,9 @@ export default function App() {
                 caseData?.documents?.find((d) => d.id === selectedDocId)?.display_name
                 || job.filename
               }
+              documents={caseData?.documents || []}
+              onOpenReport={openDocumentReport}
+              onError={setError}
             />
           )}
         </>
@@ -756,7 +759,12 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
         onOpenReport={onOpenReport}
       />
 
-      <CaseChat caseId={caseData.id} documents={docs} onOpenReport={onOpenReport} onError={onError} />
+      <CaseChat
+        caseId={caseData.id}
+        documents={docs}
+        onOpenReport={onOpenReport}
+        onError={onError}
+      />
 
       <div className="card">
         <div className="toolbar">
@@ -875,7 +883,13 @@ const CHAT_HINTS = [
   "Where do the amounts conflict across filings?",
 ];
 
-function CaseChat({ caseId, documents, onOpenReport, onError }) {
+const REPORT_CHAT_HINTS = [
+  "What was this document used for?",
+  "Which motions cite this exhibit?",
+  "Do the amounts here match other filings?",
+];
+
+function CaseChat({ caseId, documents, onOpenReport, onError, focusDocument }) {
   const [messages, setMessages] = useState([]);
   const [draft, setDraft] = useState("");
   const [asking, setAsking] = useState(false);
@@ -919,7 +933,9 @@ function CaseChat({ caseId, documents, onOpenReport, onError }) {
     const pending = { id: `local-${Date.now()}`, role: "user", content: text, citations: [] };
     setMessages((prev) => [...prev, pending]);
     try {
-      const result = await askCaseChat(caseId, text);
+      const result = await askCaseChat(caseId, text, {
+        focusDocumentId: focusDocument?.id,
+      });
       setMessages((prev) => [
         ...prev.filter((item) => item.id !== pending.id),
         { ...pending, id: `${pending.id}-kept` },
@@ -939,20 +955,27 @@ function CaseChat({ caseId, documents, onOpenReport, onError }) {
   }
 
   return (
-    <div className="card case-chat">
+    <div className={`card case-chat${focusDocument ? " on-report" : ""}`}>
       <p className="kicker">Case clerk</p>
-      <h2 className="serif" style={{ margin: "4px 0 8px" }}>Ask about these documents</h2>
+      <h2 className="serif" style={{ margin: "4px 0 8px" }}>
+        {focusDocument ? "Ask about this document" : "Ask about these documents"}
+      </h2>
       <p className="footnote" style={{ marginBottom: 14 }}>
-        Answers come from the filings and exhibits in this case — for example, where a motion cites a
-        Wells Fargo statement. Click a source to open its report.
+        {focusDocument
+          ? `Questions treat “this” as ${focusDocument.display_name || focusDocument.original_filename}, then search the rest of the case for citations and conflicts.`
+          : "Answers come from the filings and exhibits in this case — for example, where a motion cites a Wells Fargo statement. Click a source to open its report."}
       </p>
       <div className="chat-thread" ref={threadRef}>
         {messages.length === 0 && !asking && (
           <div className="chat-empty">
             <MessageSquare size={18} />
-            <p>Ask what an exhibit was used for, or where a party or amount appears in the motions.</p>
+            <p>
+              {focusDocument
+                ? "Ask what this filing was used for, or whether another document in the case contradicts it."
+                : "Ask what an exhibit was used for, or where a party or amount appears in the motions."}
+            </p>
             <div className="chat-hints">
-              {CHAT_HINTS.map((hint) => (
+              {(focusDocument ? REPORT_CHAT_HINTS : CHAT_HINTS).map((hint) => (
                 <button key={hint} type="button" className="chat-hint" onClick={() => send(hint)}>
                   {hint}
                 </button>
@@ -992,7 +1015,11 @@ function CaseChat({ caseId, documents, onOpenReport, onError }) {
         <textarea
           value={draft}
           rows={2}
-          placeholder="e.g. What was the Wells Fargo mortgage statement used for?"
+          placeholder={
+            focusDocument
+              ? "e.g. What was this exhibit used for?"
+              : "e.g. What was the Wells Fargo mortgage statement used for?"
+          }
           disabled={asking}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
@@ -1193,7 +1220,20 @@ function ProgressPanel({ job, filename }) {
   );
 }
 
-function ReportViewer({ job, report, findings, tab, setTab, docKind, caseId, documentId, documentName }) {
+function ReportViewer({
+  job,
+  report,
+  findings,
+  tab,
+  setTab,
+  docKind,
+  caseId,
+  documentId,
+  documentName,
+  documents = [],
+  onOpenReport,
+  onError,
+}) {
   const material = findings.filter((f) => f.severity !== "info");
   const caseAlerts = findings.filter((f) => f.category === "case_consistency");
   const [showDoc, setShowDoc] = useState(true);
@@ -1248,6 +1288,19 @@ function ReportViewer({ job, report, findings, tab, setTab, docKind, caseId, doc
         </div>
         <p style={{ marginTop: 16 }}>{report.executive_summary}</p>
       </div>
+
+      {caseId && onOpenReport && (
+        <CaseChat
+          caseId={caseId}
+          documents={documents}
+          focusDocument={documents.find((doc) => doc.id === documentId) || {
+            id: documentId,
+            display_name: documentName,
+          }}
+          onOpenReport={onOpenReport}
+          onError={onError || (() => {})}
+        />
+      )}
 
       <div className={`report-layout ${showDoc ? "with-doc" : ""}`}>
         {showDoc && (

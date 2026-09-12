@@ -658,6 +658,9 @@ table.data td.row-actions { width: 1%; text-align: right; }
 .archive-panel > summary::-webkit-details-marker { display: none; }
 .archive-panel > summary span { color: var(--muted); font-weight: 500; font-size: 13px; }
 
+.case-chat.on-report .chat-thread {
+  max-height: 240px;
+}
 .case-chat .chat-thread {
   max-height: 340px;
   overflow: auto;

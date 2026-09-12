@@ -28,6 +28,9 @@ PURPOSE_RE = re.compile(
     r"(?i)\b(used for|purpose|why (?:was|is|did)|rely|relied|annexed|attached|"
     r"in support|offered|introduced|cite[sd]?|reference[sd]?)\b"
 )
+THIS_DOC_RE = re.compile(
+    r"(?i)\b(this (exhibit|statement|document|file|page|one)|the exhibit|the statement)\b"
+)
 
 CHAT_SCHEMA = {
     "type": "object",
@@ -57,15 +60,27 @@ When asked what an exhibit was used for, look in motions, affidavits, complaints
 other pleadings for where that exhibit or issuer is cited (e.g. "Exhibit S", "Wells Fargo
 statement", "in support of").
 
-Question:
+{focus_block}Question:
 {question}
 
 Excerpts from this case:
 {packet}
 """
 
+FOCUS_BLOCK = """The attorney is viewing this document: {name} (kind: {kind}).
+Treat “this exhibit,” “this statement,” and “this document” as that file.
+Use its text and scan notes first. Also use other filings to explain how it was
+cited or whether they conflict with it.
 
-def ask_case(case_id: str, question: str, history: list[dict[str, str]] | None = None) -> dict[str, Any]:
+"""
+
+
+def ask_case(
+    case_id: str,
+    question: str,
+    history: list[dict[str, str]] | None = None,
+    focus_document_id: str | None = None,
+) -> dict[str, Any]:
     question = (question or "").strip()
     if not question:
         raise ValueError("Ask a question about the documents in this case.")
@@ -73,11 +88,19 @@ def ask_case(case_id: str, question: str, history: list[dict[str, str]] | None =
     if case is None:
         raise ValueError("Unknown case.")
 
+    focus = _resolve_focus(case_id, focus_document_id)
     extra_tokens: list[str] = []
     for turn in history or []:
         if turn.get("role") == "user":
             extra_tokens.extend(_tokens(turn.get("content") or ""))
-    hits = retrieve(case_id, question, extra_tokens=extra_tokens)
+    if focus:
+        extra_tokens.extend(focus["tokens"])
+    hits = retrieve(
+        case_id,
+        question,
+        extra_tokens=extra_tokens,
+        focus_document_id=focus["document"]["id"] if focus else None,
+    )
     if not hits:
         return {
             "answer": "No extracted text in this case matches that question yet. Scan the filings first, then ask again.",
@@ -107,7 +130,23 @@ def ask_case(case_id: str, question: str, history: list[dict[str, str]] | None =
                 "contents": [
                     {
                         "role": "user",
-                        "parts": [{"text": prior + CHAT_PROMPT.format(question=question, packet=packet)}],
+                        "parts": [
+                            {
+                                "text": prior
+                                + CHAT_PROMPT.format(
+                                    question=question,
+                                    packet=packet,
+                                    focus_block=(
+                                        FOCUS_BLOCK.format(
+                                            name=focus["name"],
+                                            kind=focus["kind"] or "unknown",
+                                        )
+                                        if focus
+                                        else ""
+                                    ),
+                                )
+                            }
+                        ],
                     }
                 ],
                 "generationConfig": _generation_config(CHAT_SCHEMA, settings.gemini_thinking_level),
@@ -152,9 +191,10 @@ def retrieve(
     question: str,
     limit: int = 6,
     extra_tokens: list[str] | None = None,
+    focus_document_id: str | None = None,
 ) -> list[dict[str, Any]]:
     tokens = list(dict.fromkeys(_tokens(question) + list(extra_tokens or [])))
-    purpose = bool(PURPOSE_RE.search(question))
+    purpose = bool(PURPOSE_RE.search(question) or (focus_document_id and THIS_DOC_RE.search(question)))
     docs = cases_db.list_documents(case_id)
     snaps = {s["document_id"]: s for s in cases_db.list_case_snapshots(case_id)}
     ranked: list[tuple[float, dict[str, Any], dict[str, Any]]] = []
@@ -178,36 +218,55 @@ def retrieve(
         score = _score(cheap, tokens, doc.get("doc_kind"), purpose)
         if purpose and (doc.get("doc_kind") or "").lower() in COURT_FILING_KINDS:
             score += 2
-        if score <= 0 and not (purpose and (doc.get("doc_kind") or "").lower() in COURT_FILING_KINDS):
+        focused = bool(focus_document_id and doc["id"] == focus_document_id)
+        if focused:
+            score += 8
+        if (
+            score <= 0
+            and not focused
+            and not (purpose and (doc.get("doc_kind") or "").lower() in COURT_FILING_KINDS)
+        ):
             continue
         ranked.append((score, doc, snap))
     ranked.sort(key=lambda item: item[0], reverse=True)
+
+    if focus_document_id and not any(doc["id"] == focus_document_id for _, doc, _ in ranked):
+        focus_doc = next((doc for doc in docs if doc["id"] == focus_document_id), None)
+        if focus_doc:
+            ranked.insert(0, (20, focus_doc, snaps.get(focus_document_id) or {}))
 
     scored: list[tuple[float, dict[str, Any]]] = []
     extracted = 0
     for cheap_score, doc, snap in ranked[:18]:
         cached = (snap.get("text_excerpt") or "").strip()
         text = cached
-        if not text and extracted < 12:
-            text = _live_text(doc.get("stored_path"))
+        focused = bool(focus_document_id and doc["id"] == focus_document_id)
+        if not text and (focused or extracted < 12):
+            text = _live_text(doc.get("stored_path"), limit=28_000 if focused else 24_000)
             extracted += 1
             if text:
                 cases_db.save_text_excerpt(doc["id"], case_id, text)
         findings = snap.get("findings_summary") or []
         blob = f"{text} {doc.get('display_name') or ''} {doc.get('original_filename') or ''}"
         score = _score(blob, tokens, doc.get("doc_kind"), purpose) or cheap_score
-        if score <= 0:
+        if score <= 0 and not focused:
             continue
+        snippets = _snippets(text, tokens) or ([text[:500]] if text else [])
+        if focused and text:
+            lead = re.sub(r"\s+", " ", text[:900]).strip()
+            if lead and lead not in snippets:
+                snippets = [lead, *snippets][:4]
         scored.append(
             (
-                score,
+                1000 + score if focused else score,
                 {
                     "document_id": doc["id"],
                     "display_name": doc.get("display_name") or doc.get("original_filename"),
                     "doc_kind": doc.get("doc_kind"),
                     "status": doc.get("status"),
                     "scan_job_id": doc.get("scan_job_id"),
-                    "snippets": _snippets(text, tokens) or [text[:500] if text else ""],
+                    "focused": focused,
+                    "snippets": snippets,
                     "findings": [
                         f.get("title")
                         for f in findings[:6]
@@ -218,6 +277,34 @@ def retrieve(
         )
     scored.sort(key=lambda item: item[0], reverse=True)
     return [item[1] for item in scored[:limit] if (item[1].get("snippets") or [""])[0]]
+
+
+def _resolve_focus(case_id: str, document_id: str | None) -> dict[str, Any] | None:
+    if not document_id:
+        return None
+    doc = cases_db.get_document(document_id)
+    if not doc or doc.get("case_id") != case_id:
+        return None
+    snap = cases_db.get_scan_snapshot(document_id) or {}
+    name = doc.get("display_name") or doc.get("original_filename") or "this document"
+    return {
+        "document": doc,
+        "snap": snap,
+        "name": name,
+        "kind": doc.get("doc_kind") or "",
+        "tokens": _document_tokens(doc, snap),
+    }
+
+
+def _document_tokens(doc: dict[str, Any], snap: dict[str, Any]) -> list[str]:
+    bits = [doc.get("display_name") or "", doc.get("original_filename") or ""]
+    orgs = (snap.get("entities") or {}).get("organizations") or []
+    if isinstance(orgs, list):
+        bits.extend(str(org) for org in orgs[:8])
+    for item in snap.get("findings_summary") or []:
+        if isinstance(item, dict):
+            bits.append(str(item.get("title") or ""))
+    return _tokens(" ".join(bits))
 
 
 def _live_text(stored_path: str | None, limit: int = 24_000) -> str:
@@ -297,10 +384,12 @@ def _snippets(text: str, tokens: list[str], window: int = 420, limit: int = 3) -
 
 
 def _format_packet(hits: list[dict[str, Any]], budget: int = 18_000) -> str:
+    ordered = sorted(hits, key=lambda hit: 0 if hit.get("focused") else 1)
     parts: list[str] = []
     used = 0
-    for hit in hits:
-        block = f"### {hit['display_name']} (kind: {hit.get('doc_kind') or 'unknown'})\n"
+    for hit in ordered:
+        label = "FOCUS — " if hit.get("focused") else ""
+        block = f"### {label}{hit['display_name']} (kind: {hit.get('doc_kind') or 'unknown'})\n"
         if hit.get("findings"):
             block += "Scan notes: " + "; ".join(hit["findings"][:4]) + "\n"
         for snip in hit.get("snippets") or []:

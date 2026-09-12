@@ -241,7 +241,12 @@ def api_case_chat(case_id: str, body: CaseChatBody):
         for item in cases_db.list_case_messages(case_id, limit=8)
     ]
     try:
-        result = ask_case(case_id, body.question, history=history)
+        result = ask_case(
+            case_id,
+            body.question,
+            history=history,
+            focus_document_id=body.focus_document_id,
+        )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     cases_db.add_case_message(case_id, "user", body.question.strip())

@@ -110,11 +110,14 @@ export async function listCaseChat(caseId) {
   return data.messages || [];
 }
 
-export async function askCaseChat(caseId, question) {
+export async function askCaseChat(caseId, question, { focusDocumentId } = {}) {
   const res = await fetch(`/api/cases/${caseId}/chat`, {
     method: "POST",
     headers: { ...jsonHeaders, "Content-Type": "application/json" },
-    body: JSON.stringify({ question }),
+    body: JSON.stringify({
+      question,
+      focus_document_id: focusDocumentId || undefined,
+    }),
   });
   return readJson(res);
 }
