@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Exhibit authenticity report — {{ report.audit.filename }}</title>
+  <title>LawSifter report — {{ report.audit.filename }}</title>
   <style>
     :root { --navy:#1a365d; --ink:#1a202c; --muted:#4a5568; --line:#e2e8f0; --paper:#f7f4ef; }
     body { font-family: "Times New Roman", Times, serif; color: var(--ink); margin: 0; background: white; }
@@ -27,7 +27,7 @@
 </head>
 <body>
   <div class="wrap">
-    <h1>Court Exhibit Scanner</h1>
+    <h1>LawSifter</h1>
     <div class="meta">Authenticity verification report · {{ generated }} · software v{{ version }}</div>
     <p><strong>File:</strong> {{ report.audit.filename }} &nbsp;|&nbsp; <strong>SHA-256:</strong> {{ report.audit.sha256 }}</p>
     <p>

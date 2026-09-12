@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { FolderOpen, ShieldAlert, Upload } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { FolderOpen, Search, ShieldAlert, Upload, X } from "lucide-react";
 import {
   createCase,
   documentFileUrl,
@@ -91,6 +91,56 @@ function extensionOf(name) {
   return i >= 0 ? name.slice(i).toLowerCase() : "";
 }
 
+function partiesFromCaption(caption = "") {
+  const raw = String(caption).replace(/\s+/g, " ").trim();
+  if (!raw) return [];
+  return raw
+    .split(/\s+v\.?\s+|\s+vs\.?\s+|,\s*plaintiffs?,?\s*[-–—]\s*against\s+|[-–—]\s*against\s+/i)
+    .map((part) => part.replace(/,?\s*(plaintiffs?|defendants?)\s*$/i, "").trim())
+    .filter(Boolean);
+}
+
+function caseSearchText(item) {
+  return [
+    item.caption,
+    item.court,
+    item.index_number,
+    item.notes,
+    ...partiesFromCaption(item.caption),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+}
+
+function matchesQuery(text, query) {
+  const q = query.trim().toLowerCase();
+  if (!q) return true;
+  const hay = (text || "").toLowerCase();
+  return q.split(/\s+/).every((token) => hay.includes(token));
+}
+
+function SearchField({ value, onChange, placeholder, autoFocus, onKeyDown }) {
+  return (
+    <label className="search">
+      <Search size={16} strokeWidth={2} />
+      <input
+        type="search"
+        value={value}
+        autoFocus={autoFocus}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={onKeyDown}
+        placeholder={placeholder}
+      />
+      {value ? (
+        <button type="button" className="search-clear" onClick={() => onChange("")} aria-label="Clear search">
+          <X size={14} />
+        </button>
+      ) : null}
+    </label>
+  );
+}
+
 export default function App() {
   const [view, setView] = useState("cases"); // cases | case | report | account
   const [cases, setCases] = useState([]);
@@ -102,6 +152,7 @@ export default function App() {
   const [error, setError] = useState("");
   const [entitlement, setEntitlement] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [query, setQuery] = useState("");
 
   async function refreshCases() {
     const rows = await listCases();
@@ -175,34 +226,73 @@ export default function App() {
     setView("report");
   }
 
+  const filteredCases = useMemo(
+    () => cases.filter((item) => matchesQuery(caseSearchText(item), query)),
+    [cases, query]
+  );
+
   return (
     <div className="app">
       <header className="masthead">
-        <div className="brand">
-          <div className="seal">EX</div>
+        <button type="button" className="brand" onClick={() => { setView("cases"); setQuery(""); }}>
+          <div className="seal">LS</div>
           <div>
-            <h1>Court Exhibit Scanner</h1>
-            <p>Case-local evidence · hybrid subscription control</p>
+            <h1>LawSifter</h1>
+            <p>Sift the record. Flag what matters.</p>
           </div>
+        </button>
+        <div className="mast-search">
+          <SearchField
+            value={query}
+            onChange={setQuery}
+            placeholder="Search cases, parties, index, or court…"
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && filteredCases.length === 1) {
+                setQuery("");
+                openCase(filteredCases[0].id);
+              }
+            }}
+          />
+          {query.trim() && view !== "cases" && filteredCases.length > 0 && (
+            <div className="search-results">
+              {filteredCases.slice(0, 8).map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => {
+                    setQuery("");
+                    openCase(item.id);
+                  }}
+                >
+                  <strong>{item.caption}</strong>
+                  <span>
+                    {[item.index_number, item.court].filter(Boolean).join(" · ") || "No index"}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
-        <div className="actions">
-          <button className="btn secondary" type="button" onClick={() => setView("cases")}>
+        <nav className="mast-nav">
+          <button type="button" className={view !== "account" ? "on" : ""} onClick={() => setView("cases")}>
             Cases
           </button>
-          <button className="btn secondary" type="button" onClick={() => { refreshEntitlement(); setView("account"); }}>
+          <button type="button" className={view === "account" ? "on" : ""} onClick={() => { refreshEntitlement(); setView("account"); }}>
             Account
           </button>
-          <div className="badge-soft">
-            {entitlement?.active ? (entitlement.plan || "Active") : "Inactive"}
-          </div>
-        </div>
+          <span className={`status-dot ${entitlement?.active ? "live" : ""}`}>
+            {entitlement?.active ? (entitlement.plan || "Active") : "Offline"}
+          </span>
+        </nav>
       </header>
 
-      {error && <div className="card error">{error}</div>}
+      {error && <div className="banner error">{error}</div>}
 
       {view === "cases" && (
         <CasesPage
-          cases={cases}
+          cases={filteredCases}
+          totalCount={cases.length}
+          query={query}
           busy={busy}
           onCreate={async (payload) => {
             setBusy(true);
@@ -235,8 +325,8 @@ export default function App() {
 
       {view === "report" && (
         <>
-          <div className="card">
-            <button className="btn secondary" type="button" onClick={() => setView("case")}>
+          <div className="crumb-bar">
+            <button className="text-link" type="button" onClick={() => setView("case")}>
               ← Back to case
             </button>
           </div>
@@ -279,74 +369,109 @@ export default function App() {
   );
 }
 
-function CasesPage({ cases, busy, onCreate, onOpen }) {
+function CasesPage({ cases, totalCount, query, busy, onCreate, onOpen }) {
   const [caption, setCaption] = useState("");
   const [court, setCourt] = useState("");
   const [indexNumber, setIndexNumber] = useState("");
+  const [showNew, setShowNew] = useState(false);
 
   return (
     <>
-      <div className="card">
-        <p className="kicker">New matter</p>
-        <h2 className="serif" style={{ marginTop: 4 }}>Open a case</h2>
-        <p className="footnote">
-          Documents stay on this machine under the case folder. The cloud only handles
-          subscription status and optional anonymized finding stats.
-        </p>
-        <form
-          className="case-form"
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (!caption.trim()) return;
-            onCreate({
-              caption: caption.trim(),
-              court: court.trim() || null,
-              index_number: indexNumber.trim() || null,
-            });
-            setCaption("");
-            setCourt("");
-            setIndexNumber("");
-          }}
-        >
-          <label>
-            Case caption
-            <input value={caption} onChange={(e) => setCaption(e.target.value)} placeholder="Bank v. Defendant" required />
-          </label>
-          <label>
-            Court
-            <input value={court} onChange={(e) => setCourt(e.target.value)} placeholder="Supreme Court, Kings County" />
-          </label>
-          <label>
-            Index number
-            <input value={indexNumber} onChange={(e) => setIndexNumber(e.target.value)} placeholder="11467/2007" />
-          </label>
-          <button className="btn" type="submit" disabled={busy || !caption.trim()}>
-            Create case
-          </button>
-        </form>
+      <div className="page-head">
+        <div>
+          <p className="kicker">Matters</p>
+          <h2 className="serif">Cases</h2>
+          <p className="footnote">
+            {query.trim()
+              ? `${cases.length} match${cases.length === 1 ? "" : "es"} of ${totalCount}`
+              : `${totalCount} matter${totalCount === 1 ? "" : "s"} on this machine`}
+          </p>
+        </div>
+        <button className="btn" type="button" onClick={() => setShowNew((v) => !v)}>
+          {showNew ? "Cancel" : "New case"}
+        </button>
       </div>
 
-      <div className="card">
-        <p className="kicker">Your cases</p>
-        {cases.length === 0 && <p>No cases yet. Create one to start filing exhibits locally.</p>}
-        <ul className="batch-list">
-          {cases.map((item) => (
-            <li key={item.id}>
-              <button type="button" className="batch-item" onClick={() => onOpen(item.id)}>
-                <span className="batch-index"><FolderOpen size={16} /></span>
-                <span className="batch-meta">
-                  <strong>{item.caption}</strong>
-                  <span className="footnote">
-                    {[item.index_number, item.court].filter(Boolean).join(" · ") || "No index yet"}
-                    {" · "}
-                    {item.document_count || 0} document{(item.document_count || 0) === 1 ? "" : "s"}
-                  </span>
-                </span>
-                <span className="batch-pill">open</span>
-              </button>
-            </li>
-          ))}
-        </ul>
+      {showNew && (
+        <div className="card quiet">
+          <p className="kicker">New matter</p>
+          <h3 className="serif" style={{ margin: "4px 0 8px" }}>Open a case</h3>
+          <form
+            className="case-form inline"
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (!caption.trim()) return;
+              onCreate({
+                caption: caption.trim(),
+                court: court.trim() || null,
+                index_number: indexNumber.trim() || null,
+              });
+              setCaption("");
+              setCourt("");
+              setIndexNumber("");
+              setShowNew(false);
+            }}
+          >
+            <label>
+              Caption
+              <input value={caption} onChange={(e) => setCaption(e.target.value)} placeholder="Bank v. Defendant" required />
+            </label>
+            <label>
+              Court
+              <input value={court} onChange={(e) => setCourt(e.target.value)} placeholder="Supreme Court, Kings County" />
+            </label>
+            <label>
+              Index
+              <input value={indexNumber} onChange={(e) => setIndexNumber(e.target.value)} placeholder="11467/2007" />
+            </label>
+            <button className="btn gold" type="submit" disabled={busy || !caption.trim()}>
+              Create
+            </button>
+          </form>
+        </div>
+      )}
+
+      <div className="card flush">
+        {cases.length === 0 ? (
+          <div className="empty">
+            <FolderOpen size={22} />
+            <p>
+              {totalCount === 0
+                ? "No cases yet. Open a matter to keep filings together."
+                : "No cases match that search."}
+            </p>
+          </div>
+        ) : (
+          <table className="data cases">
+            <thead>
+              <tr>
+                <th>Caption</th>
+                <th>Parties</th>
+                <th>Index</th>
+                <th>Court</th>
+                <th>Files</th>
+              </tr>
+            </thead>
+            <tbody>
+              {cases.map((item) => {
+                const parties = partiesFromCaption(item.caption);
+                return (
+                  <tr key={item.id} className="click-row" onClick={() => onOpen(item.id)}>
+                    <td>
+                      <strong className="matter-name">{item.caption}</strong>
+                    </td>
+                    <td className="muted">
+                      {parties.length > 1 ? parties.join(" · ") : parties[0] || "—"}
+                    </td>
+                    <td className="mono">{item.index_number || "—"}</td>
+                    <td className="muted">{item.court || "—"}</td>
+                    <td className="num">{item.document_count || 0}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
       </div>
     </>
   );
@@ -356,8 +481,15 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
   const [drag, setDrag] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [editName, setEditName] = useState("");
+  const [docQuery, setDocQuery] = useState("");
   const inputRef = useRef(null);
   const docs = caseData.documents || [];
+  const visibleDocs = docs.filter((doc) =>
+    matchesQuery(
+      [doc.display_name, doc.original_filename, doc.doc_kind, doc.status, doc.risk_level].filter(Boolean).join(" "),
+      docQuery
+    )
+  );
 
   async function onUpload(fileList) {
     const files = Array.from(fileList || []);
@@ -416,22 +548,19 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
 
   return (
     <>
-      <div className="card">
-        <div className="row" style={{ justifyContent: "space-between" }}>
-          <div>
-            <button className="btn secondary" type="button" onClick={onBack} style={{ marginBottom: 10 }}>
-              ← All cases
-            </button>
-            <p className="kicker">Case workspace</p>
-            <h2 className="serif" style={{ margin: "4px 0" }}>{caseData.caption}</h2>
-            <p className="footnote">
-              {[caseData.index_number, caseData.court].filter(Boolean).join(" · ") || "Index / court not set"}
-            </p>
-          </div>
-        </div>
+      <div className="card case-hero">
+        <button className="text-link" type="button" onClick={onBack}>← All cases</button>
+        <p className="kicker">Case</p>
+        <h2 className="serif">{caseData.caption}</h2>
+        <p className="meta-line">
+          {partiesFromCaption(caseData.caption).join(" · ") || "Parties from caption"}
+          <span className="dot" />
+          {caseData.index_number || "No index"}
+          <span className="dot" />
+          {caseData.court || "Court not set"}
+        </p>
         <div
-          className={`dropzone ${drag ? "active" : ""}`}
-          style={{ marginTop: 16, padding: "28px 16px" }}
+          className={`dropzone compact ${drag ? "active" : ""}`}
           onDragOver={(e) => { e.preventDefault(); setDrag(true); }}
           onDragLeave={() => setDrag(false)}
           onDrop={(e) => {
@@ -441,10 +570,11 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
           }}
           onClick={() => inputRef.current?.click()}
         >
-          <Upload size={24} />
-          <h2>Add filings to this case</h2>
-          <p>Files are stored locally and scanned against prior documents already in the case.</p>
-          <div className="formats">PDF · TXT · DOCX · XLSX · JPG · PNG · GIF</div>
+          <Upload size={18} />
+          <div>
+            <strong>Add filings</strong>
+            <p>Drop files here or click to upload. Pleadings get content review; exhibits get forensic review.</p>
+          </div>
           <input
             ref={inputRef}
             type="file"
@@ -454,11 +584,6 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
             onChange={(e) => onUpload(e.target.files)}
           />
         </div>
-        <p className="footnote" style={{ marginTop: 8 }}>
-          Complaints, motions, and other pleadings run a <strong>content + case-comparison</strong> scan.
-          Exhibits and statements run the full <strong>forensic alteration</strong> pipeline (whiteouts, page inserts, AcroForm, etc.).
-          Set the Kind column before re-scanning if auto-detect was wrong.
-        </p>
       </div>
 
       <CaseRiskSummary
@@ -468,18 +593,27 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
       />
 
       <div className="card">
-        <div className="row" style={{ justifyContent: "space-between", marginBottom: 12 }}>
+        <div className="toolbar">
           <div>
             <p className="kicker">Documents</p>
             <h2 className="serif" style={{ margin: "4px 0 0" }}>
               {docs.length} file{docs.length === 1 ? "" : "s"}
             </h2>
           </div>
+          <SearchField
+            value={docQuery}
+            onChange={setDocQuery}
+            placeholder="Filter by name, kind, or risk…"
+          />
           <button className="btn secondary" type="button" disabled={busy} onClick={() => inputRef.current?.click()}>
-            Upload more
+            Upload
           </button>
         </div>
-        {docs.length === 0 && <p>Drop complaints, motions, and exhibits here as the matter progresses.</p>}
+        {docs.length === 0 && <p className="empty-copy">Drop complaints, motions, and exhibits as the matter progresses.</p>}
+        {docs.length > 0 && visibleDocs.length === 0 && (
+          <p className="empty-copy">No documents match that filter.</p>
+        )}
+        {visibleDocs.length > 0 && (
         <table className="data">
           <thead>
             <tr>
@@ -491,7 +625,7 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
             </tr>
           </thead>
           <tbody>
-            {docs.map((doc) => (
+            {visibleDocs.map((doc) => (
               <tr key={doc.id}>
                 <td>
                   {editingId === doc.id ? (
@@ -561,6 +695,7 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
             ))}
           </tbody>
         </table>
+        )}
       </div>
     </>
   );
@@ -575,7 +710,7 @@ function CaseRiskSummary({ byRisk, pendingCount, onOpenReport }) {
 
   return (
     <div className="card">
-      <p className="kicker">Case summary</p>
+      <p className="kicker">Triage</p>
       <h2 className="serif" style={{ margin: "4px 0 8px" }}>Reports by risk</h2>
       <p className="footnote" style={{ marginBottom: 14 }}>
         Open a group to jump straight to a document report.

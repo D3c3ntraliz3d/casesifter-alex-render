@@ -9,7 +9,7 @@ class Settings(BaseSettings):
         extra="ignore"
     )
 
-    app_name: str = "Court Exhibit Scanner"
+    app_name: str = "LawSifter"
     app_version: str = "1.0.0"
     max_file_mb: int = 100
     data_dir: Path = Path(__file__).resolve().parent.parent / "data"
