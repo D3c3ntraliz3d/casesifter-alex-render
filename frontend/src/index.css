@@ -720,6 +720,19 @@ table.data td.row-actions { width: 1%; text-align: right; }
   gap: 6px;
   margin-top: 10px;
 }
+.chat-inline-link {
+  appearance: none;
+  border: 0;
+  background: none;
+  padding: 0;
+  color: var(--navy);
+  font: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.chat-inline-link:hover { color: var(--gold); }
 .chat-compose {
   display: grid;
   grid-template-columns: 1fr auto;

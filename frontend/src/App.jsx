@@ -915,12 +915,7 @@ function CaseChat({ caseId, documents, onOpenReport, onError, focusDocument }) {
   }, [messages, asking]);
 
   function openCite(cite) {
-    const doc = documents.find(
-      (item) =>
-        item.id === cite.document_id ||
-        (cite.display_name &&
-          (item.display_name === cite.display_name || item.original_filename === cite.display_name))
-    );
+    const doc = findCitedDocument(documents, cite);
     if (doc) onOpenReport(doc);
   }
 
@@ -983,26 +978,35 @@ function CaseChat({ caseId, documents, onOpenReport, onError, focusDocument }) {
             </div>
           </div>
         )}
-        {messages.map((msg) => (
+        {messages.map((msg) => {
+          const cites = msg.role === "assistant"
+            ? mergeCitations(msg.citations, msg.content, documents)
+            : [];
+          return (
           <div key={msg.id} className={`chat-bubble ${msg.role}`}>
-            <p>{msg.content}</p>
-            {msg.role === "assistant" && msg.citations?.length > 0 && (
+            {msg.role === "assistant" ? (
+              <ChatAnswer text={msg.content} citations={cites} onOpen={openCite} />
+            ) : (
+              <p>{msg.content}</p>
+            )}
+            {cites.length > 0 && (
               <div className="chat-cites">
-                {msg.citations.map((cite, idx) => (
+                {cites.map((cite, idx) => (
                   <button
                     key={`${msg.id}-${idx}`}
                     type="button"
                     className="chat-cite"
                     onClick={() => openCite(cite)}
-                    title={cite.note || ""}
+                    title={cite.note || "Open this document’s report"}
                   >
-                    {cite.display_name}
+                    Open {cite.display_name}
                   </button>
                 ))}
               </div>
             )}
           </div>
-        ))}
+          );
+        })}
         {asking && <p className="footnote">Searching the filings…</p>}
       </div>
       <form
@@ -1035,6 +1039,114 @@ function CaseChat({ caseId, documents, onOpenReport, onError, focusDocument }) {
       </form>
     </div>
   );
+}
+
+function findCitedDocument(documents, cite) {
+  if (!cite) return null;
+  const byId = documents.find((item) => item.id === cite.document_id);
+  if (byId) return byId;
+  const no = cite.nyscef_no || nyscefNumbers(`${cite.display_name || ""} ${cite.note || ""}`)[0];
+  if (no) {
+    const byNo = documents.find((item) => documentHasNyscef(item, no));
+    if (byNo) return byNo;
+  }
+  const name = (cite.display_name || "").toLowerCase();
+  if (name.length > 8) {
+    return documents.find((item) => {
+      const hay = `${item.display_name || ""} ${item.original_filename || ""}`.toLowerCase();
+      return hay.includes(name) || name.includes(hay);
+    }) || null;
+  }
+  return null;
+}
+
+function nyscefNumbers(text) {
+  return [...(text || "").matchAll(/NYSCEF\s+Doc(?:ument)?\.?\s*No\.?\s*(\d+)/gi)].map((match) => match[1]);
+}
+
+function documentHasNyscef(doc, no) {
+  const hay = `${doc.display_name || ""} ${doc.original_filename || ""}`;
+  if (new RegExp(`NYSCEF\\s+Doc(?:ument)?\\.?\\s*No\\.?\\s*${no}\\b`, "i").test(hay)) return true;
+  if (new RegExp(`(?:affirm|affidavit|motion|exhibit|order|complaint|doc)\\w*\\s+${no}\\b`, "i").test(hay)) return true;
+  const stem = (doc.display_name || doc.original_filename || "").replace(/\.[^.]+$/, "").trim();
+  return new RegExp(`(?:^|[\\s_\\-])${no}$`).test(stem);
+}
+
+function mergeCitations(citations, text, documents) {
+  const out = [];
+  const seen = new Set();
+  function add(cite) {
+    const doc = findCitedDocument(documents, cite);
+    const key = doc?.id || cite.document_id || cite.display_name;
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    const no = cite.nyscef_no || (doc && nyscefFromDoc(doc));
+    let label = cite.display_name || doc?.display_name || "Document";
+    if (no && !label.includes(no)) label = `${label} (NYSCEF ${no})`;
+    out.push({
+      ...cite,
+      document_id: doc?.id || cite.document_id,
+      display_name: label,
+      nyscef_no: no,
+    });
+  }
+  (citations || []).forEach(add);
+  for (const match of text.matchAll(/["“]([^"”]{8,160})["”]\s*\((?:NYSCEF\s+)?Doc(?:ument)?\.?\s*No\.?\s*(\d+)\)/gi)) {
+    add({ display_name: match[1], nyscef_no: match[2], note: "Named in the answer" });
+  }
+  for (const no of nyscefNumbers(text)) {
+    add({ display_name: `NYSCEF Doc. No. ${no}`, nyscef_no: no, note: "Named in the answer" });
+  }
+  return out;
+}
+
+function nyscefFromDoc(doc) {
+  const hay = `${doc.display_name || ""} ${doc.original_filename || ""}`;
+  return nyscefNumbers(hay)[0] || (hay.match(/(?:affirm|affidavit|motion|exhibit|order|complaint)\w*\s+(\d{1,4})\b/i) || [])[1];
+}
+
+function ChatAnswer({ text, citations, onOpen }) {
+  const ranges = [];
+  for (const cite of citations) {
+    if (cite.nyscef_no) {
+      const re = new RegExp(`NYSCEF\\s+Doc(?:ument)?\\.?\\s*No\\.?\\s*${cite.nyscef_no}`, "gi");
+      for (const match of text.matchAll(re)) {
+        ranges.push({ start: match.index, end: match.index + match[0].length, cite, label: match[0] });
+      }
+    }
+    const title = (cite.display_name || "").replace(/\s*\(NYSCEF \d+\)$/, "");
+    if (title.length > 12) {
+      const at = text.indexOf(title);
+      if (at >= 0) ranges.push({ start: at, end: at + title.length, cite, label: title });
+    }
+  }
+  ranges.sort((a, b) => a.start - b.start || b.end - a.end);
+  const kept = [];
+  let cursor = 0;
+  for (const range of ranges) {
+    if (range.start < cursor) continue;
+    kept.push(range);
+    cursor = range.end;
+  }
+  if (kept.length === 0) return <p>{text}</p>;
+  const nodes = [];
+  let last = 0;
+  kept.forEach((range, idx) => {
+    if (range.start > last) nodes.push(text.slice(last, range.start));
+    nodes.push(
+      <button
+        key={`link-${idx}`}
+        type="button"
+        className="chat-inline-link"
+        onClick={() => onOpen(range.cite)}
+      >
+        {range.label}
+      </button>
+    );
+    last = range.end;
+  });
+  if (last < text.length) nodes.push(text.slice(last));
+  return <p>{nodes}</p>;
 }
 
 function CaseRiskSummary({ byRisk, pendingCount, onOpenReport }) {

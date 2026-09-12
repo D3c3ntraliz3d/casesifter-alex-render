@@ -41,6 +41,7 @@ CHAT_SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {
+                    "document_id": {"type": "string"},
                     "display_name": {"type": "string"},
                     "note": {"type": "string"},
                 },
@@ -60,12 +61,21 @@ When asked what an exhibit was used for, look in motions, affidavits, complaints
 other pleadings for where that exhibit or issuer is cited (e.g. "Exhibit S", "Wells Fargo
 statement", "in support of").
 
+Cite every document you name. Use the exact heading after ###, include its document_id,
+and include the NYSCEF Doc. No. when the excerpt has one so the attorney can open that file.
+
 {focus_block}Question:
 {question}
 
 Excerpts from this case:
 {packet}
 """
+
+NYSCEF_RE = re.compile(r"(?i)NYSCEF\s+DOC(?:UMENT)?\.?\s*NO\.?\s*(\d+)")
+TITLE_WITH_NYSCEF_RE = re.compile(
+    r'["“]([^"”]{8,160})["”]\s*\((?:NYSCEF\s+)?Doc(?:ument)?\.?\s*No\.?\s*(\d+)\)',
+    re.I,
+)
 
 FOCUS_BLOCK = """The attorney is viewing this document: {name} (kind: {kind}).
 Treat “this exhibit,” “this statement,” and “this document” as that file.
@@ -110,9 +120,10 @@ def ask_case(
 
     packet = _format_packet(hits)
     if not settings.gemini_api_key:
+        answer = _fallback_answer(question, hits)
         return {
-            "answer": _fallback_answer(question, hits),
-            "citations": _citations(hits),
+            "answer": answer,
+            "citations": finalize_citations(case_id, answer, [], hits),
             "used_model": False,
         }
 
@@ -155,35 +166,19 @@ def ask_case(
         )
         parsed = _parse_json_payload(body)
     except Exception:
+        answer = _fallback_answer(question, hits)
         return {
-            "answer": _fallback_answer(question, hits),
-            "citations": _citations(hits),
+            "answer": answer,
+            "citations": finalize_citations(case_id, answer, [], hits),
             "used_model": False,
         }
-    answer = str(parsed.get("answer") or "").strip()
-    citations = parsed.get("citations") if isinstance(parsed.get("citations"), list) else []
-    named = {c["display_name"]: c for c in _citations(hits)}
-    merged = []
-    for item in citations:
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("display_name") or "").strip()
-        if not name:
-            continue
-        base = named.get(name) or next(
-            (c for c in named.values() if name.lower() in c["display_name"].lower()),
-            None,
-        )
-        merged.append(
-            {
-                "document_id": (base or {}).get("document_id"),
-                "display_name": (base or {}).get("display_name") or name,
-                "note": str(item.get("note") or "")[:240],
-            }
-        )
-    if not merged:
-        merged = _citations(hits)
-    return {"answer": answer or _fallback_answer(question, hits), "citations": merged[:6], "used_model": True}
+    answer = str(parsed.get("answer") or "").strip() or _fallback_answer(question, hits)
+    model_cites = parsed.get("citations") if isinstance(parsed.get("citations"), list) else []
+    return {
+        "answer": answer,
+        "citations": finalize_citations(case_id, answer, model_cites, hits),
+        "used_model": True,
+    }
 
 
 def retrieve(
@@ -266,6 +261,7 @@ def retrieve(
                     "status": doc.get("status"),
                     "scan_job_id": doc.get("scan_job_id"),
                     "focused": focused,
+                    "nyscef_no": _nyscef_no(doc, snap, text),
                     "snippets": snippets,
                     "findings": [
                         f.get("title")
@@ -389,7 +385,12 @@ def _format_packet(hits: list[dict[str, Any]], budget: int = 18_000) -> str:
     used = 0
     for hit in ordered:
         label = "FOCUS — " if hit.get("focused") else ""
-        block = f"### {label}{hit['display_name']} (kind: {hit.get('doc_kind') or 'unknown'})\n"
+        nyscef = f", NYSCEF {hit['nyscef_no']}" if hit.get("nyscef_no") else ""
+        block = (
+            f"### {label}{hit['display_name']} "
+            f"[document_id={hit['document_id']}] "
+            f"(kind: {hit.get('doc_kind') or 'unknown'}{nyscef})\n"
+        )
         if hit.get("findings"):
             block += "Scan notes: " + "; ".join(hit["findings"][:4]) + "\n"
         for snip in hit.get("snippets") or []:
@@ -406,10 +407,181 @@ def _citations(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
         {
             "document_id": hit["document_id"],
             "display_name": hit["display_name"],
+            "nyscef_no": hit.get("nyscef_no"),
             "note": (hit.get("snippets") or [""])[0][:180],
         }
         for hit in hits[:5]
     ]
+
+
+def finalize_citations(
+    case_id: str,
+    answer: str,
+    model_cites: list[Any],
+    hits: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    catalog = _doc_catalog(case_id)
+    hit_by_id = {hit["document_id"]: hit for hit in hits}
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add(
+        *,
+        document_id: str | None,
+        display_name: str,
+        note: str = "",
+        nyscef_no: str | None = None,
+    ) -> None:
+        match = _match_catalog(catalog, document_id=document_id, name=display_name, nyscef_no=nyscef_no)
+        if match is None and document_id and document_id in hit_by_id:
+            match = hit_by_id[document_id]
+        if match is None:
+            return
+        key = match.get("document_id") or match.get("id") or display_name
+        if key in seen:
+            return
+        seen.add(key)
+        stored_name = match.get("display_name") or display_name
+        label = display_name if len(display_name) > 12 and display_name.lower() not in stored_name.lower() else stored_name
+        no = nyscef_no or match.get("nyscef_no")
+        if no and f"NYSCEF {no}" not in label:
+            label = f"{label} (NYSCEF {no})"
+        out.append(
+            {
+                "document_id": match.get("document_id") or match.get("id"),
+                "display_name": label,
+                "nyscef_no": no,
+                "note": (note or match.get("note") or "")[:240],
+            }
+        )
+
+    for title, number in TITLE_WITH_NYSCEF_RE.findall(answer or ""):
+        add(document_id=None, display_name=title.strip(), nyscef_no=number, note="Named in the answer")
+    for number in NYSCEF_RE.findall(answer or ""):
+        add(document_id=None, display_name=f"NYSCEF Doc. No. {number}", nyscef_no=number, note="Named in the answer")
+    for item in model_cites:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("display_name") or "").strip()
+        if not name:
+            continue
+        nos = NYSCEF_RE.findall(f"{name} {item.get('note') or ''}")
+        add(
+            document_id=str(item.get("document_id") or "") or None,
+            display_name=name,
+            note=str(item.get("note") or ""),
+            nyscef_no=nos[0] if nos else None,
+        )
+    for hit in hits:
+        if hit.get("focused") or (hit.get("display_name") and hit["display_name"].lower() in (answer or "").lower()):
+            add(
+                document_id=hit["document_id"],
+                display_name=hit["display_name"],
+                note=(hit.get("snippets") or [""])[0],
+                nyscef_no=hit.get("nyscef_no"),
+            )
+    if not out:
+        for hit in hits[:5]:
+            add(
+                document_id=hit["document_id"],
+                display_name=hit["display_name"],
+                note=(hit.get("snippets") or [""])[0],
+                nyscef_no=hit.get("nyscef_no"),
+            )
+    return out[:8]
+
+
+def _nyscef_no(doc: dict[str, Any], snap: dict[str, Any], text: str = "") -> str | None:
+    hay = " ".join(
+        [
+            doc.get("display_name") or "",
+            doc.get("original_filename") or "",
+            text[:4000],
+            (snap.get("text_excerpt") or "")[:4000],
+        ]
+    )
+    found = NYSCEF_RE.findall(hay)
+    if found:
+        return found[0]
+    tail = re.search(r"(?i)(?:affirm|affidavit|motion|exhibit|order|complaint|doc)\w*\s+(\d{1,4})\s*$", (doc.get("display_name") or "").strip())
+    if tail:
+        return tail.group(1)
+    return None
+
+
+def _doc_catalog(case_id: str) -> list[dict[str, Any]]:
+    snaps = {item["document_id"]: item for item in cases_db.list_case_snapshots(case_id)}
+    catalog = []
+    for doc in cases_db.list_documents(case_id):
+        snap = snaps.get(doc["id"]) or {}
+        excerpt = snap.get("text_excerpt") or ""
+        catalog.append(
+            {
+                "id": doc["id"],
+                "document_id": doc["id"],
+                "display_name": doc.get("display_name") or doc.get("original_filename"),
+                "original_filename": doc.get("original_filename") or "",
+                "nyscef_no": _nyscef_no(doc, snap, excerpt),
+                "hay": " ".join(
+                    [
+                        doc.get("display_name") or "",
+                        doc.get("original_filename") or "",
+                        excerpt[:2500],
+                    ]
+                ).lower(),
+            }
+        )
+    return catalog
+
+
+def _match_catalog(
+    catalog: list[dict[str, Any]],
+    *,
+    document_id: str | None = None,
+    name: str | None = None,
+    nyscef_no: str | None = None,
+) -> dict[str, Any] | None:
+    if document_id:
+        hit = next((item for item in catalog if item["document_id"] == document_id), None)
+        if hit:
+            return hit
+    if nyscef_no:
+        hit = next((item for item in catalog if item.get("nyscef_no") == str(nyscef_no)), None)
+        if hit:
+            return hit
+        hit = next(
+            (
+                item
+                for item in catalog
+                if re.search(rf"(?i)(?:^|[\s_\-]){re.escape(str(nyscef_no))}(?:\.pdf)?$", (item.get("display_name") or "").strip())
+                or re.search(rf"(?i)(?:affirm|affidavit|motion|exhibit|order|complaint)\w*\s+{re.escape(str(nyscef_no))}\b", item.get("hay") or "")
+            ),
+            None,
+        )
+        if hit:
+            return hit
+    query = (name or "").strip().lower()
+    if len(query) < 6:
+        return None
+    exact = next((item for item in catalog if (item.get("display_name") or "").lower() == query), None)
+    if exact:
+        return exact
+    contained = next((item for item in catalog if query in item["hay"] or item["hay"] in query), None)
+    if contained:
+        return contained
+    words = [w for w in re.findall(r"[a-z0-9']{4,}", query) if w not in STOP]
+    if len(words) < 2:
+        return None
+    best = None
+    best_score = 0
+    for item in catalog:
+        score = sum(1 for word in words if word in item["hay"])
+        if score > best_score:
+            best = item
+            best_score = score
+    if best and best_score >= max(2, len(words) - 1):
+        return best
+    return None
 
 
 def _fallback_answer(question: str, hits: list[dict[str, Any]]) -> str:
