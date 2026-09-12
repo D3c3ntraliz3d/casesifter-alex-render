@@ -11,7 +11,15 @@ from typing import Any
 
 from dateutil import parser as dateparser
 
-MONEY = r"\$?\s*(\d{1,3}(?:,\d{3})+(?:\.\d{2})?|\d{1,3}(?:,\d{3})*(?:\.\d{2}))"
+# A real filing can typo "$35,160.37" as "$35.160.37" (period instead of
+# comma as the thousands separator — confirmed in a scanned loan modification
+# exhibit, and the same document also used the correct comma elsewhere for
+# the identical figure). Accepting either character as the group separator
+# here — and letting `_money()` below decide which trailing group is cents —
+# means that typo no longer gets read as a truncated, different dollar
+# amount ("$35.16") that then "conflicts" with the correctly-punctuated
+# figure elsewhere in the case.
+MONEY = r"\$?\s*(\d{1,3}(?:[,.]\d{3})+(?:[,.]\d{2})?|\d{1,3}(?:[,.]\d{3})*(?:[,.]\d{2}))"
 DATE_TOKEN = (
     r"(?:"
     r"(?:January|February|March|April|May|June|July|August|September|October|November|December)"
@@ -58,8 +66,38 @@ FACT_META: dict[str, dict[str, Any]] = {
     "notice_date": {"label": "Notice date", "kind": "date", "deadline": True},
 }
 
+# Note rate vs default/penalty rate, remaining principal, and the installment
+# amount move when an account is paid or goes into default. That is expected
+# loan-status change, not the same fact disagreeing with itself.
+LOAN_STATUS_KEYS = frozenset(
+    {
+        "loan_amount",
+        "interest_rate",
+        "monthly_payment",
+        "outstanding_balance",
+    }
+)
+
 # Origination / recording / “mortgage dated” are ordinary chronology, not a lie.
-GOTCHA_KEYS = frozenset(FACT_META)
+GOTCHA_KEYS = frozenset(key for key in FACT_META if key not in LOAN_STATUS_KEYS)
+
+# A genuinely declared fact -- even one repeated verbatim several times
+# across one document's paragraphs, exhibits, or motions -- still only ever
+# states a small handful of distinct dollar figures. A scanned,
+# column-scrambled payment/transaction-history table can instead reprint a
+# column header like "Loan\nAmount" once per row, each time immediately
+# ahead of that row's own different, unrelated transaction figure -- which
+# reads, to the same context-phrase regex, as dozens of separate "loan
+# amount" declarations, each a *different* number. Confirmed against a real
+# Referee's Report exhibit: 24 distinct dollar values under "loan_amount",
+# one per garbled table row, none of them actually the loan amount --
+# meanwhile a genuinely restated single balance in the same document
+# produces only 1-2 distinct values no matter how many times it repeats.
+# Count distinct values, not raw hits, so restatement is never mistaken for
+# a table: only a wide spread of *different* numbers for the same key marks
+# it noise, and that whole key is dropped for this document rather than
+# guessing which value (if any) is real.
+MAX_DISTINCT_KEY_VALUES = 5
 
 MONEY_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     (
@@ -154,12 +192,30 @@ def extract_facts(text: str, limit: int = 24) -> list[dict[str, Any]]:
     seen: set[tuple[str, str]] = set()
 
     for key, pattern in MONEY_PATTERNS:
+        key_records: list[dict[str, Any]] = []
+        key_values: set[str] = set()
         for match in pattern.finditer(body):
             raw = match.group(1)
+            # A wide "context phrase, then up to 48 non-digit characters,
+            # then a number" gap can drift past its intended dollar figure
+            # and land on an interest rate instead -- confirmed in a real
+            # affidavit: "...Balance. Interest at the rate of 4.875%..."
+            # matched "principal balance" as context and read "4.875" as a
+            # $4,875 fact. A number immediately followed by "%" is a rate,
+            # never a dollar amount, so it can never be this fact.
+            if body[match.end() : match.end() + 2].lstrip().startswith("%"):
+                continue
             value = _money(raw)
             if value is None:
                 continue
             rec = _record(key, value, f"{value:,.2f}", match.group(0))
+            if rec["display"] in key_values:
+                continue
+            key_values.add(rec["display"])
+            key_records.append(rec)
+        if len(key_values) > MAX_DISTINCT_KEY_VALUES:
+            continue  # see MAX_DISTINCT_KEY_VALUES -- a scrambled table, not facts
+        for rec in key_records:
             token = (key, rec["display"])
             if token in seen:
                 continue
@@ -229,11 +285,32 @@ def _record(key: str, value: Any, display: str, quote: str, extra: dict[str, Any
 
 
 def _money(raw: str) -> float | None:
-    cleaned = re.sub(r"[^\d.]", "", raw or "")
+    # MONEY (above) now accepts either "," or "." as the thousands separator,
+    # so a raw match can look like "35.160.37" (period-typo'd) as easily as
+    # "35,160.37" (correct) — figure out which trailing group is cents (the
+    # last one, if it's exactly 2 digits) and treat every separator before
+    # that as thousands grouping, regardless of which character it is.
+    cleaned = re.sub(r"[^\d.,]", "", raw or "")
     if not cleaned:
         return None
+    parts = re.split(r"[.,]", cleaned)
+    parts = [p for p in parts if p]
+    if not parts:
+        return None
+    if len(parts) == 1:
+        try:
+            return float(parts[0])
+        except ValueError:
+            return None
+    *whole_parts, last = parts
+    if len(last) == 2:
+        whole = "".join(whole_parts) or "0"
+        try:
+            return float(f"{whole}.{last}")
+        except ValueError:
+            return None
     try:
-        return float(cleaned)
+        return float("".join(parts))
     except ValueError:
         return None
 

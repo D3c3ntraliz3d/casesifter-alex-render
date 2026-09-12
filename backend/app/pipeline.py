@@ -24,6 +24,7 @@ from app.engines.pdf_integrity import analyze_pdf_integrity
 from app.engines.structural import analyze_structural
 from app.ingestion import sha256_file, sniff_type
 from app.models import AuditTrail, Finding, FontUsage, ModuleResult, PageDimension, Report, TimelineEvent
+from app.engines.statement_dates import find_statement_date_conflicts
 from app.engines.template_fabrication import find_template_leftovers, review_print_scan_ela
 from app.finding_policy import triage_findings
 from app.report import executive_summary, pick_top_findings, recommended_actions, render_html, render_pdf, score_risk
@@ -157,6 +158,14 @@ def run_pipeline(
                 doc_kind=doc_kind,
             )
         )
+        findings.extend(
+            find_statement_date_conflicts(
+                full_text,
+                scan_profile=profile,
+                source=display_name or source.name,
+                doc_kind=doc_kind,
+            )
+        )
         findings = review_print_scan_ela(findings, full_text, scan_profile=profile)
 
     entities = (contextual.extras or {}).get("entities") or {}
@@ -211,6 +220,7 @@ def run_pipeline(
             display_name=name,
             doc_kind=doc_kind,
             text=full_text,
+            current_findings=findings,
         )
         findings.extend(gotchas)
         contextual.extras["case_consistency"] = {

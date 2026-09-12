@@ -1,8 +1,9 @@
 """Compare a newly scanned document against prior case snapshots.
 
-Only MATERIAL contradictions interrupt the attorney: the same labeled fact
-(loan amount, rate, payment, balance, key date) that exceeds Claude's thresholds,
-a referenced exhibit that is not in the case, or a near-duplicate upload.
+Only MATERIAL contradictions interrupt the attorney: a key date that cannot
+coexist, a referenced exhibit that is not in the case, or a near-duplicate
+upload. Note rate, default rate, principal balance, and installment amount
+are expected to move with payment and default — they are not flags.
 
 Name abbreviations (WaMu / Washington Mutual) and same-month day shifts are
 not flags. Court filings are compared on labeled facts — that is how a motion
@@ -116,7 +117,9 @@ def excerpt_hashes(text: str, size: int = 180, stride: int = 400) -> list[str]:
 
 def findings_summary(findings: list[Finding]) -> list[dict[str, Any]]:
     summary: list[dict[str, Any]] = []
-    for item in findings[:40]:
+    gotchas = [item for item in findings if (item.evidence or {}).get("gotcha")]
+    rest = [item for item in findings if item not in gotchas]
+    for item in (gotchas + rest)[:40]:
         summary.append(
             {
                 "id": item.id,
@@ -639,6 +642,8 @@ def _quote_key(text: str) -> str:
 
 def _gotcha_cluster_key(item: dict[str, Any]) -> tuple[str, ...]:
     """One card per fact theme (service at an address, settlement date), not per sentence."""
+    if item.get("tainted_support") and item.get("document_id"):
+        return ("tainted", str(item.get("document_id")))
     blob = f"{item.get('claim_quote') or ''} {item.get('evidence_quote') or ''}".lower()
     dates = tuple(sorted(set(re.findall(r"\b(?:\d{1,2}/\d{1,2}/\d{2,4}|(?:19|20)\d{2})\b", blob))))[:2]
     nums = tuple(sorted(set(re.findall(r"\b\d{3,5}\b", blob))))[:2]

@@ -156,7 +156,19 @@ SETTLEMENT_NEG = re.compile(
 )
 RESIDENCE_ASSERT = re.compile(r"(?i)\b(reside[sd]?|residing|live[sd]?|living|dwelling)\b")
 RESIDENCE_DENY = re.compile(
-    r"(?i)\b((?:did|do|does|was|were)\s+not\s+(?:live|reside)|never\s+(?:lived|resided))\b"
+    r"(?i)\b("
+    r"(?:did|do|does|was|were)\s+not\s+(?:live|living|reside|residing)|"
+    r"never\s+(?:lived|resided|living)|"
+    r"not\s+(?:my\s+)?(?:residence|home\s+address|dwelling)"
+    r")\b"
+)
+INTERNAL_TAINTED = frozenset(
+    {
+        "math_error",
+        "historical_impossibility",
+        "date_inconsistency",
+        "template_fabrication",
+    }
 )
 CAPTION_OR_FORM = re.compile(
     r"(?i)\b("
@@ -185,7 +197,12 @@ ROLE_OR_IDENTITY = re.compile(
     r"(?i)\b(i\s+am\s+(?:the\s+|a\s+)?(?:defendant|plaintiff|attorney|counsel)|"
     r"being\s+duly\s+sworn)\b"
 )
-EXHIBIT_TAG = re.compile(r"(?i)\bexhibit\s+([A-Z])(?:[_\-\s]+(\d{1,4}))?\b")
+EXHIBIT_TAG = re.compile(
+    r"(?i)\b(?:exhibit|ex\.?)[\s._-]+([A-Z])(?:[\s._-]+(\d{1,4}))?\b"
+)
+BILL_OR_STATEMENT = re.compile(
+    r"(?i)\b(utility|bill|statement|account\s+number|amount\s+due|invoice)\b"
+)
 PRODUCED_CUE = re.compile(
     r"(?i)\b("
     r"attach(?:ed|ing)|annexed|appended|herewith|hereto|"
@@ -365,9 +382,11 @@ def find_gotchas(
     display_name: str,
     doc_kind: str | None,
     text: str,
+    current_findings: list[Finding] | None = None,
 ) -> tuple[list[Finding], dict[str, Any]]:
     docs = cases_db.list_documents(case_id)
     snaps = {item["document_id"]: item for item in cases_db.list_case_snapshots(case_id)}
+    _overlay_current_findings(snaps, document_id, text, current_findings)
     others = [doc for doc in docs if doc["id"] != document_id]
     is_filing = (doc_kind or "").lower() in COURT_FILING_KINDS
 
@@ -386,6 +405,7 @@ def find_gotchas(
                     doc.get("display_name") or doc.get("original_filename") or "",
                     doc["id"],
                     doc_kind=doc.get("doc_kind"),
+                    prefer_proof=True,
                 )
             )
         this_doc = next((doc for doc in docs if doc["id"] == document_id), None)
@@ -403,7 +423,13 @@ def find_gotchas(
         document_id=document_id,
         doc_kind=doc_kind,
     )
-    tainted = propose_tainted_support(claims, docs, snaps, filing_text=text)
+    tainted = propose_tainted_support(
+        claims,
+        docs,
+        snaps,
+        filing_text=text,
+        focus_document_id=None if is_filing else document_id,
+    )
     if not claims and not internals and not tainted:
         return [], empty
     if not evidence and not internals and not tainted:
@@ -421,6 +447,7 @@ def find_gotchas(
             }
         )
     accepted.extend(verified)
+    accepted.sort(key=lambda item: (0 if item.get("tainted_support") else 1))
     findings = [_to_finding(item, case_docs=docs) for item in accepted[:8] if _shippable(item, docs)]
     return findings, {
         "candidates": len(candidates) + len(internals),
@@ -435,9 +462,11 @@ def extract_claims(
     document_id: str,
     limit: int = 12,
     doc_kind: str | None = None,
+    prefer_proof: bool = False,
 ) -> list[dict[str, Any]]:
     claims: list[dict[str, Any]] = []
     seen: set[str] = set()
+    raw_limit = 40 if prefer_proof else limit
     for sentence in _sentences(text):
         if not CLAIM_CUE.search(sentence):
             continue
@@ -453,9 +482,11 @@ def extract_claims(
                 "doc_kind": doc_kind,
             }
         )
-        if len(claims) >= limit:
+        if len(claims) >= raw_limit:
             break
-    return claims
+    if prefer_proof:
+        claims.sort(key=lambda item: (0 if _is_proof_oriented(item["quote"]) else 1))
+    return claims[:limit]
 
 
 def retrieve_evidence(
@@ -497,52 +528,72 @@ def propose_tainted_support(
     docs: list[dict[str, Any]],
     snaps: dict[str, dict[str, Any]],
     filing_text: str = "",
+    focus_document_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Claim + the record they produced, when that record looks fraudulent or false."""
+    """One card per exhibit that looks edited. Do not stitch it to leftover filing quotes."""
+    if focus_document_id:
+        focus = next((doc for doc in docs if doc["id"] == focus_document_id), None)
+        snap = snaps.get(focus_document_id) or {}
+        rows = _standalone_tainted_rows(focus, snap) if focus else []
+        if focus and rows:
+            return [_exhibit_edited_item(focus, rows)]
+        return []
+
     out: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[str] = set()
     for claim in claims:
         for doc in _supporting_exhibit_docs(claim, filing_text, docs, snaps):
+            if doc["id"] in seen:
+                continue
             snap = snaps.get(doc["id"]) or {}
             rows = _tainted_rows(snap)
+            if not _explicitly_uses_exhibit(claim, doc, snaps, filing_text):
+                rows = [row for row in rows if str(row.get("analysis_type") or "") in INTERNAL_TAINTED]
             if not rows:
                 continue
-            row = rows[0]
-            quote = (
-                str(row.get("quoted_evidence") or "").strip()
-                or str(row.get("why_suspicious") or "").strip()
-                or str(row.get("explanation") or "").strip()
-                or str(row.get("title") or "Forensic or internal defect on the produced record.")
-            )
-            key = (claim["quote"][:120].lower(), doc["id"])
-            if key in seen:
-                continue
-            seen.add(key)
-            source = doc.get("display_name") or doc.get("original_filename") or "exhibit"
-            item = {
-                "title": "Apparent false or tainted supporting evidence",
-                "claim_quote": claim["quote"],
-                "claim_source": claim["source"],
-                "claim_document_id": claim.get("document_id"),
-                "claim_kind": claim.get("doc_kind"),
-                "evidence_quote": quote[:400],
-                "evidence_source": source,
-                "document_id": doc["id"],
-                "evidence_kind": doc.get("doc_kind") or "exhibit",
-                "evidence_tier": TIER_EVIDENCE,
-                "self_undercut": True,
-                "tainted_support": True,
-                "why_it_may_matter": (
-                    "The party produced this record in support of the claim, and the "
-                    "record itself appears fraudulent or internally false."
-                ),
-                "contradiction_type": "procedural_foundational",
-                "verification": _force_tainted_pass(claim["quote"], quote),
-            }
-            out.append(item)
+            seen.add(doc["id"])
+            out.append(_exhibit_edited_item(doc, rows))
             if len(out) >= 6:
                 return out
     return out
+
+
+def _exhibit_edited_item(doc: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
+    source = doc.get("display_name") or doc.get("original_filename") or "exhibit"
+    summary = _flagged_item_summary(rows)
+    return {
+        "title": "Exhibit appears fraudulently edited",
+        "claim_quote": "",
+        "claim_source": source,
+        "claim_document_id": doc.get("id"),
+        "claim_kind": doc.get("doc_kind") or "exhibit",
+        "evidence_quote": summary,
+        "evidence_source": source,
+        "document_id": doc["id"],
+        "evidence_kind": doc.get("doc_kind") or "exhibit",
+        "evidence_tier": TIER_EVIDENCE,
+        "self_undercut": True,
+        "tainted_support": True,
+        "why_it_may_matter": (
+            "This exhibit appears fraudulently edited. Open the scan report "
+            "and review each flagged item before treating the record as proof."
+        ),
+        "contradiction_type": "procedural_foundational",
+        "verification": _force_tainted_pass("", summary),
+    }
+
+
+def _flagged_item_summary(rows: list[dict[str, Any]]) -> str:
+    titles: list[str] = []
+    for row in rows[:6]:
+        title = str(row.get("title") or "").strip()
+        analysis = str(row.get("analysis_type") or "").replace("_", " ").strip()
+        label = title or analysis
+        if label and label not in titles:
+            titles.append(label)
+    if titles:
+        return "Flagged on this exhibit: " + "; ".join(titles) + ". See the report for each item."
+    return "This exhibit appears fraudulently edited. See the report for each flagged item."
 
 
 def _supporting_exhibit_docs(
@@ -550,26 +601,115 @@ def _supporting_exhibit_docs(
     filing_text: str,
     docs: list[dict[str, Any]],
     snaps: dict[str, dict[str, Any]] | None = None,
+    focus_document_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    claim_quote = str(claim.get("quote") or "")
-    window = _window_around_claim(filing_text, claim_quote)
-    cited = _exhibit_tags(claim_quote) | _exhibit_tags(window)
-    produced = bool(PRODUCED_CUE.search(claim_quote) or PRODUCED_CUE.search(window))
-    if not cited and not produced:
+    snaps = snaps or {}
+    if focus_document_id:
+        focus = next((doc for doc in docs if doc["id"] == focus_document_id), None)
+        if focus and _claim_uses_exhibit(claim, focus, snaps, filing_text):
+            return [focus]
         return []
     matched: list[dict[str, Any]] = []
     for doc in docs:
         if doc.get("id") == claim.get("document_id"):
             continue
-        tag = _doc_exhibit_tag(doc)
-        excerpt = ((snaps or {}).get(doc["id"]) or {}).get("text_excerpt") or ""
-        name = f"{doc.get('display_name') or ''} {doc.get('original_filename') or ''}"
-        if cited and tag and (tag in cited or any(_tags_compatible(tag, other) for other in cited)):
-            matched.append(doc)
-            continue
-        if produced and not cited and len(_stem_overlap(claim_quote, excerpt or name)) >= 2:
+        if _claim_uses_exhibit(claim, doc, snaps, filing_text):
             matched.append(doc)
     return matched[:8]
+
+
+def _claim_uses_exhibit(
+    claim: dict[str, Any],
+    doc: dict[str, Any],
+    snaps: dict[str, dict[str, Any]],
+    filing_text: str,
+) -> bool:
+    """True when the claim is using this record as proof, not merely naming the same street."""
+    claim_quote = str(claim.get("quote") or "")
+    claim_excerpt = str((snaps.get(claim.get("document_id") or "") or {}).get("text_excerpt") or filing_text)
+    window = _window_around_claim(claim_excerpt, claim_quote)
+    cited = _exhibit_tags(claim_quote) | _exhibit_tags(window)
+    tag = _doc_exhibit_tag(doc)
+    if cited and tag and (tag in cited or any(_tags_compatible(tag, other) for other in cited)):
+        return True
+    produced = bool(PRODUCED_CUE.search(claim_quote) or PRODUCED_CUE.search(window))
+    excerpt = str((snaps.get(doc["id"]) or {}).get("text_excerpt") or "")
+    name = f"{doc.get('display_name') or ''} {doc.get('original_filename') or ''}"
+    kind = (doc.get("doc_kind") or "").lower()
+    if kind in {"proof_of_service"} and not produced and not (cited and tag):
+        return False
+    if produced and len(_stem_overlap(claim_quote, excerpt or name)) >= 2:
+        return True
+    if produced and _same_street_number(claim_quote, excerpt):
+        return True
+    return False
+
+
+def _explicitly_uses_exhibit(
+    claim: dict[str, Any],
+    doc: dict[str, Any],
+    snaps: dict[str, dict[str, Any]],
+    filing_text: str,
+) -> bool:
+    claim_quote = str(claim.get("quote") or "")
+    claim_excerpt = str((snaps.get(claim.get("document_id") or "") or {}).get("text_excerpt") or filing_text)
+    window = _window_around_claim(claim_excerpt, claim_quote)
+    cited = _exhibit_tags(claim_quote) | _exhibit_tags(window)
+    tag = _doc_exhibit_tag(doc)
+    if cited and tag and (tag in cited or any(_tags_compatible(tag, other) for other in cited)):
+        return True
+    return bool(PRODUCED_CUE.search(claim_quote) or PRODUCED_CUE.search(window))
+
+
+def _is_proof_oriented(text: str) -> bool:
+    return bool(
+        _denies_residence(text)
+        or _asserts_residence(text)
+        or PRODUCED_CUE.search(text or "")
+        or EXHIBIT_TAG.search(text or "")
+        or BILL_OR_STATEMENT.search(text or "")
+    )
+
+
+def _standalone_tainted_rows(doc: dict[str, Any], snap: dict[str, Any]) -> list[dict[str, Any]]:
+    del doc
+    return [
+        row
+        for row in _tainted_rows(snap)
+        if str(row.get("analysis_type") or "") in INTERNAL_TAINTED
+    ]
+
+
+def _overlay_current_findings(
+    snaps: dict[str, dict[str, Any]],
+    document_id: str,
+    text: str,
+    current_findings: list[Finding] | None,
+) -> None:
+    if not document_id:
+        return
+    snap = dict(snaps.get(document_id) or {})
+    rows = list(snap.get("findings_summary") or [])
+    for item in current_findings or []:
+        ev = item.evidence or {}
+        rows.append(
+            {
+                "id": item.id,
+                "category": item.category,
+                "severity": item.severity,
+                "title": item.title,
+                "analysis_type": ev.get("analysis_type"),
+                "quoted_evidence": ev.get("quoted_evidence") or ev.get("evidence_quote"),
+                "why_suspicious": item.why_suspicious,
+                "explanation": item.explanation,
+            }
+        )
+    if text and not snap.get("text_excerpt"):
+        snap["text_excerpt"] = text[:24000]
+    elif text:
+        snap["text_excerpt"] = snap.get("text_excerpt") or text[:24000]
+    snap["findings_summary"] = rows
+    snaps[document_id] = snap
 
 
 def _window_around_claim(text: str, quote: str, radius: int = 400) -> str:
@@ -627,21 +767,21 @@ def _force_tainted_pass(claim: str, evidence: str) -> dict[str, Any]:
     return {
         "same_fact": {
             "pass": True,
-            "fact_named": "supporting record offered for the claim",
-            "reason": "The claimant produced this record as proof of the claim.",
+            "fact_named": "authenticity of the offered exhibit",
+            "reason": "The exhibit itself is the record being checked.",
         },
         "directionality": {
             "pass": True,
             "evidence_asserts": evidence[:220],
             "runs": "against",
-            "reason": "The produced record appears fraudulent or internally false.",
+            "reason": "The exhibit appears fraudulently edited.",
         },
         "materiality": {
             "pass": True,
             "tier": "foundation",
-            "reason": "A claim that rests on a tainted or false exhibit goes to credibility and foundation.",
+            "reason": "Open the report and review each flagged item before treating this exhibit as proof.",
         },
-        "textual_grounding": {"pass": True, "reason": "The claim and the defect are in the pulled record."},
+        "textual_grounding": {"pass": True, "reason": "The flagged items are on the exhibit scan report."},
         "contradiction_type": "procedural_foundational",
         "pass": True,
         "failed_step": None,
@@ -1027,7 +1167,7 @@ def _to_finding(item: dict[str, Any], case_docs: list[dict[str, Any]] | None = N
     if tainted_hit:
         severity = "high"
         confidence = 90.0
-        title = "Apparent false or tainted supporting evidence"
+        title = "Exhibit appears fraudulently edited"
         self_hit = True
     elif self_hit:
         severity = "high"
@@ -1047,17 +1187,27 @@ def _to_finding(item: dict[str, Any], case_docs: list[dict[str, Any]] | None = N
     fact_named = str((verify.get("same_fact") or {}).get("fact_named") or "").strip()
     direction_reason = str((verify.get("directionality") or {}).get("reason") or "").strip()
     material_reason = str((verify.get("materiality") or {}).get("reason") or "").strip()
-    attorney_why = _attorney_why(fact_named, direction_reason, material_reason, item.get("why_it_may_matter"))
+    attorney_why = (
+        str(item.get("why_it_may_matter") or "").strip()
+        if tainted_hit
+        else _attorney_why(fact_named, direction_reason, material_reason, item.get("why_it_may_matter"))
+    )
     ev_label = counter_label(ev_tier)
+    if tainted_hit:
+        explanation = attorney_why or "This exhibit appears fraudulently edited. See the report for each flagged item."
+        seed = f"gotcha|edited|{item.get('document_id')}|{item.get('evidence_source')}"
+        fid = "ctx-gotcha-" + hashlib.sha1(seed.encode("utf-8")).hexdigest()[:10]
+    else:
+        explanation = (
+            f"CLAIM ({item.get('claim_source') or 'filing'}): “{item.get('claim_quote')}” "
+            f"{ev_label.upper()} ({item.get('evidence_source') or 'record'}): “{item.get('evidence_quote')}”"
+        )
     return finding(
         fid=fid,
         category="gotcha",
         severity=severity,  # type: ignore[arg-type]
         title=title,
-        explanation=(
-            f"CLAIM ({item.get('claim_source') or 'filing'}): “{item.get('claim_quote')}” "
-            f"{ev_label.upper()} ({item.get('evidence_source') or 'record'}): “{item.get('evidence_quote')}”"
-        ),
+        explanation=explanation,
         why_suspicious=attorney_why or direction_reason,
         confidence=confidence,
         evidence={
@@ -1066,8 +1216,8 @@ def _to_finding(item: dict[str, Any], case_docs: list[dict[str, Any]] | None = N
             "gotcha_level": title,
             "contradiction_type": vtype,
             "analysis_type": "gotcha",
-            "claim_quote": item.get("claim_quote"),
-            "claim_source": item.get("claim_source"),
+            "claim_quote": None if tainted_hit else item.get("claim_quote"),
+            "claim_source": None if tainted_hit else item.get("claim_source"),
             "evidence_quote": item.get("evidence_quote"),
             "evidence_source": item.get("evidence_source"),
             "evidence_label": ev_label,
@@ -1075,17 +1225,22 @@ def _to_finding(item: dict[str, Any], case_docs: list[dict[str, Any]] | None = N
             "claim_tier": c_tier,
             "self_undercut": self_hit,
             "tainted_support": tainted_hit,
-            "fact_named": fact_named,
-            "direction_reason": direction_reason,
-            "materiality_reason": material_reason,
+            "document_id": item.get("document_id"),
+            "fact_named": None if tainted_hit else fact_named,
+            "direction_reason": None if tainted_hit else direction_reason,
+            "materiality_reason": None if tainted_hit else material_reason,
             "attorney_why": attorney_why,
             "verification": verify,
             "material": True,
             "prior_display_name": item.get("evidence_source"),
         },
         recommended_action=(
-            f"Open “{item.get('claim_source')}” and “{item.get('evidence_source')}” and confirm "
-            "the quoted language before relying on this as impeachment or in a filing."
+            "Open the scan report and review each flagged item before treating this exhibit as proof."
+            if tainted_hit
+            else (
+                f"Open “{item.get('claim_source')}” and “{item.get('evidence_source')}” and confirm "
+                "the quoted language before relying on this as impeachment or in a filing."
+            )
         ),
     )
 
@@ -1113,7 +1268,10 @@ def _shippable(item: dict[str, Any], case_docs: list[dict[str, Any]] | None = No
     verify = item.get("verification") or {}
     if not verify.get("pass") or not _complete_pass(verify):
         return False
-    if not (item.get("claim_quote") and item.get("evidence_quote")):
+    if item.get("tainted_support"):
+        if not item.get("evidence_quote"):
+            return False
+    elif not (item.get("claim_quote") and item.get("evidence_quote")):
         return False
     if not evidence_is_probative(item, case_docs):
         return False

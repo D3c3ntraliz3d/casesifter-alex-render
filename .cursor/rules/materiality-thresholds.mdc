@@ -13,7 +13,7 @@ Related documents that show a defect about the same subject often SUPPORT a deni
 
 He-said-she-said is not a gotcha. A denial versus the other side's competing recital (including a bare service denial versus an affidavit of service, or a service-attempt claim versus a DMV/address printout that lists or supports the same address) is the ordinary dispute. The gotcha is when that party produces evidence and that evidence is fraudulent or false — their exhibit undercuts the claim, or the fraud/forensic check flags the exhibit they offered. Bought bank/utility/invoice templates filled in, printed, and scanned are exhibit fraud to look for. Court filings are out of scope for that check.
 
-Recorded public instruments (mortgages, deeds, assignments) are not bank statements. Do not treat rounding, loan-math, or similar numeric quirks on those records as findings unless there is a genuine alteration or fraud signal.
+Recorded public instruments (mortgages, deeds, assignments) are not bank statements. Do not treat rounding, loan-math, or similar numeric quirks on those records as findings unless there is a genuine alteration or fraud signal. Note rate versus default/penalty rate, remaining principal, and the installment amount that change after missed payments or amortization are expected loan-status movement — ignore them.
 
 Do not hardcode practice-area phrases. Types are only: factual contradiction, chronology inconsistency, material omission, procedural/foundational, admission against interest.
 

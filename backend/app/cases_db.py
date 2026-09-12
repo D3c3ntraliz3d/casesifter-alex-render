@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -280,33 +281,40 @@ def add_document(
     display_name = uniquify_display_name(display_name, taken, original_filename)
     doc_id = uuid.uuid4().hex
     now = utcnow_iso()
-    with connect() as conn:
-        exists = conn.execute("SELECT 1 FROM cases WHERE id = ?", (case_id,)).fetchone()
-        if not exists:
-            raise KeyError(case_id)
-        conn.execute(
-            """
-            INSERT INTO documents (
-                id, case_id, original_filename, display_name, doc_kind, sha256,
-                stored_path, uploaded_at, status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'uploaded')
-            """,
-            (
-                doc_id,
-                case_id,
-                original_filename,
-                display_name,
-                doc_kind,
-                sha256,
-                stored_path,
-                now,
-            ),
-        )
-        conn.execute(
-            "UPDATE cases SET updated_at = ? WHERE id = ?",
-            (now, case_id),
-        )
-    return get_document(doc_id)  # type: ignore[return-value]
+    last_error: Exception | None = None
+    for attempt in range(4):
+        try:
+            with connect() as conn:
+                exists = conn.execute("SELECT 1 FROM cases WHERE id = ?", (case_id,)).fetchone()
+                if not exists:
+                    raise KeyError(case_id)
+                conn.execute(
+                    """
+                    INSERT INTO documents (
+                        id, case_id, original_filename, display_name, doc_kind, sha256,
+                        stored_path, uploaded_at, status
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'uploaded')
+                    """,
+                    (
+                        doc_id,
+                        case_id,
+                        original_filename,
+                        display_name,
+                        doc_kind,
+                        sha256,
+                        stored_path,
+                        now,
+                    ),
+                )
+                conn.execute(
+                    "UPDATE cases SET updated_at = ? WHERE id = ?",
+                    (now, case_id),
+                )
+            return get_document(doc_id)  # type: ignore[return-value]
+        except sqlite3.OperationalError as exc:
+            last_error = exc
+            time.sleep(0.4 * (attempt + 1))
+    raise last_error or sqlite3.OperationalError("database is locked")
 
 
 def list_documents(case_id: str) -> list[dict[str, Any]]:
@@ -477,7 +485,9 @@ def list_case_gotchas(case_id: str) -> list[dict[str, Any]]:
             if not evidence_is_probative(record, docs):
                 continue
             out.append(record)
-    return dedupe_gotchas(out)
+    out = dedupe_gotchas(out)
+    out.sort(key=lambda item: (0 if item.get("tainted_support") else 1))
+    return out
 
 
 def list_case_fact_conflicts(case_id: str) -> list[dict[str, Any]]:

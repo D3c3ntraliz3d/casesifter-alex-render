@@ -214,6 +214,8 @@ def is_material_finding(item: Finding) -> bool:
     analysis = str(evidence.get("analysis_type") or "")
     if analysis == "template_fabrication" and item.severity in {"medium", "high", "critical"}:
         return True
+    if analysis == "date_inconsistency" and item.severity in {"medium", "high", "critical"}:
+        return True
     if evidence.get("ai_generated"):
         return analysis in MAJOR_AI_TYPES
     if item.category == "gotcha":

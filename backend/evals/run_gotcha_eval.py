@@ -21,14 +21,15 @@ from app.gotcha import (
     verify_candidates,
     verify_pair,
 )
+from app.engines.statement_dates import find_statement_date_conflicts
 from app.engines.template_fabrication import find_template_leftovers, review_print_scan_ela
+from app.report.scoring import pick_top_findings, score_risk
 from app.finding_policy import (
     is_material_finding,
     is_recorded_instrument_math_noise,
     looks_like_recorded_instrument,
 )
 from app.models import Finding
-from app.report.scoring import score_risk
 
 
 def _load(name: str) -> dict:
@@ -269,20 +270,44 @@ def evaluate_dedupe() -> dict:
         {
             "document_id": "a",
             "display_name": "Note",
-            "facts": [{"key": "interest_rate", "value": 4.5, "display": "4.5%", "kind": "rate", "quote": "rate of 4.5%"}],
+            "facts": [{"key": "first_default_date", "value": "2022-02-01", "display": "02/01/2022", "kind": "date", "quote": "defaulted on February 1, 2022", "month_key": "2022-02"}],
         },
         {
             "document_id": "b",
             "display_name": "Complaint",
-            "facts": [{"key": "interest_rate", "value": 5.0, "display": "5.0%", "kind": "rate", "quote": "rate of 5%"}],
+            "facts": [{"key": "first_default_date", "value": "2023-06-01", "display": "06/01/2023", "kind": "date", "quote": "defaulted on June 1, 2023", "month_key": "2023-06"}],
         },
         {
             "document_id": "c",
             "display_name": "Affidavit",
-            "facts": [{"key": "interest_rate", "value": 4.5, "display": "4.5%", "kind": "rate", "quote": "rate of 4.5%"}],
+            "facts": [{"key": "first_default_date", "value": "2022-02-01", "display": "02/01/2022", "kind": "date", "quote": "defaulted on February 1, 2022", "month_key": "2022-02"}],
         },
     ]
     conflicts = aggregate_fact_conflicts(snaps)
+    loan_status = aggregate_fact_conflicts(
+        [
+            {
+                "document_id": "note",
+                "display_name": "Note",
+                "facts": [
+                    {"key": "interest_rate", "value": 4.875, "display": "4.875%", "kind": "rate"},
+                    {"key": "monthly_payment", "value": 1840.22, "display": "$1,840.22", "kind": "money"},
+                    {"key": "outstanding_balance", "value": 312000.0, "display": "$312,000.00", "kind": "money"},
+                    {"key": "loan_amount", "value": 328000.0, "display": "$328,000.00", "kind": "money"},
+                ],
+            },
+            {
+                "document_id": "complaint",
+                "display_name": "Complaint",
+                "facts": [
+                    {"key": "interest_rate", "value": 7.875, "display": "7.875%", "kind": "rate"},
+                    {"key": "monthly_payment", "value": 2410.18, "display": "$2,410.18", "kind": "money"},
+                    {"key": "outstanding_balance", "value": 341112.55, "display": "$341,112.55", "kind": "money"},
+                    {"key": "loan_amount", "value": 328000.0, "display": "$328,000.00", "kind": "money"},
+                ],
+            },
+        ]
+    )
     gotchas = dedupe_gotchas(
         [
             {
@@ -316,7 +341,8 @@ def evaluate_dedupe() -> dict:
         ]
     )
     return {
-        "one_rate_conflict": len(conflicts) == 1,
+        "one_date_conflict": len(conflicts) == 1,
+        "loan_status_numbers_ignored": loan_status == [],
         "three_docs_referenced": len((conflicts[0].get("related_documents") if conflicts else []) or []) == 3,
         "two_gotcha_cards": len(gotchas) == 2,
         "gotcha_names_both_docs": len((gotchas[0].get("related_documents") if gotchas else []) or []) == 2,
@@ -380,11 +406,60 @@ def evaluate_tainted_support() -> dict:
     }
     produced = propose_tainted_support(claims, docs, snaps, filing_text=claims[0]["quote"])
     bare = propose_tainted_support(denial, docs, snaps, filing_text=denial[0]["quote"])
+    residence = [
+        {
+            "quote": "I did not live at 5616 14th Avenue when the process server claims I was served.",
+            "source": "Alexander affidavit",
+            "document_id": "aff-1",
+            "doc_kind": "affidavit",
+        }
+    ]
+    snaps["ex-a"]["text_excerpt"] = (
+        "Con Edison bill for November 2023. Account number 44122918. "
+        "Amount due $140.00. Statement date 03/02/2018. Service period 11/01/2023-11/30/2023."
+    )
+    snaps["ex-a"]["findings_summary"][0]["analysis_type"] = "date_inconsistency"
+    snaps["ex-a"]["findings_summary"][0]["quoted_evidence"] = (
+        "Statement date 03/02/2018 cannot fall inside a November 2023 service period."
+    )
+    focused = propose_tainted_support(
+        residence, docs, snaps, filing_text=residence[0]["quote"], focus_document_id="ex-a"
+    )
+    wrong_focus = propose_tainted_support(
+        claims, docs, snaps, filing_text=claims[0]["quote"], focus_document_id="aos"
+    )
+    standalone = propose_tainted_support(
+        [], docs, snaps, filing_text="", focus_document_id="ex-a"
+    )
+    citation = [
+        {
+            "quote": (
+                "v Gewirtz, 204 AD3d 1070, the process server failed to properly "
+                "serve the defendants at their actual place of business or dwelling."
+            ),
+            "source": "AFFIDAVIT OR AFFIRM 92",
+            "document_id": "aff-92",
+            "doc_kind": "affidavit",
+        }
+    ]
+    citation_focus = propose_tainted_support(
+        citation, docs, snaps, filing_text=citation[0]["quote"], focus_document_id="ex-a"
+    )
     return {
         "produced_tainted_hits": len(produced) == 1,
         "produced_uses_their_exhibit": bool(produced) and produced[0].get("document_id") == "ex-a",
         "produced_marked_tainted": bool(produced) and produced[0].get("tainted_support") is True,
+        "produced_says_edited": bool(produced)
+        and produced[0].get("title") == "Exhibit appears fraudulently edited",
         "bare_denial_does_not_use_aos": bare == [],
+        "residence_bill_dates_are_gotcha": bool(focused)
+        and focused[0].get("document_id") == "ex-a"
+        and focused[0].get("tainted_support") is True,
+        "other_exhibit_not_pulled": wrong_focus == [],
+        "tainted_exhibit_stands_alone": bool(standalone) and standalone[0].get("document_id") == "ex-a",
+        "one_card_per_exhibit": len(citation_focus) == 1,
+        "does_not_quote_unrelated_filing": bool(citation_focus)
+        and "Gewirtz" not in str(citation_focus[0].get("claim_quote") or ""),
         "all_pass": False,
     }
 
@@ -546,6 +621,80 @@ def evaluate_template_fabrication() -> dict:
     }
 
 
+def evaluate_statement_dates() -> dict:
+    """Impossible dates on a third-party statement are fraud; a coherent bill is quiet."""
+    broken = (
+        "Account number 44122918. Amount due $140.00. "
+        "Statement date 03/02/2018. Service period 11/01/2023 - 11/30/2023."
+    )
+    clean = (
+        "Account number 44122918. Amount due $140.00. "
+        "Statement date 12/05/2023. Service period 11/01/2023 - 11/30/2023. "
+        "Due date 12/26/2023."
+    )
+    arrears = (
+        "Account number 44122918. Amount due $8,412.00. "
+        "Notice dated 06/01/2023. The installment payment is still due on 02/28/2022. "
+        "Right to cure. Statement date 06/01/2023. Service period 01/01/2022 - 01/31/2022."
+    )
+    mortgage = (
+        "This indenture. Recorded in the office of the city register. "
+        "Mortgage dated 03/01/2006. CRFN 2006000123456. Block 1, lot 2."
+    )
+    packet = (
+        clean
+        + "\f"
+        + "Account number 998877. Amount due $80.00. "
+        "Statement date 04/16/2007. Service period 11/01/2023 - 11/30/2023."
+    )
+    hits = find_statement_date_conflicts(broken, scan_profile="forensic", source="Exhibit S_41")
+    clean_hits = find_statement_date_conflicts(clean, scan_profile="forensic", source="Exhibit S_41")
+    arrears_hits = find_statement_date_conflicts(arrears, scan_profile="forensic", source="Exhibit S_12")
+    mortgage_hits = find_statement_date_conflicts(mortgage, scan_profile="forensic", source="Mortgage")
+    filing_hits = find_statement_date_conflicts(broken, scan_profile="court_filing", source="Exhibit S_41")
+    packet_hits = find_statement_date_conflicts(packet, scan_profile="forensic", source="Exhibit S_41")
+    docs = [{"id": "ex-41", "display_name": "Exhibit S_41 utility bills", "doc_kind": "exhibit"}]
+    snaps = {
+        "ex-41": {
+            "text_excerpt": broken,
+            "findings_summary": [
+                {
+                    "id": hits[0].id if hits else "missing",
+                    "category": "contextual",
+                    "severity": "high",
+                    "analysis_type": "date_inconsistency",
+                    "quoted_evidence": (hits[0].evidence or {}).get("quoted_evidence") if hits else "",
+                }
+            ],
+        }
+    }
+    tainted = propose_tainted_support([], docs, snaps, filing_text="", focus_document_id="ex-41")
+    other = Finding(
+        id="img-ela-page-2",
+        category="image",
+        severity="high",
+        title="Possible graphic splice",
+        explanation="x",
+        why_suspicious="y",
+        confidence=80,
+        evidence={"analysis_type": "graphic_manipulation"},
+    )
+    ranked = pick_top_findings(([other] + hits) if hits else [other], 3)
+    return {
+        "impossible_dates_flagged": bool(hits)
+        and hits[0].evidence.get("analysis_type") == "date_inconsistency",
+        "impossible_dates_are_material": bool(hits) and is_material_finding(hits[0]),
+        "coherent_bill_quiet": clean_hits == [],
+        "arrears_letter_quiet": arrears_hits == [],
+        "recorded_instrument_quiet": mortgage_hits == [],
+        "court_filing_skipped": filing_hits == [],
+        "multi_statement_catches_the_broken_one": len(packet_hits) == 1,
+        "becomes_tainted_gotcha": bool(tainted) and tainted[0].get("tainted_support") is True,
+        "date_defect_ranks_first": bool(ranked) and ranked[0].id != "img-ela-page-2",
+        "all_pass": False,
+    }
+
+
 def evaluate() -> dict:
     dedupe = evaluate_dedupe()
     dedupe["all_pass"] = all(dedupe[key] for key in dedupe if key != "all_pass")
@@ -559,6 +708,10 @@ def evaluate() -> dict:
     recorded["all_pass"] = all(recorded[key] for key in recorded if key != "all_pass")
     templates = evaluate_template_fabrication()
     templates["all_pass"] = all(templates[key] for key in templates if key != "all_pass")
+    statement_dates = evaluate_statement_dates()
+    statement_dates["all_pass"] = all(
+        statement_dates[key] for key in statement_dates if key != "all_pass"
+    )
     return {
         "pairs": evaluate_pairs(),
         "pipeline": evaluate_pipeline(),
@@ -570,6 +723,7 @@ def evaluate() -> dict:
         "doc_kinds": kinds,
         "recorded_math": recorded,
         "template_fabrication": templates,
+        "statement_dates": statement_dates,
     }
 
 
@@ -594,6 +748,7 @@ def main() -> None:
     print("DOC KINDS", result["doc_kinds"])
     print("RECORDED MATH", result["recorded_math"])
     print("TEMPLATE FABRICATION", result["template_fabrication"])
+    print("STATEMENT DATES", result["statement_dates"])
     failed = bool(
         misses
         or pipe["misses"]
@@ -604,6 +759,7 @@ def main() -> None:
         or not result["doc_kinds"]["all_pass"]
         or not result["recorded_math"]["all_pass"]
         or not result["template_fabrication"]["all_pass"]
+        or not result["statement_dates"]["all_pass"]
     )
     if not result["score_independence"]["title_does_not_matter"]:
         failed = True

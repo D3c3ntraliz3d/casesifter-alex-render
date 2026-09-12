@@ -86,13 +86,28 @@ export async function updateCase(caseId, payload) {
   return readJson(res);
 }
 
+function isTransientUploadError(err) {
+  const text = String(err?.message || err || "");
+  return /failed to fetch|networkerror|econnreset|econnrefused|502|503|504|database is locked/i.test(text);
+}
+
 export async function uploadCaseDocument(caseId, file, { displayName, autoScan = true } = {}) {
-  const body = new FormData();
-  body.append("file", file);
-  if (displayName) body.append("display_name", displayName);
-  body.append("auto_scan", autoScan ? "true" : "false");
-  const res = await fetch(`/api/cases/${caseId}/documents`, { method: "POST", body });
-  return readJson(res);
+  let lastError = new Error("Upload failed.");
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const body = new FormData();
+    body.append("file", file);
+    if (displayName) body.append("display_name", displayName);
+    body.append("auto_scan", autoScan ? "true" : "false");
+    try {
+      const res = await fetch(`/api/cases/${caseId}/documents`, { method: "POST", body });
+      return await readJson(res);
+    } catch (err) {
+      lastError = err;
+      if (!isTransientUploadError(err) || attempt === 2) break;
+      await new Promise((resolve) => setTimeout(resolve, 600 * (attempt + 1)));
+    }
+  }
+  throw lastError;
 }
 
 export async function patchDocument(caseId, documentId, payload) {

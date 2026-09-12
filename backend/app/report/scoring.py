@@ -36,7 +36,9 @@ def score_risk(findings: list[Finding]) -> tuple[RiskLevel, int]:
         if item.category == "gotcha":
             gotcha_type = str((item.evidence or {}).get("contradiction_type") or "")
             weight *= TYPE_SCORE_WEIGHT.get(gotcha_type, 1.15)
-            if (item.evidence or {}).get("self_undercut"):
+            if (item.evidence or {}).get("tainted_support"):
+                weight *= 1.5
+            elif (item.evidence or {}).get("self_undercut"):
                 weight *= 1.2
             elif (item.evidence or {}).get("evidence_tier") == 1 and (item.evidence or {}).get("claim_tier") == 1:
                 weight *= 1.1
@@ -57,7 +59,12 @@ def pick_top_findings(findings: list[Finding], limit: int = 3) -> list[Finding]:
     pool = material or [f for f in findings if f.severity != "info"]
     ranked = sorted(
         pool,
-        key=lambda f: (SEVERITY_RANK[f.severity], f.confidence),
+        key=lambda f: (
+            1 if (f.evidence or {}).get("tainted_support") else 0,
+            1 if (f.evidence or {}).get("analysis_type") == "date_inconsistency" else 0,
+            SEVERITY_RANK[f.severity],
+            f.confidence,
+        ),
         reverse=True,
     )
     return ranked[:limit]

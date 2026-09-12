@@ -312,8 +312,12 @@ async def api_upload_document(
     digest = sha256_file(dest)
 
     # Lightweight text peek for auto-title (PDF first page / plain text).
-    sample = _peek_text(dest)
-    proposed_name, proposed_kind = propose_document_title(safe_name, sample)
+    # A bad page must not reject the file; the case still needs the filing.
+    try:
+        sample = _peek_text(dest)
+        proposed_name, proposed_kind = propose_document_title(safe_name, sample)
+    except Exception:
+        proposed_name, proposed_kind = Path(safe_name).stem.replace("_", " "), None
     final_name = (display_name or "").strip() or proposed_name
     final_kind = (doc_kind or "").strip() or proposed_kind
     should_scan = str(auto_scan).strip().lower() in {"1", "true", "yes", "on"}
@@ -330,23 +334,27 @@ async def api_upload_document(
     job_id = None
     status = doc["status"]
     if should_scan:
-        job_id = uuid.uuid4().hex
-        # Copy into job dir so existing artifact/report paths keep working.
-        job_path = job_dir(job_id) / safe_name
-        shutil.copy2(dest, job_path)
-        create_job(job_id, safe_name)
-        cases_db.update_document(doc["id"], scan_job_id=job_id, status="queued")
-        _start_analysis(
-            job_id,
-            job_path,
-            submitted_by,
-            case_id=case_id,
-            document_id=doc["id"],
-            display_name=final_name,
-            doc_kind=final_kind,
-        )
-        status = "queued"
-        doc = cases_db.get_document(doc["id"])
+        try:
+            job_id = uuid.uuid4().hex
+            # Copy into job dir so existing artifact/report paths keep working.
+            job_path = job_dir(job_id) / safe_name
+            shutil.copy2(dest, job_path)
+            create_job(job_id, safe_name)
+            cases_db.update_document(doc["id"], scan_job_id=job_id, status="queued")
+            _start_analysis(
+                job_id,
+                job_path,
+                submitted_by,
+                case_id=case_id,
+                document_id=doc["id"],
+                display_name=final_name,
+                doc_kind=final_kind,
+            )
+            status = "queued"
+            doc = cases_db.get_document(doc["id"]) or doc
+        except Exception:
+            job_id = None
+            status = "uploaded"
 
     return {
         "document": doc,

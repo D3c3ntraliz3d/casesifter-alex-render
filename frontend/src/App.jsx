@@ -667,19 +667,37 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
     if (rejected.length) onError(`Skipped unsupported file(s): ${rejected.join(", ")}`);
     if (!valid.length) return;
     onError("");
-    try {
-      for (let i = 0; i < valid.length; i += 1) {
-        setUploadNote(`Adding ${i + 1} of ${valid.length}: ${valid[i].name}`);
+    const failed = [];
+    let added = 0;
+    for (let i = 0; i < valid.length; i += 1) {
+      setUploadNote(`Adding ${i + 1} of ${valid.length}: ${valid[i].name}`);
+      try {
         await uploadCaseDocument(caseData.id, valid[i], { autoScan: true });
-        await onRefresh();
+        added += 1;
+      } catch (err) {
+        failed.push(`${valid[i].name}: ${err.message || "upload failed"}`);
       }
-      setUploadNote(`Added ${valid.length} file${valid.length === 1 ? "" : "s"}. Scans will finish in the background.`);
-    } catch (err) {
-      onError(err.message);
-      setUploadNote("");
-    } finally {
-      if (inputRef.current) inputRef.current.value = "";
+      try {
+        await onRefresh();
+      } catch {
+        // Keep adding remaining files even if the case refresh drops.
+      }
     }
+    if (failed.length) {
+      onError(
+        added
+          ? `Added ${added} of ${valid.length}. Failed: ${failed.join(" · ")}`
+          : `None of ${valid.length} files were added. ${failed.join(" · ")}`
+      );
+    } else {
+      onError("");
+    }
+    setUploadNote(
+      added
+        ? `Added ${added} file${added === 1 ? "" : "s"}. Scans will finish in the background.`
+        : ""
+    );
+    if (inputRef.current) inputRef.current.value = "";
   }
 
   async function saveRename(doc) {
@@ -984,34 +1002,43 @@ function CaseGotchaBoard({ caseId, documents, onOpenReport }) {
             {(item.contradiction_type || item.gotcha_level) && (
               <p className="footnote">{item.gotcha_level || item.contradiction_type}</p>
             )}
-            {item.claim_quote && (
-              <p className="gotcha-quote">
-                <strong>Claim:</strong> “{item.claim_quote}”
-                {item.claim_source ? ` — ${item.claim_source}` : ""}
-              </p>
-            )}
-            {item.evidence_quote && (
-              <p className="gotcha-quote">
-                <strong>{item.evidence_label || (item.evidence_tier === 2 ? "Opposing assertion" : "Evidence")}:</strong>{" "}
-                “{item.evidence_quote}”
-                {item.evidence_source ? ` — ${item.evidence_source}` : ""}
-              </p>
-            )}
             {item.tainted_support ? (
-              <p className="footnote">
-                They produced this record in support of the claim, and the record itself appears
-                fraudulent or false.
-              </p>
-            ) : item.self_undercut ? (
-              <p className="footnote">This party’s own record appears to undercut their claim.</p>
-            ) : null}
-            {(item.attorney_why || item.materiality_reason || item.fact_named) && (
-              <p className="gotcha-why">
-                {item.attorney_why
-                  || [item.fact_named && `Same fact: ${item.fact_named}.`, item.materiality_reason]
-                      .filter(Boolean)
-                      .join(" ")}
-              </p>
+              <>
+                <p className="gotcha-quote">
+                  {item.evidence_quote || "See the scan report for each flagged item."}
+                </p>
+                <p className="gotcha-why">
+                  This exhibit appears fraudulently edited. Open the report for the detail of
+                  each flagged item.
+                </p>
+              </>
+            ) : (
+              <>
+                {item.claim_quote && (
+                  <p className="gotcha-quote">
+                    <strong>Claim:</strong> “{item.claim_quote}”
+                    {item.claim_source ? ` — ${item.claim_source}` : ""}
+                  </p>
+                )}
+                {item.evidence_quote && (
+                  <p className="gotcha-quote">
+                    <strong>{item.evidence_label || (item.evidence_tier === 2 ? "Opposing assertion" : "Evidence")}:</strong>{" "}
+                    “{item.evidence_quote}”
+                    {item.evidence_source ? ` — ${item.evidence_source}` : ""}
+                  </p>
+                )}
+                {item.self_undercut ? (
+                  <p className="footnote">This party’s own record appears to undercut their claim.</p>
+                ) : null}
+                {(item.attorney_why || item.materiality_reason || item.fact_named) && (
+                  <p className="gotcha-why">
+                    {item.attorney_why
+                      || [item.fact_named && `Same fact: ${item.fact_named}.`, item.materiality_reason]
+                          .filter(Boolean)
+                          .join(" ")}
+                  </p>
+                )}
+              </>
             )}
             <div className="actions" style={{ marginTop: 8 }}>
               {sources.map((doc) => {
@@ -1825,7 +1852,14 @@ function FindingCard({ item, docKind }) {
       {caseHit && item.evidence?.prior_display_name && (
         <p className="footnote">Prior file: {item.evidence.prior_display_name}</p>
       )}
-      {gotcha && item.evidence?.claim_quote ? (
+      {gotcha && item.evidence?.tainted_support ? (
+        <>
+          <p>{item.explanation}</p>
+          {item.evidence?.evidence_quote && (
+            <p className="gotcha-quote">{item.evidence.evidence_quote}</p>
+          )}
+        </>
+      ) : gotcha && item.evidence?.claim_quote ? (
         <>
           <p className="gotcha-quote">
             <strong>Claim:</strong> “{item.evidence.claim_quote}”
