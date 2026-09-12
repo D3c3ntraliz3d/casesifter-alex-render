@@ -76,7 +76,11 @@ def _run(path: Path) -> tuple[list[Finding], dict[str, Any]]:
         meta["document"] = img_meta
         findings.extend(img_findings)
         events.extend(img_events)
-
+    elif suffix == ".txt":
+        meta["document"] = {
+            "format": "txt",
+            "encoding_note": "Plain text exhibit; no embedded document timestamps.",
+        }
     _compare_timestamps(meta, findings, events)
     extras = {"metadata": meta, "timeline": [e.model_dump() for e in events]}
     return findings, extras

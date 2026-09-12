@@ -17,6 +17,7 @@ class Settings(BaseSettings):
         ".pdf",
         ".docx",
         ".xlsx",
+        ".txt",
         ".jpg",
         ".jpeg",
         ".png",

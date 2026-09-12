@@ -38,7 +38,7 @@ const RISK = {
   red: "High risk",
 };
 
-const ACCEPTED = new Set([".pdf", ".docx", ".xlsx", ".jpg", ".jpeg", ".png", ".gif"]);
+const ACCEPTED = new Set([".pdf", ".docx", ".xlsx", ".txt", ".jpg", ".jpeg", ".png", ".gif"]);
 
 function extensionOf(name) {
   const i = name.lastIndexOf(".");
@@ -228,15 +228,15 @@ export default function App() {
             onClick={() => inputRef.current?.click()}
           >
             <Upload size={28} />
-            <h2>Drop one or more PDF, image, Word, or Excel files</h2>
+            <h2>Drop one or more PDF, text, image, Word, or Excel files</h2>
             <p>Multiple files allowed. Each exhibit is scanned separately (up to 100 MB each).</p>
-            <div className="formats">PDF · DOCX · XLSX · JPG · PNG · GIF</div>
+            <div className="formats">PDF · TXT · DOCX · XLSX · JPG · PNG · GIF</div>
             <input
               ref={inputRef}
               type="file"
               hidden
               multiple
-              accept=".pdf,.docx,.xlsx,.jpg,.jpeg,.png,.gif"
+              accept=".pdf,.txt,.docx,.xlsx,.jpg,.jpeg,.png,.gif"
               onChange={(e) => onUpload(e.target.files)}
             />
           </div>
@@ -271,7 +271,7 @@ export default function App() {
                 type="file"
                 hidden
                 multiple
-                accept=".pdf,.docx,.xlsx,.jpg,.jpeg,.png,.gif"
+                accept=".pdf,.txt,.docx,.xlsx,.jpg,.jpeg,.png,.gif"
                 onChange={(e) => onUpload(e.target.files)}
               />
             </div>

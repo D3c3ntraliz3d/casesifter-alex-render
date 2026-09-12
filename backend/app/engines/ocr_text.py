@@ -43,6 +43,8 @@ def _run(path: Path, metadata_extras: dict[str, Any]) -> tuple[list[Finding], di
         findings.extend(docx_findings)
     elif suffix == ".xlsx":
         extracted_pages = _xlsx_text(path)
+    elif suffix == ".txt":
+        extracted_pages = _plain_text(path)
 
     full_text = "\n".join(p.get("text") or "" for p in extracted_pages)
     extras: dict[str, Any] = {
@@ -347,6 +349,19 @@ def _xlsx_text(path: Path) -> list[dict[str, Any]]:
         pages.append({"page": i, "text": "\n".join(rows), "source": f"xlsx:{sheet.title}"})
     wb.close()
     return pages
+
+
+def _plain_text(path: Path) -> list[dict[str, Any]]:
+    raw = path.read_bytes()
+    for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+        try:
+            text = raw.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        text = raw.decode("utf-8", errors="replace")
+    return [{"page": 1, "text": text, "source": "txt"}]
 
 
 def _date_mismatch(text: str, doc_meta: dict[str, Any]) -> list[Finding]:

@@ -153,6 +153,7 @@ GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{mode
 # equivalent, so those exhibits fall back to text-only analysis.
 NATIVE_MIME_TYPES = {
     ".pdf": "application/pdf",
+    ".txt": "text/plain",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".png": "image/png",
