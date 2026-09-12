@@ -16,12 +16,7 @@ import re
 from typing import Any
 
 from app.engines import finding
-from app.fact_extract import (
-    FACT_META,
-    extract_facts,
-    normalize_party,
-    referenced_exhibits,
-)
+from app.fact_extract import FACT_META, GOTCHA_KEYS, extract_facts, referenced_exhibits
 from app.models import Finding
 from app.scan_profile import COURT_FILING_KINDS
 
@@ -228,33 +223,8 @@ def compare_to_case(
                         ),
                         why="The same account/issuer with disjoint service addresses can signal a swapped page.",
                         confidence=68,
-                        severity="medium",
-                        material=True,
-                    )
-                )
-
-        new_parties = {_party_key(n) for n in new_orgs}
-        prior_parties = {_party_key(n) for n in prior_orgs}
-        if new_parties and prior_parties and not (new_parties & prior_parties):
-            # Only when both look like lenders/servicers and nothing aliases together.
-            if _looks_like_lender_set(new_orgs) and _looks_like_lender_set(prior_orgs):
-                findings.append(
-                    _case_finding(
-                        prior_id=prior_id,
-                        prior_name=prior_name,
-                        field="parties",
-                        new_value=", ".join(sorted(new_orgs)[:3]),
-                        prior_value=", ".join(sorted(prior_orgs)[:3]),
-                        title=f"Different lender / issuer than “{prior_name}”",
-                        explanation=(
-                            f"This file’s parties ({', '.join(sorted(new_orgs)[:3])}) do not alias "
-                            f"to the parties in “{prior_name}” ({', '.join(sorted(prior_orgs)[:3])}). "
-                            "WaMu / Washington Mutual style abbreviations are treated as the same entity."
-                        ),
-                        why="A swapped servicer or plaintiff name can change who has standing.",
-                        confidence=64,
-                        severity="medium",
-                        material=True,
+                        severity="info",
+                        material=False,
                     )
                 )
 
@@ -267,6 +237,8 @@ def _internal_fact_conflicts(doc_name: str, facts: list[dict[str, Any]]) -> list
         grouped.setdefault(fact["key"], []).append(fact)
     out: list[Finding] = []
     for key, items in grouped.items():
+        if key not in GOTCHA_KEYS:
+            continue
         unique = _unique_facts(items)
         if len(unique) < 2:
             continue
@@ -308,7 +280,7 @@ def _compare_facts(
     seen: set[str] = set()
     for fact in new_facts:
         key = fact["key"]
-        if key in seen:
+        if key not in GOTCHA_KEYS or key in seen:
             continue
         counterparts = prior_by_key.get(key) or []
         if not counterparts:
@@ -459,15 +431,6 @@ def _is_counsel_org(name: str) -> bool:
     if re.fullmatch(r"(partners|associates|attorneys?)(,?\s*(pllc|llp|llc|pc))?", n):
         return True
     return False
-
-
-def _looks_like_lender_set(names: set[str]) -> bool:
-    blob = " ".join(names)
-    return bool(re.search(r"(?i)\b(bank|trust|mortgage|loan|servic|credit|association|fargo|chase|wamu)\b", blob))
-
-
-def _party_key(name: str) -> str:
-    return normalize_party(name)
 
 
 def _is_court_filing_kind(kind: str | None) -> bool:

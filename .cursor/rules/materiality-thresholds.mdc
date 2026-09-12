@@ -5,10 +5,10 @@ alwaysApply: true
 
 # Material case contradictions
 
-Compare the **same labeled fact** across filings (loan amount to loan amount, rate to rate). Do not flag formatting, abbreviations, or unlabeled dollar dumps.
+Flag only **gotcha lies**: the same claim stated two different ways in a way that can win the case.
 
-**Flag (RED):** loan amount differs by >$1,000 or >0.5%; interest rate by >0.1 points; monthly payment by >$50 or >3%; outstanding balance by >$5,000 or >1.5%; fees by >10% or >$1,000; dates in a different month/year; referenced exhibit attached/annexed but missing from the case; actually different party (not an alias).
+**Flag:** two filings give different interest rates, monthly payments, amounts owed, fee totals, first-default dates, 90-day/notice dates, or foreclosure-filing dates; a filing says an exhibit is attached and that exhibit is not in the case; arithmetic on a statement does not add up.
 
-**Do not flag:** WaMu / Washington Mutual / J. Garcia vs Jose Garcia; $385,000 vs $385,500; same month different day unless a notice or foreclosure deadline; NYSCEF header dates vs body dates; counsel letterhead.
+**Do not flag:** mortgage dated vs recorded; origination vs recording; Bank of America in a pleading vs an insurer or different servicer on an exhibit; WaMu / Washington Mutual; same month, different day; NYSCEF header dates; counsel letterhead; party-name lists that simply do not overlap.
 
-Every material flag needs an exact quote from each document, why it matters, and what to open next.
+A dated mortgage in 2006 and a recorded mortgage in 2009 is chronology, not a contradiction.

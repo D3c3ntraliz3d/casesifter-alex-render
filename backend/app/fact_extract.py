@@ -53,13 +53,13 @@ FACT_META: dict[str, dict[str, Any]] = {
         "abs": 1000.0,
         "pct": 0.10,
     },
-    "loan_origination_date": {"label": "Loan origination date", "kind": "date"},
-    "note_date": {"label": "Note date", "kind": "date"},
-    "mortgage_date": {"label": "Mortgage / recording date", "kind": "date"},
     "first_default_date": {"label": "First default date", "kind": "date"},
     "foreclosure_date": {"label": "Foreclosure filing date", "kind": "date", "deadline": True},
     "notice_date": {"label": "Notice date", "kind": "date", "deadline": True},
 }
+
+# Origination / recording / “mortgage dated” are ordinary chronology, not a lie.
+GOTCHA_KEYS = frozenset(FACT_META)
 
 MONEY_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     (
@@ -101,24 +101,6 @@ RATE_RE = re.compile(
 )
 
 DATE_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    (
-        "loan_origination_date",
-        re.compile(
-            rf"(?i)(?:loan\s+origination|originated\s+on|date\s+of\s+origination|"
-            rf"note\s+(?:was\s+)?(?:made|dated|executed))\D{{0,28}}({DATE_TOKEN})"
-        ),
-    ),
-    (
-        "note_date",
-        re.compile(rf"(?i)(?:note\s+dated|dated\s+note|execution\s+of\s+the\s+note)\D{{0,20}}({DATE_TOKEN})"),
-    ),
-    (
-        "mortgage_date",
-        re.compile(
-            rf"(?i)(?:mortgage\s+(?:was\s+)?(?:dated|recorded|executed)|"
-            rf"recorded\s+on)\D{{0,24}}({DATE_TOKEN})"
-        ),
-    ),
     (
         "first_default_date",
         re.compile(
