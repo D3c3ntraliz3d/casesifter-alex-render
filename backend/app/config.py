@@ -52,11 +52,23 @@ class Settings(BaseSettings):
     gemini_thinking_level: str = "minimal"
     gemini_claim_thinking_level: str = "minimal"
 
+    # Hybrid control plane. "open" unlocks scans locally; "license" needs LICENSE_KEY;
+    # "cloud" expects login against CLOUD_CONTROL_URL (stubbed when URL is empty).
+    entitlement_mode: str = "open"
+    license_key: str | None = None
+    cloud_control_url: str | None = None
+    share_anonymized_outcomes: bool = True
+
     @property
     def jobs_dir(self) -> Path:
         return self.data_dir / "jobs"
+
+    @property
+    def cases_dir(self) -> Path:
+        return self.data_dir / "cases"
 
 
 settings = Settings()
 settings.data_dir.mkdir(parents=True, exist_ok=True)
 settings.jobs_dir.mkdir(parents=True, exist_ok=True)
+settings.cases_dir.mkdir(parents=True, exist_ok=True)

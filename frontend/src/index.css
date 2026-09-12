@@ -249,3 +249,40 @@ table.data th { background: #f3eee4; color: var(--navy); }
 .error { color: var(--red); background: var(--red-bg); padding: 10px 12px; }
 .actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0 0; }
 .kicker { font-size: 12px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--gold); font-weight: 600; }
+
+.case-form {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+  max-width: 560px;
+}
+.case-form label {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.case-form input {
+  border: 1px solid var(--line);
+  background: #fff;
+  padding: 10px 12px;
+  font: inherit;
+  color: var(--ink);
+}
+.linkish {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--navy);
+  text-decoration: underline;
+  cursor: pointer;
+  text-align: left;
+}
+.share-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin: 16px 0;
+  font-size: 14px;
+}

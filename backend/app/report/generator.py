@@ -38,6 +38,7 @@ CATEGORY_LABEL = {
     "pdf_structure": "PDF structure",
     "page_anomalies": "Page anomalies",
     "contextual": "Contextual logic",
+    "case_consistency": "Case consistency",
 }
 
 

@@ -1,6 +1,21 @@
 import { useEffect, useRef, useState } from "react";
-import { ShieldAlert, Upload } from "lucide-react";
-import { exportUrl, getJob, uploadExhibit } from "./api";
+import { FolderOpen, ShieldAlert, Upload } from "lucide-react";
+import {
+  createCase,
+  exportUrl,
+  getCase,
+  getEntitlement,
+  getJob,
+  listCases,
+  loginCloud,
+  logoutCloud,
+  patchDocument,
+  saveLicense,
+  scanDocument,
+  sendFindingFeedback,
+  setShareOutcomes,
+  uploadCaseDocument,
+} from "./api";
 
 const STAGES = [
   ["queued", "Queued"],
@@ -11,6 +26,7 @@ const STAGES = [
   ["image_forensics", "Image forensics"],
   ["ocr_text", "Text / OCR"],
   ["contextual", "Contextual logic"],
+  ["case_consistency", "Case consistency"],
   ["generating_report", "Report"],
   ["complete", "Complete"],
 ];
@@ -30,6 +46,7 @@ const CATEGORY = {
   pdf_structure: "PDF structure",
   page_anomalies: "Page anomalies",
   contextual: "Contextual logic",
+  case_consistency: "Case consistency",
 };
 
 const RISK = {
@@ -45,157 +62,89 @@ function extensionOf(name) {
   return i >= 0 ? name.slice(i).toLowerCase() : "";
 }
 
-function batchItemId() {
-  return `local-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-}
-
 export default function App() {
-  const [drag, setDrag] = useState(false);
-  const [batch, setBatch] = useState([]);
-  const [activeId, setActiveId] = useState(null);
-  const [error, setError] = useState("");
+  const [view, setView] = useState("cases"); // cases | case | report | account
+  const [cases, setCases] = useState([]);
+  const [caseId, setCaseId] = useState(null);
+  const [caseData, setCaseData] = useState(null);
+  const [selectedDocId, setSelectedDocId] = useState(null);
+  const [job, setJob] = useState(null);
   const [tab, setTab] = useState("summary");
-  const [uploading, setUploading] = useState(false);
-  const inputRef = useRef(null);
+  const [error, setError] = useState("");
+  const [entitlement, setEntitlement] = useState(null);
+  const [busy, setBusy] = useState(false);
 
-  const active = batch.find((item) => item.id === activeId) || null;
-  const job = active?.job || null;
-  const report = job?.report;
-  const findings = report?.findings || [];
+  async function refreshCases() {
+    const rows = await listCases();
+    setCases(rows);
+  }
 
-  const pendingJobIds = batch
-    .filter(
-      (item) =>
-        item.job?.job_id &&
-        item.job.status !== "complete" &&
-        item.job.status !== "failed"
-    )
-    .map((item) => item.job.job_id)
-    .join(",");
+  async function refreshCase(id = caseId) {
+    if (!id) return null;
+    const data = await getCase(id);
+    setCaseData(data);
+    return data;
+  }
+
+  async function refreshEntitlement() {
+    try {
+      setEntitlement(await getEntitlement());
+    } catch {
+      setEntitlement(null);
+    }
+  }
 
   useEffect(() => {
-    if (!pendingJobIds) return;
+    refreshCases().catch((err) => setError(err.message));
+    refreshEntitlement();
+  }, []);
 
+  useEffect(() => {
+    if (!caseData?.documents?.length) return;
+    const pending = caseData.documents.filter(
+      (d) => d.scan_job_id && d.status !== "complete" && d.status !== "failed" && d.status !== "uploaded"
+    );
+    if (!pending.length) return;
     const timer = setInterval(async () => {
-      const ids = pendingJobIds.split(",").filter(Boolean);
-      const updates = await Promise.all(
-        ids.map(async (jobId) => {
-          try {
-            const next = await getJob(jobId);
-            return { jobId, job: next, error: null };
-          } catch (err) {
-            return { jobId, job: null, error: err.message };
-          }
-        })
-      );
-      setBatch((prev) =>
-        prev.map((item) => {
-          const hit = updates.find((u) => u.jobId === item.job?.job_id);
-          if (!hit) return item;
-          if (hit.error) return { ...item, error: hit.error };
-          return { ...item, job: hit.job, error: null };
-        })
-      );
-    }, 900);
-    return () => clearInterval(timer);
-  }, [pendingJobIds]);
-
-  async function onUpload(fileList) {
-    const files = Array.from(fileList || []);
-    if (files.length === 0) return;
-
-    const valid = [];
-    const rejected = [];
-    for (const file of files) {
-      if (ACCEPTED.has(extensionOf(file.name))) valid.push(file);
-      else rejected.push(file.name);
-    }
-
-    if (rejected.length) {
-      setError(`Skipped unsupported file(s): ${rejected.join(", ")}`);
-    } else {
-      setError("");
-    }
-    if (valid.length === 0) return;
-
-    setTab("summary");
-    setUploading(true);
-
-    const starters = valid.map((file) => ({
-      id: batchItemId(),
-      filename: file.name,
-      file,
-      job: null,
-      error: null,
-    }));
-    setBatch((prev) => [...prev, ...starters]);
-    setActiveId(starters[0].id);
-
-    // Upload one at a time so the server is not flooded with concurrent Gemini jobs.
-    for (const item of starters) {
       try {
-        const created = await uploadExhibit(item.file);
-        setBatch((prev) =>
-          prev.map((row) =>
-            row.id === item.id
-              ? {
-                  ...row,
-                  job: {
-                    ...created,
-                    percent: 2,
-                    stage: "queued",
-                    message: "Upload received.",
-                    filename: item.filename,
-                  },
-                }
-              : row
-          )
-        );
-      } catch (err) {
-        setBatch((prev) =>
-          prev.map((row) =>
-            row.id === item.id
-              ? {
-                  ...row,
-                  error: err.message,
-                  job: {
-                    job_id: null,
-                    filename: item.filename,
-                    status: "failed",
-                    percent: 100,
-                    stage: "failed",
-                    message: err.message,
-                    error: err.message,
-                  },
-                }
-              : row
-          )
-        );
+        const next = await refreshCase(caseData.id);
+        if (selectedDocId) {
+          const doc = next?.documents?.find((d) => d.id === selectedDocId);
+          if (doc?.scan_job_id) {
+            const progress = await getJob(doc.scan_job_id);
+            setJob(progress);
+          }
+        }
+      } catch {
+        /* keep polling */
       }
-    }
-    setUploading(false);
-    if (inputRef.current) inputRef.current.value = "";
-  }
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [caseData?.id, caseData?.documents, selectedDocId]);
 
-  function reset() {
-    setBatch([]);
-    setActiveId(null);
+  async function openCase(id) {
     setError("");
+    setCaseId(id);
+    setSelectedDocId(null);
+    setJob(null);
     setTab("summary");
-    setUploading(false);
+    const data = await refreshCase(id);
+    setCaseData(data);
+    setView("case");
   }
 
-  function selectItem(id) {
-    setActiveId(id);
+  async function openDocumentReport(doc) {
+    setSelectedDocId(doc.id);
     setTab("summary");
+    if (!doc.scan_job_id) {
+      setJob(null);
+      setError("This document has not been scanned yet.");
+      return;
+    }
+    const progress = await getJob(doc.scan_job_id);
+    setJob(progress);
+    setView("report");
   }
-
-  const showDropzone = batch.length === 0 && !uploading;
-  const batchBusy = batch.some(
-    (item) =>
-      !item.job ||
-      (item.job.status !== "complete" && item.job.status !== "failed")
-  );
 
   return (
     <div className="app">
@@ -204,141 +153,445 @@ export default function App() {
           <div className="seal">EX</div>
           <div>
             <h1>Court Exhibit Scanner</h1>
-            <p>Fraud indicators & authenticity verification · Phase 1</p>
+            <p>Case-local evidence · hybrid subscription control</p>
           </div>
         </div>
-        <div className="badge-soft">Decision support — not a legal finding</div>
+        <div className="actions">
+          <button className="btn secondary" type="button" onClick={() => setView("cases")}>
+            Cases
+          </button>
+          <button className="btn secondary" type="button" onClick={() => { refreshEntitlement(); setView("account"); }}>
+            Account
+          </button>
+          <div className="badge-soft">
+            {entitlement?.active ? (entitlement.plan || "Active") : "Inactive"}
+          </div>
+        </div>
       </header>
-
-      {showDropzone && (
-        <div className="card">
-          <p className="kicker">Submit exhibits</p>
-          <div
-            className={`dropzone ${drag ? "active" : ""}`}
-            onDragOver={(e) => {
-              e.preventDefault();
-              setDrag(true);
-            }}
-            onDragLeave={() => setDrag(false)}
-            onDrop={(e) => {
-              e.preventDefault();
-              setDrag(false);
-              onUpload(e.dataTransfer.files);
-            }}
-            onClick={() => inputRef.current?.click()}
-          >
-            <Upload size={28} />
-            <h2>Drop one or more PDF, text, image, Word, or Excel files</h2>
-            <p>Multiple files allowed. Each exhibit is scanned separately (up to 100 MB each).</p>
-            <div className="formats">PDF · TXT · DOCX · XLSX · JPG · PNG · GIF</div>
-            <input
-              ref={inputRef}
-              type="file"
-              hidden
-              multiple
-              accept=".pdf,.txt,.docx,.xlsx,.jpg,.jpeg,.png,.gif"
-              onChange={(e) => onUpload(e.target.files)}
-            />
-          </div>
-        </div>
-      )}
 
       {error && <div className="card error">{error}</div>}
 
-      {batch.length > 0 && (
-        <div className="card">
-          <div className="row" style={{ justifyContent: "space-between", marginBottom: 12 }}>
-            <div>
-              <p className="kicker">Batch queue</p>
-              <h2 className="serif" style={{ margin: "4px 0 0" }}>
-                {batch.length} exhibit{batch.length === 1 ? "" : "s"}
-              </h2>
-            </div>
-            <div className="actions">
-              <button
-                className="btn secondary"
-                type="button"
-                disabled={uploading}
-                onClick={() => inputRef.current?.click()}
-              >
-                Add more files
-              </button>
-              <button className="btn secondary" type="button" onClick={reset}>
-                Clear batch
-              </button>
-              <input
-                ref={inputRef}
-                type="file"
-                hidden
-                multiple
-                accept=".pdf,.txt,.docx,.xlsx,.jpg,.jpeg,.png,.gif"
-                onChange={(e) => onUpload(e.target.files)}
-              />
-            </div>
+      {view === "cases" && (
+        <CasesPage
+          cases={cases}
+          busy={busy}
+          onCreate={async (payload) => {
+            setBusy(true);
+            setError("");
+            try {
+              const created = await createCase(payload);
+              await refreshCases();
+              await openCase(created.id);
+            } catch (err) {
+              setError(err.message);
+            } finally {
+              setBusy(false);
+            }
+          }}
+          onOpen={openCase}
+        />
+      )}
+
+      {view === "case" && caseData && (
+        <CaseWorkspace
+          caseData={caseData}
+          busy={busy}
+          onBack={() => setView("cases")}
+          onRefresh={() => refreshCase(caseData.id)}
+          onError={setError}
+          onOpenReport={openDocumentReport}
+          setBusy={setBusy}
+        />
+      )}
+
+      {view === "report" && (
+        <>
+          <div className="card">
+            <button className="btn secondary" type="button" onClick={() => setView("case")}>
+              ← Back to case
+            </button>
           </div>
-          <ul className="batch-list">
-            {batch.map((item, index) => {
-              const status = item.job?.status || (item.error ? "failed" : "uploading");
-              const risk = item.job?.report?.risk_level;
-              return (
-                <li key={item.id}>
-                  <button
-                    type="button"
-                    className={`batch-item ${item.id === activeId ? "active" : ""}`}
-                    onClick={() => selectItem(item.id)}
-                  >
-                    <span className="batch-index">{index + 1}</span>
-                    <span className="batch-meta">
-                      <strong>{item.filename}</strong>
-                      <span className="footnote">
-                        {status === "uploading" && "Uploading…"}
-                        {status === "queued" && "Queued"}
-                        {status === "running" && `${item.job.percent || 0}% · ${item.job.stage || "running"}`}
-                        {status === "complete" && (risk ? `${RISK[risk] || risk}` : "Complete")}
-                        {status === "failed" && (item.error || item.job?.error || "Failed")}
-                      </span>
-                    </span>
-                    <span className={`batch-pill ${status}${risk ? ` risk-${risk}` : ""}`}>
-                      {status}
-                    </span>
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-          {batchBusy && (
-            <p className="footnote" style={{ marginTop: 12 }}>
-              Files upload one after another. Select a row to watch progress or open its report.
-            </p>
+          {job && job.status !== "complete" && job.status !== "failed" && (
+            <ProgressPanel job={job} filename={job.filename} />
           )}
+          {job?.status === "failed" && (
+            <div className="card">
+              <h2 className="serif">Analysis could not be completed</h2>
+              <p>{job.error || job.message}</p>
+            </div>
+          )}
+          {job?.status === "complete" && job.report && (
+            <ReportViewer
+              job={job}
+              report={job.report}
+              findings={job.report.findings || []}
+              tab={tab}
+              setTab={setTab}
+              docKind={caseData?.documents?.find((d) => d.id === selectedDocId)?.doc_kind}
+            />
+          )}
+        </>
+      )}
+
+      {view === "account" && (
+        <AccountPanel
+          entitlement={entitlement}
+          onRefresh={refreshEntitlement}
+          onError={setError}
+        />
+      )}
+    </div>
+  );
+}
+
+function CasesPage({ cases, busy, onCreate, onOpen }) {
+  const [caption, setCaption] = useState("");
+  const [court, setCourt] = useState("");
+  const [indexNumber, setIndexNumber] = useState("");
+
+  return (
+    <>
+      <div className="card">
+        <p className="kicker">New matter</p>
+        <h2 className="serif" style={{ marginTop: 4 }}>Open a case</h2>
+        <p className="footnote">
+          Documents stay on this machine under the case folder. The cloud only handles
+          subscription status and optional anonymized finding stats.
+        </p>
+        <form
+          className="case-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (!caption.trim()) return;
+            onCreate({
+              caption: caption.trim(),
+              court: court.trim() || null,
+              index_number: indexNumber.trim() || null,
+            });
+            setCaption("");
+            setCourt("");
+            setIndexNumber("");
+          }}
+        >
+          <label>
+            Case caption
+            <input value={caption} onChange={(e) => setCaption(e.target.value)} placeholder="Bank v. Defendant" required />
+          </label>
+          <label>
+            Court
+            <input value={court} onChange={(e) => setCourt(e.target.value)} placeholder="Supreme Court, Kings County" />
+          </label>
+          <label>
+            Index number
+            <input value={indexNumber} onChange={(e) => setIndexNumber(e.target.value)} placeholder="11467/2007" />
+          </label>
+          <button className="btn" type="submit" disabled={busy || !caption.trim()}>
+            Create case
+          </button>
+        </form>
+      </div>
+
+      <div className="card">
+        <p className="kicker">Your cases</p>
+        {cases.length === 0 && <p>No cases yet. Create one to start filing exhibits locally.</p>}
+        <ul className="batch-list">
+          {cases.map((item) => (
+            <li key={item.id}>
+              <button type="button" className="batch-item" onClick={() => onOpen(item.id)}>
+                <span className="batch-index"><FolderOpen size={16} /></span>
+                <span className="batch-meta">
+                  <strong>{item.caption}</strong>
+                  <span className="footnote">
+                    {[item.index_number, item.court].filter(Boolean).join(" · ") || "No index yet"}
+                    {" · "}
+                    {item.document_count || 0} document{(item.document_count || 0) === 1 ? "" : "s"}
+                  </span>
+                </span>
+                <span className="batch-pill">open</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </>
+  );
+}
+
+function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenReport, setBusy }) {
+  const [drag, setDrag] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const [editName, setEditName] = useState("");
+  const inputRef = useRef(null);
+  const docs = caseData.documents || [];
+
+  async function onUpload(fileList) {
+    const files = Array.from(fileList || []);
+    const valid = files.filter((f) => ACCEPTED.has(extensionOf(f.name)));
+    const rejected = files.filter((f) => !ACCEPTED.has(extensionOf(f.name))).map((f) => f.name);
+    if (rejected.length) onError(`Skipped unsupported file(s): ${rejected.join(", ")}`);
+    if (!valid.length) return;
+    setBusy(true);
+    onError("");
+    try {
+      for (const file of valid) {
+        await uploadCaseDocument(caseData.id, file, { autoScan: true });
+      }
+      await onRefresh();
+    } catch (err) {
+      onError(err.message);
+    } finally {
+      setBusy(false);
+      if (inputRef.current) inputRef.current.value = "";
+    }
+  }
+
+  async function saveRename(doc) {
+    const name = editName.trim();
+    if (!name || name === doc.display_name) {
+      setEditingId(null);
+      return;
+    }
+    try {
+      await patchDocument(caseData.id, doc.id, { display_name: name });
+      setEditingId(null);
+      await onRefresh();
+    } catch (err) {
+      onError(err.message);
+    }
+  }
+
+  async function rescan(doc) {
+    setBusy(true);
+    try {
+      await scanDocument(caseData.id, doc.id);
+      await onRefresh();
+    } catch (err) {
+      onError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <div className="card">
+        <div className="row" style={{ justifyContent: "space-between" }}>
+          <div>
+            <button className="btn secondary" type="button" onClick={onBack} style={{ marginBottom: 10 }}>
+              ← All cases
+            </button>
+            <p className="kicker">Case workspace</p>
+            <h2 className="serif" style={{ margin: "4px 0" }}>{caseData.caption}</h2>
+            <p className="footnote">
+              {[caseData.index_number, caseData.court].filter(Boolean).join(" · ") || "Index / court not set"}
+            </p>
+          </div>
         </div>
-      )}
+        <div
+          className={`dropzone ${drag ? "active" : ""}`}
+          style={{ marginTop: 16, padding: "28px 16px" }}
+          onDragOver={(e) => { e.preventDefault(); setDrag(true); }}
+          onDragLeave={() => setDrag(false)}
+          onDrop={(e) => {
+            e.preventDefault();
+            setDrag(false);
+            onUpload(e.dataTransfer.files);
+          }}
+          onClick={() => inputRef.current?.click()}
+        >
+          <Upload size={24} />
+          <h2>Add filings to this case</h2>
+          <p>Files are stored locally and scanned against prior documents already in the case.</p>
+          <div className="formats">PDF · TXT · DOCX · XLSX · JPG · PNG · GIF</div>
+          <input
+            ref={inputRef}
+            type="file"
+            hidden
+            multiple
+            accept=".pdf,.txt,.docx,.xlsx,.jpg,.jpeg,.png,.gif"
+            onChange={(e) => onUpload(e.target.files)}
+          />
+        </div>
+      </div>
 
-      {job && job.status !== "complete" && job.status !== "failed" && (
-        <ProgressPanel job={job} filename={active?.filename || job.filename} />
-      )}
-
-      {job?.status === "failed" && (
-        <div className="card">
-          <h2 className="serif">Analysis could not be completed</h2>
-          <p>{job.error || job.message || active?.error}</p>
-          <button className="btn" type="button" onClick={() => inputRef.current?.click()}>
-            Add another exhibit
+      <div className="card">
+        <div className="row" style={{ justifyContent: "space-between", marginBottom: 12 }}>
+          <div>
+            <p className="kicker">Documents</p>
+            <h2 className="serif" style={{ margin: "4px 0 0" }}>
+              {docs.length} file{docs.length === 1 ? "" : "s"}
+            </h2>
+          </div>
+          <button className="btn secondary" type="button" disabled={busy} onClick={() => inputRef.current?.click()}>
+            Upload more
           </button>
         </div>
+        {docs.length === 0 && <p>Drop complaints, motions, and exhibits here as the matter progresses.</p>}
+        <table className="data">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Kind</th>
+              <th>Status</th>
+              <th>Risk</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {docs.map((doc) => (
+              <tr key={doc.id}>
+                <td>
+                  {editingId === doc.id ? (
+                    <input
+                      value={editName}
+                      onChange={(e) => setEditName(e.target.value)}
+                      onBlur={() => saveRename(doc)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") saveRename(doc);
+                        if (e.key === "Escape") setEditingId(null);
+                      }}
+                      autoFocus
+                      style={{ width: "100%" }}
+                    />
+                  ) : (
+                    <button
+                      type="button"
+                      className="linkish"
+                      onClick={() => {
+                        setEditingId(doc.id);
+                        setEditName(doc.display_name || doc.original_filename);
+                      }}
+                    >
+                      {doc.display_name || doc.original_filename}
+                    </button>
+                  )}
+                  <div className="footnote">{doc.original_filename}</div>
+                </td>
+                <td>{doc.doc_kind || "—"}</td>
+                <td>{doc.status}</td>
+                <td>{doc.risk_level ? `${RISK[doc.risk_level] || doc.risk_level}` : "—"}</td>
+                <td>
+                  <div className="actions">
+                    {doc.status === "complete" && (
+                      <button className="btn gold" type="button" onClick={() => onOpenReport(doc)}>
+                        Report
+                      </button>
+                    )}
+                    {(doc.status === "failed" || doc.status === "uploaded" || doc.status === "complete") && (
+                      <button className="btn secondary" type="button" disabled={busy} onClick={() => rescan(doc)}>
+                        {doc.status === "complete" ? "Re-scan" : "Scan"}
+                      </button>
+                    )}
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </>
+  );
+}
+
+function AccountPanel({ entitlement, onRefresh, onError }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [license, setLicense] = useState("");
+
+  if (!entitlement) {
+    return <div className="card"><p>Loading account status…</p></div>;
+  }
+
+  return (
+    <div className="card">
+      <p className="kicker">Hybrid control plane</p>
+      <h2 className="serif" style={{ marginTop: 4 }}>Subscription & data sharing</h2>
+      <p>
+        Mode: <strong>{entitlement.mode}</strong>
+        {" · "}
+        {entitlement.active ? "Scans unlocked" : "Scans locked"}
+      </p>
+      <p className="footnote">{entitlement.message}</p>
+
+      <label className="share-row">
+        <input
+          type="checkbox"
+          checked={Boolean(entitlement.share_anonymized_outcomes)}
+          onChange={async (e) => {
+            try {
+              await setShareOutcomes(e.target.checked);
+              await onRefresh();
+            } catch (err) {
+              onError(err.message);
+            }
+          }}
+        />
+        Share anonymized finding outcomes (types, severity, confidence — never the PDF)
+      </label>
+
+      {entitlement.mode === "license" && (
+        <form
+          className="case-form"
+          onSubmit={async (e) => {
+            e.preventDefault();
+            try {
+              await saveLicense(license);
+              await onRefresh();
+            } catch (err) {
+              onError(err.message);
+            }
+          }}
+        >
+          <label>
+            License key
+            <input value={license} onChange={(e) => setLicense(e.target.value)} placeholder="XXXX-XXXX-XXXX" />
+          </label>
+          <button className="btn" type="submit">Save license</button>
+        </form>
       )}
 
-      {report && job.status === "complete" && (
-        <ReportViewer
-          job={job}
-          report={report}
-          findings={findings}
-          tab={tab}
-          setTab={setTab}
-          onReset={reset}
-          onAddMore={() => inputRef.current?.click()}
-          batchCount={batch.length}
-        />
+      {entitlement.mode === "cloud" && (
+        <form
+          className="case-form"
+          onSubmit={async (e) => {
+            e.preventDefault();
+            try {
+              await loginCloud(email, password);
+              await onRefresh();
+            } catch (err) {
+              onError(err.message);
+            }
+          }}
+        >
+          <label>
+            Email
+            <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
+          </label>
+          <label>
+            Password
+            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} required />
+          </label>
+          <div className="actions">
+            <button className="btn" type="submit">Sign in</button>
+            <button
+              className="btn secondary"
+              type="button"
+              onClick={async () => {
+                await logoutCloud();
+                await onRefresh();
+              }}
+            >
+              Sign out
+            </button>
+          </div>
+        </form>
+      )}
+
+      {entitlement.mode === "open" && (
+        <p className="footnote" style={{ marginTop: 12 }}>
+          Running in open/local-dev mode. Set <code>ENTITLEMENT_MODE=license</code> or
+          <code> cloud</code> in <code>.env</code> when you are ready to gate monthly access.
+        </p>
       )}
     </div>
   );
@@ -377,8 +630,9 @@ function ProgressPanel({ job, filename }) {
   );
 }
 
-function ReportViewer({ job, report, findings, tab, setTab, onReset, onAddMore, batchCount }) {
+function ReportViewer({ job, report, findings, tab, setTab, docKind }) {
   const material = findings.filter((f) => f.severity !== "info");
+  const caseAlerts = findings.filter((f) => f.category === "case_consistency");
   return (
     <>
       <div className="card">
@@ -390,17 +644,16 @@ function ReportViewer({ job, report, findings, tab, setTab, onReset, onAddMore, 
               <ShieldAlert size={16} />
               {RISK[report.risk_level]} · {report.risk_score}/100
             </span>
+            {caseAlerts.length > 0 && (
+              <p className="footnote" style={{ marginTop: 8 }}>
+                {caseAlerts.length} case-consistency alert{caseAlerts.length === 1 ? "" : "s"} vs prior filings.
+              </p>
+            )}
           </div>
           <div className="actions">
             <a className="btn gold" href={exportUrl(job.job_id, "html")}>Export HTML</a>
             <a className="btn" href={exportUrl(job.job_id, "pdf")}>Export PDF</a>
             <a className="btn secondary" href={exportUrl(job.job_id, "json")}>Export JSON</a>
-            {batchCount > 0 && (
-              <button className="btn secondary" type="button" onClick={onAddMore}>
-                Add exhibits
-              </button>
-            )}
-            <button className="btn secondary" type="button" onClick={onReset}>New batch</button>
           </div>
         </div>
         <p style={{ marginTop: 16 }}>{report.executive_summary}</p>
@@ -421,7 +674,7 @@ function ReportViewer({ job, report, findings, tab, setTab, onReset, onAddMore, 
               <h3 className="serif">Top findings</h3>
               {(report.top_findings || []).length === 0 && <p>No material findings.</p>}
               {(report.top_findings || []).map((item) => (
-                <FindingCard key={item.id} item={item} />
+                <FindingCard key={item.id} item={item} docKind={docKind} />
               ))}
             </div>
             <div>
@@ -440,7 +693,7 @@ function ReportViewer({ job, report, findings, tab, setTab, onReset, onAddMore, 
           <div>
             <p className="footnote">{material.length} material finding(s), {findings.length} total including notes.</p>
             {findings.map((item) => (
-              <FindingCard key={item.id} item={item} />
+              <FindingCard key={item.id} item={item} docKind={docKind} />
             ))}
             {findings.length === 0 && <p>The automated modules did not flag this file.</p>}
           </div>
@@ -533,9 +786,12 @@ function ReportViewer({ job, report, findings, tab, setTab, onReset, onAddMore, 
   );
 }
 
-function FindingCard({ item }) {
+function FindingCard({ item, docKind }) {
   const heat = item.evidence?.heatmap;
   const aiLead = Boolean(item.evidence?.ai_generated);
+  const caseHit = Boolean(item.evidence?.case_consistency);
+  const [feedback, setFeedback] = useState(null);
+
   return (
     <article className="finding">
       <header>
@@ -543,6 +799,9 @@ function FindingCard({ item }) {
         <span className={`sev ${item.severity}`}>{item.severity} · {Math.round(item.confidence)}%</span>
       </header>
       <p className="footnote">{CATEGORY[item.category] || item.category}{item.page ? ` · page ${item.page}` : ""}</p>
+      {caseHit && item.evidence?.prior_display_name && (
+        <p className="footnote">Prior file: {item.evidence.prior_display_name}</p>
+      )}
       <p>{item.explanation}</p>
       <p className="why">{item.why_suspicious}</p>
       {aiLead && (
@@ -552,6 +811,46 @@ function FindingCard({ item }) {
         </p>
       )}
       {item.recommended_action && <p><strong>Suggested next step:</strong> {item.recommended_action}</p>}
+      {caseHit && (
+        <div className="actions" style={{ marginTop: 8 }}>
+          <span className="footnote">Was this case alert useful?</span>
+          <button
+            className="btn secondary"
+            type="button"
+            disabled={feedback !== null}
+            onClick={async () => {
+              await sendFindingFeedback({
+                finding_id: item.id,
+                useful: true,
+                category: item.category,
+                field: item.evidence?.field,
+                doc_kind: docKind,
+              });
+              setFeedback(true);
+            }}
+          >
+            Yes
+          </button>
+          <button
+            className="btn secondary"
+            type="button"
+            disabled={feedback !== null}
+            onClick={async () => {
+              await sendFindingFeedback({
+                finding_id: item.id,
+                useful: false,
+                category: item.category,
+                field: item.evidence?.field,
+                doc_kind: docKind,
+              });
+              setFeedback(false);
+            }}
+          >
+            No
+          </button>
+          {feedback !== null && <span className="footnote">Thanks — recorded.</span>}
+        </div>
+      )}
       <div className="conf"><span style={{ width: `${item.confidence}%` }} /></div>
       {heat && <img className="heatmap" src={heat} alt="Forensic overlay" />}
     </article>

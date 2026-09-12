@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app import cases_db
 from app.api import router
 from app.config import settings
 
@@ -17,6 +18,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(router, prefix="/api")
+
+
+@app.on_event("startup")
+def _startup() -> None:
+    cases_db.ensure_schema()
 
 
 @app.get("/")

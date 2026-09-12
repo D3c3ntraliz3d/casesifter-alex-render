@@ -6,7 +6,13 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 Category = Literal[
-    "metadata", "image", "text", "pdf_structure", "page_anomalies", "contextual"
+    "metadata",
+    "image",
+    "text",
+    "pdf_structure",
+    "page_anomalies",
+    "contextual",
+    "case_consistency",
 ]
 Severity = Literal["info", "low", "medium", "high", "critical"]
 RiskLevel = Literal["green", "yellow", "red"]
@@ -111,3 +117,44 @@ class UploadResponse(BaseModel):
     job_id: str
     filename: str
     status: JobStatus
+
+
+class CaseCreate(BaseModel):
+    caption: str = Field(min_length=1, max_length=300)
+    court: str | None = None
+    index_number: str | None = None
+    notes: str | None = None
+
+
+class CaseUpdate(BaseModel):
+    caption: str | None = Field(default=None, min_length=1, max_length=300)
+    court: str | None = None
+    index_number: str | None = None
+    notes: str | None = None
+
+
+class DocumentUpdate(BaseModel):
+    display_name: str | None = Field(default=None, min_length=1, max_length=200)
+    doc_kind: str | None = None
+
+
+class LicenseBody(BaseModel):
+    license_key: str = Field(min_length=8, max_length=200)
+
+
+class LoginBody(BaseModel):
+    email: str
+    password: str
+
+
+class ShareOutcomesBody(BaseModel):
+    enabled: bool
+
+
+class FindingFeedbackBody(BaseModel):
+    finding_id: str
+    useful: bool
+    category: str | None = None
+    field: str | None = None
+    doc_kind: str | None = None
+    job_id: str | None = None

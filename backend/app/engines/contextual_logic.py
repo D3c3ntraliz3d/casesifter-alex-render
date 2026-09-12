@@ -104,16 +104,29 @@ LOCATION_RE = re.compile(
 DATE_RES = (
     re.compile(r"\b(\d{4}-\d{2}-\d{2})\b"),
     re.compile(r"\b(\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4})\b"),
+    # Allow "Nov 30,2017" (no space after the comma); OCR often drops it.
     re.compile(
         r"\b((?:January|February|March|April|May|June|July|August|September|October|"
-        r"November|December)\s+\d{1,2},?\s+\d{4})\b",
+        r"November|December)\s+\d{1,2},?\s*\d{4})\b",
         re.I,
     ),
     re.compile(
         r"\b(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|"
-        r"October|November|December),?\s+\d{4})\b",
+        r"October|November|December),?\s*\d{4})\b",
         re.I,
     ),
+)
+
+# Court e-filing headers (NYSCEF and similar) stamp every page. Their dates are about
+# the filing event / case index year, not the exhibit's internal chronology.
+COURT_FILING_HEADER_RE = re.compile(
+    r"\b(?:NYSCEF|FILED:\s*[A-Z][A-Z .'-]*CLERK|RECEIVED\s+NYSCEF|INDEX\s+NO\.?)\b",
+    re.I,
+)
+COURT_STAMP_DATE_CONTEXT_RE = re.compile(
+    r"(?:FILED:\s*[A-Z][A-Z .'-]{0,40}CLERK\s+|RECEIVED\s+NYSCEF:\s*|RECEIVED:\s*)"
+    r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}(?:\s+\d{1,2}:\d{2}\s*[AP]M)?)",
+    re.I,
 )
 
 # Capitalized phrases that match the org pattern but are page furniture, not parties.
@@ -283,6 +296,18 @@ Rules you must follow:
 - Do not flag normal document features: scan noise, JPEG softness, skew from a flatbed,
   letterhead in a display typeface, a handwritten signature differing from printed text,
   rounded currency, or ordinary OCR garbling of a correctly printed word.
+- Do NOT flag court e-filing / docket headers. Many courts (including New York NYSCEF)
+  print a stamp on every page such as:
+  "FILED: … COUNTY CLERK mm/dd/yyyy", "INDEX NO. #####/yyyy", "NYSCEF DOC. NO. …",
+  "RECEIVED NYSCEF: mm/dd/yyyy". These are system-generated page furniture.
+  Never treat as date_inconsistency, historical_impossibility, text_overlay, or
+  font_mismatch any of the following expected mismatches:
+  (a) INDEX NO. case year vs FILED / RECEIVED stamp date (case opened earlier than this filing);
+  (b) FILED / RECEIVED stamp date vs older dates printed in the exhibit body (bills, letters,
+  statements from prior years commonly filed years later);
+  (c) the stamp typeface/box differing from the scanned exhibit content underneath.
+  Only flag dates that contradict each other inside the exhibit's own narrative, ignoring
+  the e-filing header lines entirely when comparing chronology.
 - "confidence" is 0-100 for that specific observation. Use under 50 when you are unsure.
 - "severity" reflects how much the observation would matter if confirmed by a human.
 - Be specific in "title" (name the issuer, field, and page), and explain in "why_suspicious"
@@ -533,10 +558,15 @@ def extract_entities(text: str) -> Entities:
             Mention(text="Brooklyn, NY", kind="location", start=match.start())
         )
 
+    # Filing-stamp dates belong to the court packaging layer, not the exhibit narrative.
+    stamp_spans = _court_stamp_date_spans(window)
+
     seen_spans: set[int] = set()
     for pattern in DATE_RES:
         for match in pattern.finditer(window):
             if match.start() in seen_spans:
+                continue
+            if _span_overlaps_any(match.start(), match.end(), stamp_spans):
                 continue
             iso = _normalize_date(match.group(1))
             if not iso:
@@ -555,6 +585,8 @@ def extract_entities(text: str) -> Entities:
     ):
         if match.start() in seen_spans:
             continue
+        if _span_overlaps_any(match.start(), match.end(), stamp_spans):
+            continue
         iso = _normalize_date(match.group(1))
         if not iso:
             continue
@@ -564,6 +596,25 @@ def extract_entities(text: str) -> Entities:
         )
 
     return entities
+
+
+def _court_stamp_date_spans(text: str) -> list[tuple[int, int]]:
+    """Character spans for FILED / RECEIVED NYSCEF dates (court packaging, not body chronology)."""
+    spans: list[tuple[int, int]] = []
+    for match in COURT_STAMP_DATE_CONTEXT_RE.finditer(text):
+        spans.append((match.start(1), match.end(1)))
+    # Near each header token, ignore nearby mm/dd/yyyy stamps (INDEX / FILED / RECEIVED band).
+    for header in COURT_FILING_HEADER_RE.finditer(text):
+        left = max(0, header.start() - 40)
+        right = min(len(text), header.end() + 80)
+        window = text[left:right]
+        for date_match in re.finditer(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b", window):
+            spans.append((left + date_match.start(), left + date_match.end()))
+    return spans
+
+
+def _span_overlaps_any(start: int, end: int, spans: list[tuple[int, int]]) -> bool:
+    return any(start < span_end and end > span_start for span_start, span_end in spans)
 
 
 def build_claims(entities: Entities) -> list[Claim]:
@@ -1179,14 +1230,28 @@ def _normalize_date(raw: str) -> str | None:
     now = datetime.now(timezone.utc)
     if parsed.year < 1900 or parsed.year > now.year + 25:
         return None
+    # Reject parses that silently dropped an explicit 4-digit year in the source text
+    # (dateutil turns "Nov 30,2017" into the current year's Nov 30).
+    year_match = re.search(r"(?<!\d)(\d{4})(?!\d)", str(raw))
+    if year_match and int(year_match.group(1)) != parsed.year:
+        return None
     return parsed.date().isoformat()
 
 
 def _parse(value: Any) -> datetime | None:
     if not value:
         return None
+    text = str(value).strip()
+    # OCR often omits the space after a month-day comma ("Nov 30,2017").
+    text = re.sub(
+        r"\b((?:January|February|March|April|May|June|July|August|September|October|"
+        r"November|December|[A-Za-z]{3,9})\s+\d{1,2}),(\d{4})\b",
+        r"\1, \2",
+        text,
+        flags=re.I,
+    )
     try:
-        parsed = dateparser.parse(str(value), fuzzy=False)
+        parsed = dateparser.parse(text, fuzzy=False)
     except (ValueError, OverflowError, TypeError):
         return None
     if parsed is None:

@@ -13,10 +13,16 @@ from app.models import Finding, FontUsage, ModuleResult
 DATE_PATTERNS = [
     re.compile(r"\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b"),
     re.compile(
-        r"\b((?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4})\b",
+        r"\b((?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s*\d{4})\b",
         re.I,
     ),
 ]
+
+# NYSCEF and similar court e-filing stamps often embed tiny vector text on every page.
+COURT_EFILING_HEADER_RE = re.compile(
+    r"\b(?:NYSCEF|FILED:\s*[A-Z][A-Z .'-]*CLERK|RECEIVED\s+NYSCEF|INDEX\s+NO\.?)\b",
+    re.I,
+)
 
 
 def analyze_ocr_text(path: Path, metadata_extras: dict[str, Any] | None = None) -> ModuleResult:
@@ -62,6 +68,9 @@ def _run(path: Path, metadata_extras: dict[str, Any]) -> tuple[list[Finding], di
         "full_text": full_text,
     }
 
+    if COURT_EFILING_HEADER_RE.search(full_text):
+        findings = [_soften_micro_text_for_efiling(item) for item in findings]
+
     if suffix == ".pdf":
         findings.extend(_compare_ocr_vs_pdf_text(path, extracted_pages))
 
@@ -69,6 +78,34 @@ def _run(path: Path, metadata_extras: dict[str, Any]) -> tuple[list[Finding], di
     findings.extend(_date_mismatch(full_text, doc_meta))
     extras["font_models"] = fonts
     return findings, extras
+
+
+def _soften_micro_text_for_efiling(item: Finding) -> Finding:
+    """Court e-filing stamps often use sub-point vector text; do not treat as overlay fraud."""
+    if item.id != "txt-micro-text":
+        return item
+    return finding(
+        fid="txt-micro-text",
+        category="text",
+        severity="info",
+        title="Tiny text runs present (likely court e-filing stamp)",
+        explanation=(
+            f"{(item.evidence or {}).get('tiny_runs', 'Many')} text run(s) used a font size under "
+            "0.6 pt. This PDF also carries a court e-filing header (for example NYSCEF "
+            "FILED / INDEX NO. / RECEIVED stamps). Those stamps are commonly drawn as tiny "
+            "vector text on every page and are ordinary packaging, not an alteration overlay."
+        ),
+        why_suspicious=(
+            "Not a strong fraud signal when a court filing stamp is present. Revisit only if "
+            "tiny text appears away from the header band and conflicts with visible content."
+        ),
+        confidence=32,
+        evidence={**(item.evidence or {}), "court_efiling_header": True},
+        recommended_action=(
+            "Treat as e-filing packaging unless tiny text also sits over amounts, names, or "
+            "dates in the exhibit body."
+        ),
+    )
 
 
 def _pdf_text(path: Path) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]], list[Finding]]:
