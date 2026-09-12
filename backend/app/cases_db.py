@@ -107,8 +107,19 @@ def ensure_schema() -> None:
                     text_fingerprint TEXT,
                     excerpt_hashes_json TEXT,
                     amounts_json TEXT,
+                    text_excerpt TEXT,
                     created_at TEXT NOT NULL,
                     FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS case_messages (
+                    id TEXT PRIMARY KEY,
+                    case_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    citations_json TEXT,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (case_id) REFERENCES cases(id) ON DELETE CASCADE
                 );
 
                 CREATE TABLE IF NOT EXISTS telemetry_events (
@@ -136,6 +147,25 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     cols = {row[1] for row in conn.execute("PRAGMA table_info(cases)")}
     if "archived_at" not in cols:
         conn.execute("ALTER TABLE cases ADD COLUMN archived_at TEXT")
+    snap_cols = {row[1] for row in conn.execute("PRAGMA table_info(scan_snapshots)")}
+    if "text_excerpt" not in snap_cols:
+        conn.execute("ALTER TABLE scan_snapshots ADD COLUMN text_excerpt TEXT")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS case_messages (
+            id TEXT PRIMARY KEY,
+            case_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            citations_json TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (case_id) REFERENCES cases(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_case_messages_case ON case_messages(case_id, created_at)"
+    )
 
 
 def _row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -334,6 +364,7 @@ def save_scan_snapshot(
     text_fingerprint: str | None,
     excerpt_hashes: list[str],
     amounts: list[dict[str, Any]],
+    text_excerpt: str | None = None,
 ) -> dict[str, Any]:
     snap_id = uuid.uuid4().hex
     now = utcnow_iso()
@@ -343,8 +374,8 @@ def save_scan_snapshot(
             """
             INSERT INTO scan_snapshots (
                 id, document_id, case_id, entities_json, findings_summary_json,
-                text_fingerprint, excerpt_hashes_json, amounts_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                text_fingerprint, excerpt_hashes_json, amounts_json, text_excerpt, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 snap_id,
@@ -355,10 +386,21 @@ def save_scan_snapshot(
                 text_fingerprint,
                 json.dumps(excerpt_hashes),
                 json.dumps(amounts),
+                (text_excerpt or "")[:24000] or None,
                 now,
             ),
         )
     return get_scan_snapshot(document_id)  # type: ignore[return-value]
+
+
+def _decode_snapshot(row: sqlite3.Row) -> dict[str, Any]:
+    data = dict(row)
+    data["entities"] = json.loads(data.pop("entities_json") or "{}")
+    data["findings_summary"] = json.loads(data.pop("findings_summary_json") or "[]")
+    data["excerpt_hashes"] = json.loads(data.pop("excerpt_hashes_json") or "[]")
+    data["amounts"] = json.loads(data.pop("amounts_json") or "[]")
+    data["text_excerpt"] = data.get("text_excerpt") or ""
+    return data
 
 
 def get_scan_snapshot(document_id: str) -> dict[str, Any] | None:
@@ -369,12 +411,7 @@ def get_scan_snapshot(document_id: str) -> dict[str, Any] | None:
         ).fetchone()
     if row is None:
         return None
-    data = dict(row)
-    data["entities"] = json.loads(data.pop("entities_json") or "{}")
-    data["findings_summary"] = json.loads(data.pop("findings_summary_json") or "[]")
-    data["excerpt_hashes"] = json.loads(data.pop("excerpt_hashes_json") or "[]")
-    data["amounts"] = json.loads(data.pop("amounts_json") or "[]")
-    return data
+    return _decode_snapshot(row)
 
 
 def list_prior_snapshots(case_id: str, exclude_document_id: str) -> list[dict[str, Any]]:
@@ -389,14 +426,111 @@ def list_prior_snapshots(case_id: str, exclude_document_id: str) -> list[dict[st
             """,
             (case_id, exclude_document_id),
         ).fetchall()
+    return [_decode_snapshot(row) for row in rows]
+
+
+def list_case_snapshots(case_id: str) -> list[dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT s.*, d.display_name, d.doc_kind, d.original_filename, d.stored_path
+            FROM scan_snapshots s
+            JOIN documents d ON d.id = s.document_id
+            WHERE s.case_id = ?
+            ORDER BY s.created_at ASC
+            """,
+            (case_id,),
+        ).fetchall()
+    return [_decode_snapshot(row) for row in rows]
+
+
+def save_text_excerpt(document_id: str, case_id: str, excerpt: str) -> None:
+    text = (excerpt or "")[:24000]
+    if not text:
+        return
+    now = utcnow_iso()
+    with connect() as conn:
+        existing = conn.execute(
+            "SELECT id FROM scan_snapshots WHERE document_id = ?",
+            (document_id,),
+        ).fetchone()
+        if existing:
+            conn.execute(
+                "UPDATE scan_snapshots SET text_excerpt = ? WHERE document_id = ?",
+                (text, document_id),
+            )
+            return
+        conn.execute(
+            """
+            INSERT INTO scan_snapshots (
+                id, document_id, case_id, entities_json, findings_summary_json,
+                text_fingerprint, excerpt_hashes_json, amounts_json, text_excerpt, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                uuid.uuid4().hex,
+                document_id,
+                case_id,
+                "{}",
+                "[]",
+                None,
+                "[]",
+                "[]",
+                text,
+                now,
+            ),
+        )
+
+
+def add_case_message(
+    case_id: str,
+    role: str,
+    content: str,
+    citations: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    msg_id = uuid.uuid4().hex
+    now = utcnow_iso()
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO case_messages (id, case_id, role, content, citations_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                msg_id,
+                case_id,
+                role,
+                content,
+                json.dumps(citations or []),
+                now,
+            ),
+        )
+    return {
+        "id": msg_id,
+        "case_id": case_id,
+        "role": role,
+        "content": content,
+        "citations": citations or [],
+        "created_at": now,
+    }
+
+
+def list_case_messages(case_id: str, limit: int = 40) -> list[dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM case_messages
+            WHERE case_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (case_id, limit),
+        ).fetchall()
     out: list[dict[str, Any]] = []
-    for row in rows:
-        data = dict(row)
-        data["entities"] = json.loads(data.pop("entities_json") or "{}")
-        data["findings_summary"] = json.loads(data.pop("findings_summary_json") or "[]")
-        data["excerpt_hashes"] = json.loads(data.pop("excerpt_hashes_json") or "[]")
-        data["amounts"] = json.loads(data.pop("amounts_json") or "[]")
-        out.append(data)
+    for row in reversed(rows):
+        item = dict(row)
+        item["citations"] = json.loads(item.pop("citations_json") or "[]")
+        out.append(item)
     return out
 
 

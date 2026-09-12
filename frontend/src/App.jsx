@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Archive, FolderOpen, RotateCcw, Search, ShieldAlert, Trash2, Upload, X } from "lucide-react";
+import { Archive, FolderOpen, MessageSquare, RotateCcw, Search, ShieldAlert, Trash2, Upload, X } from "lucide-react";
 import {
   archiveCase,
+  askCaseChat,
   createCase,
   deleteCase,
   documentFileUrl,
@@ -10,6 +11,7 @@ import {
   getEntitlement,
   getJob,
   jobSourceUrl,
+  listCaseChat,
   listCases,
   loginCloud,
   logoutCloud,
@@ -754,6 +756,8 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
         onOpenReport={onOpenReport}
       />
 
+      <CaseChat caseId={caseData.id} documents={docs} onOpenReport={onOpenReport} onError={onError} />
+
       <div className="card">
         <div className="toolbar">
           <div>
@@ -862,6 +866,147 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
         )}
       </div>
     </>
+  );
+}
+
+const CHAT_HINTS = [
+  "What was the Wells Fargo statement used for?",
+  "Which motion cites this exhibit?",
+  "Where do the amounts conflict across filings?",
+];
+
+function CaseChat({ caseId, documents, onOpenReport, onError }) {
+  const [messages, setMessages] = useState([]);
+  const [draft, setDraft] = useState("");
+  const [asking, setAsking] = useState(false);
+  const threadRef = useRef(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    listCaseChat(caseId)
+      .then((items) => {
+        if (!cancelled) setMessages(items);
+      })
+      .catch(() => {
+        if (!cancelled) setMessages([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [caseId]);
+
+  useEffect(() => {
+    const el = threadRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [messages, asking]);
+
+  function openCite(cite) {
+    const doc = documents.find(
+      (item) =>
+        item.id === cite.document_id ||
+        (cite.display_name &&
+          (item.display_name === cite.display_name || item.original_filename === cite.display_name))
+    );
+    if (doc) onOpenReport(doc);
+  }
+
+  async function send(question) {
+    const text = (question || draft).trim();
+    if (!text || asking) return;
+    setDraft("");
+    setAsking(true);
+    onError("");
+    const pending = { id: `local-${Date.now()}`, role: "user", content: text, citations: [] };
+    setMessages((prev) => [...prev, pending]);
+    try {
+      const result = await askCaseChat(caseId, text);
+      setMessages((prev) => [
+        ...prev.filter((item) => item.id !== pending.id),
+        { ...pending, id: `${pending.id}-kept` },
+        result.message || {
+          id: `${pending.id}-answer`,
+          role: "assistant",
+          content: result.answer,
+          citations: result.citations || [],
+        },
+      ]);
+    } catch (err) {
+      setMessages((prev) => prev.filter((item) => item.id !== pending.id));
+      onError(err.message);
+    } finally {
+      setAsking(false);
+    }
+  }
+
+  return (
+    <div className="card case-chat">
+      <p className="kicker">Case clerk</p>
+      <h2 className="serif" style={{ margin: "4px 0 8px" }}>Ask about these documents</h2>
+      <p className="footnote" style={{ marginBottom: 14 }}>
+        Answers come from the filings and exhibits in this case — for example, where a motion cites a
+        Wells Fargo statement. Click a source to open its report.
+      </p>
+      <div className="chat-thread" ref={threadRef}>
+        {messages.length === 0 && !asking && (
+          <div className="chat-empty">
+            <MessageSquare size={18} />
+            <p>Ask what an exhibit was used for, or where a party or amount appears in the motions.</p>
+            <div className="chat-hints">
+              {CHAT_HINTS.map((hint) => (
+                <button key={hint} type="button" className="chat-hint" onClick={() => send(hint)}>
+                  {hint}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        {messages.map((msg) => (
+          <div key={msg.id} className={`chat-bubble ${msg.role}`}>
+            <p>{msg.content}</p>
+            {msg.role === "assistant" && msg.citations?.length > 0 && (
+              <div className="chat-cites">
+                {msg.citations.map((cite, idx) => (
+                  <button
+                    key={`${msg.id}-${idx}`}
+                    type="button"
+                    className="chat-cite"
+                    onClick={() => openCite(cite)}
+                    title={cite.note || ""}
+                  >
+                    {cite.display_name}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+        {asking && <p className="footnote">Searching the filings…</p>}
+      </div>
+      <form
+        className="chat-compose"
+        onSubmit={(e) => {
+          e.preventDefault();
+          send();
+        }}
+      >
+        <textarea
+          value={draft}
+          rows={2}
+          placeholder="e.g. What was the Wells Fargo mortgage statement used for?"
+          disabled={asking}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              send();
+            }
+          }}
+        />
+        <button className="btn gold" type="submit" disabled={asking || !draft.trim()}>
+          Ask
+        </button>
+      </form>
+    </div>
   );
 }
 

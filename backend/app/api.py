@@ -22,7 +22,9 @@ from app.entitlement import (
     set_share_outcomes,
 )
 from app.ingestion import sha256_file
+from app.case_chat import ask_case
 from app.models import (
+    CaseChatBody,
     CaseCreate,
     CaseUpdate,
     DocumentUpdate,
@@ -219,6 +221,37 @@ def api_delete_case(case_id: str):
     if not cases_db.delete_case(case_id):
         raise HTTPException(404, "Unknown case.")
     return {"deleted": case_id}
+
+
+@router.get("/cases/{case_id}/chat")
+def api_list_case_chat(case_id: str):
+    _validate_id(case_id)
+    if cases_db.get_case(case_id) is None:
+        raise HTTPException(404, "Unknown case.")
+    return {"messages": cases_db.list_case_messages(case_id)}
+
+
+@router.post("/cases/{case_id}/chat")
+def api_case_chat(case_id: str, body: CaseChatBody):
+    _validate_id(case_id)
+    if cases_db.get_case(case_id) is None:
+        raise HTTPException(404, "Unknown case.")
+    history = [
+        {"role": item["role"], "content": item["content"]}
+        for item in cases_db.list_case_messages(case_id, limit=8)
+    ]
+    try:
+        result = ask_case(case_id, body.question, history=history)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    cases_db.add_case_message(case_id, "user", body.question.strip())
+    assistant = cases_db.add_case_message(
+        case_id,
+        "assistant",
+        result["answer"],
+        citations=result.get("citations") or [],
+    )
+    return {**result, "message": assistant}
 
 
 @router.post("/cases/{case_id}/documents")

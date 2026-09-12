@@ -138,6 +138,10 @@ class DocumentUpdate(BaseModel):
     doc_kind: str | None = None
 
 
+class CaseChatBody(BaseModel):
+    question: str = Field(min_length=1, max_length=2000)
+
+
 class LicenseBody(BaseModel):
     license_key: str = Field(min_length=8, max_length=200)
 

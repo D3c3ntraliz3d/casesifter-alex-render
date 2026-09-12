@@ -104,6 +104,21 @@ export async function patchDocument(caseId, documentId, payload) {
   return readJson(res);
 }
 
+export async function listCaseChat(caseId) {
+  const res = await fetch(`/api/cases/${caseId}/chat`, { headers: jsonHeaders });
+  const data = await readJson(res);
+  return data.messages || [];
+}
+
+export async function askCaseChat(caseId, question) {
+  const res = await fetch(`/api/cases/${caseId}/chat`, {
+    method: "POST",
+    headers: { ...jsonHeaders, "Content-Type": "application/json" },
+    body: JSON.stringify({ question }),
+  });
+  return readJson(res);
+}
+
 export async function scanDocument(caseId, documentId) {
   const res = await fetch(`/api/cases/${caseId}/documents/${documentId}/scan`, {
     method: "POST",

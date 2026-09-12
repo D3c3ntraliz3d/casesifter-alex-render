@@ -166,6 +166,7 @@ def run_pipeline(
             text_fingerprint=fingerprint,
             excerpt_hashes=hashes,
             amounts=amounts,
+            text_excerpt=full_text[:24000],
         )
         priors = cases_db.list_prior_snapshots(case_id, exclude_document_id=document_id)
         name = display_name or source.name
@@ -279,6 +280,7 @@ def run_pipeline(
             text_fingerprint=fingerprint,
             excerpt_hashes=hashes,
             amounts=amounts,
+            text_excerpt=full_text[:24000],
         )
         emit_scan_outcomes(doc_kind=doc_kind, findings=findings, risk_level=risk_level)
 
