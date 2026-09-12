@@ -220,10 +220,10 @@ def _has_javascript(catalog, raw: bytes) -> dict[str, Any] | None:
 def _javascript_finding(javascript: dict[str, Any], origin: dict[str, Any]) -> Finding:
     """Severity depends on whether the exhibit looks scanned vs digitally born.
 
-    Scanned court exhibits often pick up /OpenAction or /JS tokens from e-filing or
-    scanner software. That is a container note, not evidence someone altered the
-    photographed page. Digitally born PDFs with a real JavaScript name tree are
-    treated more seriously.
+    Scanned court exhibits often pick up /OpenAction or /JS tokens from e-filing
+    systems that stamp each page, scanners, or merge tools. That is a container note,
+    not evidence someone altered the photographed page. Digitally born PDFs with a
+    real JavaScript name tree are treated more seriously.
     """
     scan_heavy = bool(origin.get("scan_heavy"))
     strong_js = bool(javascript.get("names_javascript") or javascript.get("raw_javascript_token"))
@@ -243,19 +243,22 @@ def _javascript_finding(javascript: dict[str, Any], origin: dict[str, Any]) -> F
             explanation=(
                 "This file looks like a scan of printed pages (most pages contain embedded "
                 "page images) and also has a PDF automatic-action or JavaScript token. "
-                "That combination is common after scanning, merging, or e-filing tools. "
-                "It is unlikely to change the photographed statement content itself, though "
-                "a viewer could still run an action when the file is opened."
+                "Court e-filing systems often add a stamp or marking to each evidence page "
+                "and may introduce these tokens when the exhibit is packaged. Scanner and "
+                "merge tools do the same. That is unlikely to change the photographed "
+                "statement content itself, though a viewer could still run an action when "
+                "the file is opened."
             ),
             why_suspicious=(
-                "Not primary evidence of alteration on the scanned page. It records that the "
-                "PDF wrapper is interactive or tool-processed."
+                "Not primary evidence of alteration on the scanned page. It usually reflects "
+                "court packaging or tooling on the PDF wrapper, not edits to the underlying bill."
             ),
             confidence=35,
             evidence=evidence,
             recommended_action=(
-                "Treat as a container note. If you need to rule out viewer tricks, open the "
-                "file in a JavaScript-disabled viewer or print to a flat PDF and compare."
+                "Treat as a container note from e-filing or packaging. If you need to rule out "
+                "viewer tricks, open in a JavaScript-disabled viewer or print to a flat PDF "
+                "and compare to the stamped pages."
             ),
         )
 
