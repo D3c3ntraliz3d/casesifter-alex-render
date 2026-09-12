@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ShieldAlert, Upload } from "lucide-react";
 import { exportUrl, getJob, uploadExhibit } from "./api";
 
@@ -38,49 +38,164 @@ const RISK = {
   red: "High risk",
 };
 
+const ACCEPTED = new Set([".pdf", ".docx", ".xlsx", ".jpg", ".jpeg", ".png", ".gif"]);
+
+function extensionOf(name) {
+  const i = name.lastIndexOf(".");
+  return i >= 0 ? name.slice(i).toLowerCase() : "";
+}
+
+function batchItemId() {
+  return `local-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+}
+
 export default function App() {
-  const [file, setFile] = useState(null);
   const [drag, setDrag] = useState(false);
-  const [job, setJob] = useState(null);
+  const [batch, setBatch] = useState([]);
+  const [activeId, setActiveId] = useState(null);
   const [error, setError] = useState("");
   const [tab, setTab] = useState("summary");
+  const [uploading, setUploading] = useState(false);
   const inputRef = useRef(null);
 
-  useEffect(() => {
-    if (!job?.job_id || job.status === "complete" || job.status === "failed") return;
-    const timer = setInterval(async () => {
-      try {
-        const next = await getJob(job.job_id);
-        setJob(next);
-      } catch (err) {
-        setError(err.message);
-      }
-    }, 900);
-    return () => clearInterval(timer);
-  }, [job?.job_id, job?.status]);
-
+  const active = batch.find((item) => item.id === activeId) || null;
+  const job = active?.job || null;
   const report = job?.report;
   const findings = report?.findings || [];
 
-  async function onUpload(selected) {
-    if (!selected) return;
-    setError("");
-    setTab("summary");
-    setFile(selected);
-    try {
-      const created = await uploadExhibit(selected);
-      setJob({ ...created, percent: 2, stage: "queued", message: "Upload received." });
-    } catch (err) {
-      setError(err.message);
+  const pendingJobIds = batch
+    .filter(
+      (item) =>
+        item.job?.job_id &&
+        item.job.status !== "complete" &&
+        item.job.status !== "failed"
+    )
+    .map((item) => item.job.job_id)
+    .join(",");
+
+  useEffect(() => {
+    if (!pendingJobIds) return;
+
+    const timer = setInterval(async () => {
+      const ids = pendingJobIds.split(",").filter(Boolean);
+      const updates = await Promise.all(
+        ids.map(async (jobId) => {
+          try {
+            const next = await getJob(jobId);
+            return { jobId, job: next, error: null };
+          } catch (err) {
+            return { jobId, job: null, error: err.message };
+          }
+        })
+      );
+      setBatch((prev) =>
+        prev.map((item) => {
+          const hit = updates.find((u) => u.jobId === item.job?.job_id);
+          if (!hit) return item;
+          if (hit.error) return { ...item, error: hit.error };
+          return { ...item, job: hit.job, error: null };
+        })
+      );
+    }, 900);
+    return () => clearInterval(timer);
+  }, [pendingJobIds]);
+
+  async function onUpload(fileList) {
+    const files = Array.from(fileList || []);
+    if (files.length === 0) return;
+
+    const valid = [];
+    const rejected = [];
+    for (const file of files) {
+      if (ACCEPTED.has(extensionOf(file.name))) valid.push(file);
+      else rejected.push(file.name);
     }
+
+    if (rejected.length) {
+      setError(`Skipped unsupported file(s): ${rejected.join(", ")}`);
+    } else {
+      setError("");
+    }
+    if (valid.length === 0) return;
+
+    setTab("summary");
+    setUploading(true);
+
+    const starters = valid.map((file) => ({
+      id: batchItemId(),
+      filename: file.name,
+      file,
+      job: null,
+      error: null,
+    }));
+    setBatch((prev) => [...prev, ...starters]);
+    setActiveId(starters[0].id);
+
+    // Upload one at a time so the server is not flooded with concurrent Gemini jobs.
+    for (const item of starters) {
+      try {
+        const created = await uploadExhibit(item.file);
+        setBatch((prev) =>
+          prev.map((row) =>
+            row.id === item.id
+              ? {
+                  ...row,
+                  job: {
+                    ...created,
+                    percent: 2,
+                    stage: "queued",
+                    message: "Upload received.",
+                    filename: item.filename,
+                  },
+                }
+              : row
+          )
+        );
+      } catch (err) {
+        setBatch((prev) =>
+          prev.map((row) =>
+            row.id === item.id
+              ? {
+                  ...row,
+                  error: err.message,
+                  job: {
+                    job_id: null,
+                    filename: item.filename,
+                    status: "failed",
+                    percent: 100,
+                    stage: "failed",
+                    message: err.message,
+                    error: err.message,
+                  },
+                }
+              : row
+          )
+        );
+      }
+    }
+    setUploading(false);
+    if (inputRef.current) inputRef.current.value = "";
   }
 
   function reset() {
-    setFile(null);
-    setJob(null);
+    setBatch([]);
+    setActiveId(null);
     setError("");
     setTab("summary");
+    setUploading(false);
   }
+
+  function selectItem(id) {
+    setActiveId(id);
+    setTab("summary");
+  }
+
+  const showDropzone = batch.length === 0 && !uploading;
+  const batchBusy = batch.some(
+    (item) =>
+      !item.job ||
+      (item.job.status !== "complete" && item.job.status !== "failed")
+  );
 
   return (
     <div className="app">
@@ -95,9 +210,9 @@ export default function App() {
         <div className="badge-soft">Decision support — not a legal finding</div>
       </header>
 
-      {!job && (
+      {showDropzone && (
         <div className="card">
-          <p className="kicker">Submit an exhibit</p>
+          <p className="kicker">Submit exhibits</p>
           <div
             className={`dropzone ${drag ? "active" : ""}`}
             onDragOver={(e) => {
@@ -108,20 +223,21 @@ export default function App() {
             onDrop={(e) => {
               e.preventDefault();
               setDrag(false);
-              onUpload(e.dataTransfer.files?.[0]);
+              onUpload(e.dataTransfer.files);
             }}
             onClick={() => inputRef.current?.click()}
           >
             <Upload size={28} />
-            <h2>Drop a PDF, image, Word, or Excel file</h2>
-            <p>Single file, up to 100 MB. Analysis starts immediately after upload.</p>
+            <h2>Drop one or more PDF, image, Word, or Excel files</h2>
+            <p>Multiple files allowed. Each exhibit is scanned separately (up to 100 MB each).</p>
             <div className="formats">PDF · DOCX · XLSX · JPG · PNG · GIF</div>
             <input
               ref={inputRef}
               type="file"
               hidden
+              multiple
               accept=".pdf,.docx,.xlsx,.jpg,.jpeg,.png,.gif"
-              onChange={(e) => onUpload(e.target.files?.[0])}
+              onChange={(e) => onUpload(e.target.files)}
             />
           </div>
         </div>
@@ -129,15 +245,86 @@ export default function App() {
 
       {error && <div className="card error">{error}</div>}
 
+      {batch.length > 0 && (
+        <div className="card">
+          <div className="row" style={{ justifyContent: "space-between", marginBottom: 12 }}>
+            <div>
+              <p className="kicker">Batch queue</p>
+              <h2 className="serif" style={{ margin: "4px 0 0" }}>
+                {batch.length} exhibit{batch.length === 1 ? "" : "s"}
+              </h2>
+            </div>
+            <div className="actions">
+              <button
+                className="btn secondary"
+                type="button"
+                disabled={uploading}
+                onClick={() => inputRef.current?.click()}
+              >
+                Add more files
+              </button>
+              <button className="btn secondary" type="button" onClick={reset}>
+                Clear batch
+              </button>
+              <input
+                ref={inputRef}
+                type="file"
+                hidden
+                multiple
+                accept=".pdf,.docx,.xlsx,.jpg,.jpeg,.png,.gif"
+                onChange={(e) => onUpload(e.target.files)}
+              />
+            </div>
+          </div>
+          <ul className="batch-list">
+            {batch.map((item, index) => {
+              const status = item.job?.status || (item.error ? "failed" : "uploading");
+              const risk = item.job?.report?.risk_level;
+              return (
+                <li key={item.id}>
+                  <button
+                    type="button"
+                    className={`batch-item ${item.id === activeId ? "active" : ""}`}
+                    onClick={() => selectItem(item.id)}
+                  >
+                    <span className="batch-index">{index + 1}</span>
+                    <span className="batch-meta">
+                      <strong>{item.filename}</strong>
+                      <span className="footnote">
+                        {status === "uploading" && "Uploading…"}
+                        {status === "queued" && "Queued"}
+                        {status === "running" && `${item.job.percent || 0}% · ${item.job.stage || "running"}`}
+                        {status === "complete" && (risk ? `${RISK[risk] || risk}` : "Complete")}
+                        {status === "failed" && (item.error || item.job?.error || "Failed")}
+                      </span>
+                    </span>
+                    <span className={`batch-pill ${status}${risk ? ` risk-${risk}` : ""}`}>
+                      {status}
+                    </span>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+          {batchBusy && (
+            <p className="footnote" style={{ marginTop: 12 }}>
+              Files upload one after another. Select a row to watch progress or open its report.
+            </p>
+          )}
+        </div>
+      )}
+
       {job && job.status !== "complete" && job.status !== "failed" && (
-        <ProgressPanel job={job} filename={file?.name || job.filename} />
+        <ProgressPanel job={job} filename={active?.filename || job.filename} />
       )}
 
       {job?.status === "failed" && (
         <div className="card">
           <h2 className="serif">Analysis could not be completed</h2>
-          <p>{job.error || job.message}</p>
-          <button className="btn" onClick={reset}>Scan another exhibit</button>
+          <p>{job.error || job.message || active?.error}</p>
+          <button className="btn" type="button" onClick={() => inputRef.current?.click()}>
+            Add another exhibit
+          </button>
         </div>
       )}
 
@@ -149,6 +336,8 @@ export default function App() {
           tab={tab}
           setTab={setTab}
           onReset={reset}
+          onAddMore={() => inputRef.current?.click()}
+          batchCount={batch.length}
         />
       )}
     </div>
@@ -188,7 +377,7 @@ function ProgressPanel({ job, filename }) {
   );
 }
 
-function ReportViewer({ job, report, findings, tab, setTab, onReset }) {
+function ReportViewer({ job, report, findings, tab, setTab, onReset, onAddMore, batchCount }) {
   const material = findings.filter((f) => f.severity !== "info");
   return (
     <>
@@ -206,7 +395,12 @@ function ReportViewer({ job, report, findings, tab, setTab, onReset }) {
             <a className="btn gold" href={exportUrl(job.job_id, "html")}>Export HTML</a>
             <a className="btn" href={exportUrl(job.job_id, "pdf")}>Export PDF</a>
             <a className="btn secondary" href={exportUrl(job.job_id, "json")}>Export JSON</a>
-            <button className="btn secondary" onClick={onReset}>New scan</button>
+            {batchCount > 0 && (
+              <button className="btn secondary" type="button" onClick={onAddMore}>
+                Add exhibits
+              </button>
+            )}
+            <button className="btn secondary" type="button" onClick={onReset}>New batch</button>
           </div>
         </div>
         <p style={{ marginTop: 16 }}>{report.executive_summary}</p>
