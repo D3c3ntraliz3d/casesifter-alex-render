@@ -436,6 +436,23 @@ def list_prior_snapshots(case_id: str, exclude_document_id: str) -> list[dict[st
     return [_decode_snapshot(row) for row in rows]
 
 
+def list_case_gotchas(case_id: str) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for snap in list_case_snapshots(case_id):
+        for item in snap.get("findings_summary") or []:
+            if not item.get("gotcha") and item.get("analysis_type") != "gotcha":
+                continue
+            out.append(
+                {
+                    **item,
+                    "document_id": snap.get("document_id"),
+                    "display_name": snap.get("display_name") or snap.get("original_filename"),
+                    "scan_job_id": None,
+                }
+            )
+    return out
+
+
 def list_case_snapshots(case_id: str) -> list[dict[str, Any]]:
     with connect() as conn:
         rows = conn.execute(

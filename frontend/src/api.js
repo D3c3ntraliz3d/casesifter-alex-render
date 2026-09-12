@@ -104,6 +104,12 @@ export async function patchDocument(caseId, documentId, payload) {
   return readJson(res);
 }
 
+export async function listCaseGotchas(caseId) {
+  const res = await fetch(`/api/cases/${caseId}/gotchas`, { headers: jsonHeaders });
+  const data = await readJson(res);
+  return data.gotchas || [];
+}
+
 export async function listCaseChat(caseId) {
   const res = await fetch(`/api/cases/${caseId}/chat`, { headers: jsonHeaders });
   const data = await readJson(res);

@@ -14,6 +14,7 @@ from app.case_consistency import (
     text_fingerprint,
 )
 from app.fact_extract import extract_facts
+from app.gotcha import find_gotchas
 from app.config import settings
 from app.engines.contextual_logic import analyze_contextual
 from app.engines.image_forensics import analyze_image_forensics
@@ -187,9 +188,24 @@ def run_pipeline(
             case_documents=cases_db.list_documents(case_id),
         )
         findings.extend(consistency)
+        update_job(
+            job_id,
+            stage="case_consistency",
+            percent=93,
+            message="Checking claims against hard evidence in this case…",
+        )
+        gotchas = find_gotchas(
+            case_id=case_id,
+            document_id=document_id,
+            display_name=name,
+            doc_kind=doc_kind,
+            text=full_text,
+        )
+        findings.extend(gotchas)
         contextual.extras["case_consistency"] = {
             "prior_documents": len(priors),
             "alerts": len(consistency),
+            "gotchas": len(gotchas),
             "facts": facts,
             "fact_matrix": fact_matrix,
         }

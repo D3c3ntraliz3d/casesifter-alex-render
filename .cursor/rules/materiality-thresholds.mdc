@@ -3,12 +3,10 @@ description: Flag only material cross-document contradictions in LawSifter
 alwaysApply: true
 ---
 
-# Material case contradictions
+# Gotchas only
 
-Flag only **gotcha lies**: the same claim stated two different ways in a way that can win the case.
+A **gotcha** is a specific claim in a pleading or affidavit that hard evidence in another case document proves false. Quote both. If both can be true, do not flag.
 
-**Flag:** two filings give different interest rates, monthly payments, amounts owed, fee totals, first-default dates, 90-day/notice dates, or foreclosure-filing dates; a filing says an exhibit is attached and that exhibit is not in the case; arithmetic on a statement does not add up.
+**Flag:** “never received notice” vs certified-mail receipt; “no income” vs pay records; “never knew” vs a letter they were sent; “did not sign” vs a notarized signature; arithmetic on a statement that cannot add up.
 
-**Do not flag:** mortgage dated vs recorded; origination vs recording; Bank of America in a pleading vs an insurer or different servicer on an exhibit; WaMu / Washington Mutual; same month, different day; NYSCEF header dates; counsel letterhead; party-name lists that simply do not overlap.
-
-A dated mortgage in 2006 and a recorded mortgage in 2009 is chronology, not a contradiction.
+**Do not flag:** mortgage dated vs recorded; 4.5% vs 4.6%; $318,000 vs $318,500; Jose vs J.; NYSCEF headers; overlapping party names on unrelated exhibits; anything that is a discrepancy rather than a lie.

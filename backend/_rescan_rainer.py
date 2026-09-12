@@ -26,20 +26,30 @@ FILING = {
 }
 
 
+def _request(url: str, method: str = "GET") -> dict:
+    last_error: Exception | None = None
+    for attempt in range(8):
+        try:
+            request = urllib.request.Request(
+                url,
+                method=method,
+                data=b"" if method == "POST" else None,
+                headers={"Accept": "application/json"},
+            )
+            with urllib.request.urlopen(request, timeout=90) as response:
+                return json.loads(response.read().decode())
+        except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as exc:
+            last_error = exc
+            time.sleep(3 + attempt * 2)
+    raise RuntimeError(f"{method} {url} failed: {last_error}") from last_error
+
+
 def get(url: str) -> dict:
-    with urllib.request.urlopen(url, timeout=90) as response:
-        return json.loads(response.read().decode())
+    return _request(url, "GET")
 
 
 def post(url: str) -> dict:
-    request = urllib.request.Request(
-        url,
-        method="POST",
-        data=b"",
-        headers={"Accept": "application/json"},
-    )
-    with urllib.request.urlopen(request, timeout=90) as response:
-        return json.loads(response.read().decode())
+    return _request(url, "POST")
 
 
 def rank(doc: dict) -> int:

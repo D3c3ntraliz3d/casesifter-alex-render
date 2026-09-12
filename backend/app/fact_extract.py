@@ -32,7 +32,7 @@ FACT_META: dict[str, dict[str, Any]] = {
     "interest_rate": {
         "label": "Interest rate",
         "kind": "rate",
-        "abs": 0.1,
+        "abs": 0.25,
         "pct": 0.0,
     },
     "monthly_payment": {

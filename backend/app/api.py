@@ -223,6 +223,25 @@ def api_delete_case(case_id: str):
     return {"deleted": case_id}
 
 
+@router.get("/cases/{case_id}/gotchas")
+def api_list_case_gotchas(case_id: str):
+    _validate_id(case_id)
+    if cases_db.get_case(case_id) is None:
+        raise HTTPException(404, "Unknown case.")
+    docs = {doc["id"]: doc for doc in cases_db.list_documents(case_id)}
+    items = []
+    for item in cases_db.list_case_gotchas(case_id):
+        doc = docs.get(item.get("document_id") or "")
+        items.append(
+            {
+                **item,
+                "scan_job_id": (doc or {}).get("scan_job_id"),
+                "risk_level": (doc or {}).get("risk_level"),
+            }
+        )
+    return {"gotchas": items}
+
+
 @router.get("/cases/{case_id}/chat")
 def api_list_case_chat(case_id: str):
     _validate_id(case_id)

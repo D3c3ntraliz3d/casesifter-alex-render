@@ -12,6 +12,7 @@ import {
   getJob,
   jobSourceUrl,
   listCaseChat,
+  listCaseGotchas,
   listCases,
   loginCloud,
   logoutCloud,
@@ -54,6 +55,7 @@ const CATEGORY = {
   page_anomalies: "Page anomalies",
   contextual: "Contextual logic",
   case_consistency: "Case consistency",
+  gotcha: "Gotcha",
 };
 
 const RISK = {
@@ -759,6 +761,8 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
         onOpenReport={onOpenReport}
       />
 
+      <CaseGotchaBoard caseId={caseData.id} documents={docs} onOpenReport={onOpenReport} />
+
       <CaseChat
         caseId={caseData.id}
         documents={docs}
@@ -874,6 +878,64 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
         )}
       </div>
     </>
+  );
+}
+
+function CaseGotchaBoard({ caseId, documents, onOpenReport }) {
+  const [gotchas, setGotchas] = useState([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    listCaseGotchas(caseId)
+      .then((items) => {
+        if (!cancelled) setGotchas(items);
+      })
+      .catch(() => {
+        if (!cancelled) setGotchas([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [caseId, documents]);
+
+  if (gotchas.length === 0) return null;
+
+  return (
+    <div className="card gotcha-board">
+      <p className="kicker">Gotcha finder</p>
+      <h2 className="serif" style={{ margin: "4px 0 8px" }}>
+        {gotchas.length} lie{gotchas.length === 1 ? "" : "s"} the record may prove
+      </h2>
+      <p className="footnote" style={{ marginBottom: 8 }}>
+        Only claim-versus-evidence contradictions. Open the source to verify the quotes.
+      </p>
+      {gotchas.map((item) => {
+        const doc = documents.find((d) => d.id === item.document_id);
+        return (
+          <div key={`${item.id || item.title}-${item.document_id}`} className="gotcha-item">
+            <h3>{item.title}</h3>
+            {item.gotcha_level && <p className="footnote">{item.gotcha_level}</p>}
+            {item.claim_quote && (
+              <p className="gotcha-quote">
+                <strong>Claim:</strong> “{item.claim_quote}”
+                {item.claim_source ? ` — ${item.claim_source}` : ""}
+              </p>
+            )}
+            {item.evidence_quote && (
+              <p className="gotcha-quote">
+                <strong>Evidence:</strong> “{item.evidence_quote}”
+                {item.evidence_source ? ` — ${item.evidence_source}` : ""}
+              </p>
+            )}
+            {doc && (
+              <button className="btn gold" type="button" onClick={() => onOpenReport(doc)}>
+                Open report
+              </button>
+            )}
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -1640,19 +1702,37 @@ function FindingCard({ item, docKind }) {
   const heat = item.evidence?.heatmap;
   const aiLead = Boolean(item.evidence?.ai_generated);
   const caseHit = Boolean(item.evidence?.case_consistency);
+  const gotcha = Boolean(item.evidence?.gotcha) || item.category === "gotcha";
   const [feedback, setFeedback] = useState(null);
 
   return (
-    <article className="finding">
+    <article className={`finding${gotcha ? " gotcha-card" : ""}`}>
       <header>
         <h3>{item.title}</h3>
-        <span className={`sev ${item.severity}`}>{item.severity} · {Math.round(item.confidence)}%</span>
+        <span className={`sev ${item.severity}`}>
+          {gotcha && item.evidence?.gotcha_level ? `${item.evidence.gotcha_level} · ` : ""}
+          {item.severity} · {Math.round(item.confidence)}%
+        </span>
       </header>
       <p className="footnote">{CATEGORY[item.category] || item.category}{item.page ? ` · page ${item.page}` : ""}</p>
       {caseHit && item.evidence?.prior_display_name && (
         <p className="footnote">Prior file: {item.evidence.prior_display_name}</p>
       )}
-      <p>{item.explanation}</p>
+      {gotcha && item.evidence?.claim_quote ? (
+        <>
+          <p className="gotcha-quote">
+            <strong>Claim:</strong> “{item.evidence.claim_quote}”
+            {item.evidence.claim_source ? ` — ${item.evidence.claim_source}` : ""}
+          </p>
+          <p className="gotcha-quote">
+            <strong>Evidence:</strong> “{item.evidence.evidence_quote}”
+            {item.evidence.evidence_source ? ` — ${item.evidence.evidence_source}` : ""}
+          </p>
+          {item.evidence.the_lie && <p>{item.evidence.the_lie}</p>}
+        </>
+      ) : (
+        <p>{item.explanation}</p>
+      )}
       <p className="why">{item.why_suspicious}</p>
       {aiLead && (
         <p className="ai-lead">

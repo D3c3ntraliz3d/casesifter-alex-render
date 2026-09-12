@@ -80,6 +80,12 @@ def findings_summary(findings: list[Finding]) -> list[dict[str, Any]]:
                 "title": item.title,
                 "confidence": item.confidence,
                 "analysis_type": (item.evidence or {}).get("analysis_type"),
+                "gotcha": bool((item.evidence or {}).get("gotcha")),
+                "gotcha_level": (item.evidence or {}).get("gotcha_level"),
+                "claim_quote": (item.evidence or {}).get("claim_quote"),
+                "evidence_quote": (item.evidence or {}).get("evidence_quote"),
+                "claim_source": (item.evidence or {}).get("claim_source"),
+                "evidence_source": (item.evidence or {}).get("evidence_source"),
             }
         )
     return summary

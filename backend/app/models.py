@@ -13,6 +13,7 @@ Category = Literal[
     "page_anomalies",
     "contextual",
     "case_consistency",
+    "gotcha",
 ]
 Severity = Literal["info", "low", "medium", "high", "critical"]
 RiskLevel = Literal["green", "yellow", "red"]
