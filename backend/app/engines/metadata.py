@@ -34,6 +34,14 @@ EDITING_SOFTWARE = (
     "lightroom",
 )
 
+# NYSCEF and similar stamps on every page. Their FILED/RECEIVED dates are packaging,
+# not the exhibit's own chronology, and the court often re-saves the PDF on filing
+# (which moves ModDate to the stamp date).
+COURT_EFILING_HEADER_RE = re.compile(
+    r"\b(?:NYSCEF|FILED:\s*[A-Z][A-Z .'-]*CLERK|RECEIVED\s+NYSCEF|INDEX\s+NO\.?)\b",
+    re.I,
+)
+
 
 def analyze_metadata(path: Path) -> ModuleResult:
     return timed_module("metadata", lambda: _run(path))
@@ -81,9 +89,28 @@ def _run(path: Path) -> tuple[list[Finding], dict[str, Any]]:
             "format": "txt",
             "encoding_note": "Plain text exhibit; no embedded document timestamps.",
         }
-    _compare_timestamps(meta, findings, events)
+    efiling = False
+    if suffix == ".pdf":
+        efiling = _pdf_has_efiling_header(path)
+        meta["court_efiling_header"] = efiling
+        if efiling and isinstance(meta.get("document"), dict):
+            meta["document"]["court_efiling_header"] = True
+    _compare_timestamps(meta, findings, events, efiling=efiling)
     extras = {"metadata": meta, "timeline": [e.model_dump() for e in events]}
     return findings, extras
+
+
+def _pdf_has_efiling_header(path: Path) -> bool:
+    """True when page furniture looks like NYSCEF / county-clerk e-filing stamps."""
+    try:
+        reader = open_pdf_reader(path)
+        for page in reader.pages[:3]:
+            text = page.extract_text() or ""
+            if COURT_EFILING_HEADER_RE.search(text):
+                return True
+    except Exception:
+        return False
+    return False
 
 
 def _from_timestamp(value: float) -> str:
@@ -471,7 +498,13 @@ def _image_metadata(path: Path) -> tuple[dict[str, Any], list[Finding], list[Tim
     return meta, findings, events
 
 
-def _compare_timestamps(meta: dict[str, Any], findings: list[Finding], events: list[TimelineEvent]) -> None:
+def _compare_timestamps(
+    meta: dict[str, Any],
+    findings: list[Finding],
+    events: list[TimelineEvent],
+    *,
+    efiling: bool = False,
+) -> None:
     fs = meta.get("filesystem") or {}
     doc = meta.get("document") or {}
     created = _try_parse(doc.get("created"))
@@ -489,7 +522,7 @@ def _compare_timestamps(meta: dict[str, Any], findings: list[Finding], events: l
                     note="Create and modify times are within 30 seconds (typical of a clean export).",
                 )
             )
-        elif delta > 365 * 24 * 3600:
+        elif delta > 365 * 24 * 3600 and not efiling:
             findings.append(
                 finding(
                     fid="md-year-gap",
@@ -505,6 +538,18 @@ def _compare_timestamps(meta: dict[str, Any], findings: list[Finding], events: l
                     confidence=58,
                     evidence={"created": doc.get("created"), "modified": doc.get("modified")},
                     recommended_action="Confirm whether later edits were authorized and request version history.",
+                )
+            )
+        elif delta > 365 * 24 * 3600 and efiling:
+            events.append(
+                TimelineEvent(
+                    label="Create/modify gap ignored (court e-filing stamp)",
+                    timestamp=doc.get("modified"),
+                    source="comparison",
+                    note=(
+                        "NYSCEF / clerk header is present. The later modify time is treated as "
+                        "court packaging (FILED/RECEIVED stamp), not an exhibit edit."
+                    ),
                 )
             )
 
