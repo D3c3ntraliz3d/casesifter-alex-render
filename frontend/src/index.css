@@ -235,9 +235,13 @@ h1, h2, h3, .serif { font-family: "Libre Baskerville", Georgia, serif; }
 }
 .conf > span { display: block; height: 100%; background: var(--navy); }
 
-table.data { width: 100%; border-collapse: collapse; font-size: 13px; }
-table.data th, table.data td { border: 1px solid var(--line); padding: 7px 8px; text-align: left; }
-table.data th { background: #f3eee4; color: var(--navy); }
+table.data select {
+  max-width: 180px;
+  font: inherit;
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  background: #fff;
+}
 
 .grid-2 { display: grid; grid-template-columns: 1.4fr 0.8fr; gap: 16px; }
 @media (max-width: 860px) {

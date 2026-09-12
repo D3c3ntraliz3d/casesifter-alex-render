@@ -25,28 +25,45 @@ COURT_EFILING_HEADER_RE = re.compile(
 )
 
 
-def analyze_ocr_text(path: Path, metadata_extras: dict[str, Any] | None = None) -> ModuleResult:
-    return timed_module("ocr_text", lambda: _run(path, metadata_extras or {}))
+def analyze_ocr_text(
+    path: Path,
+    metadata_extras: dict[str, Any] | None = None,
+    *,
+    scan_profile: str = "forensic",
+) -> ModuleResult:
+    return timed_module(
+        "ocr_text", lambda: _run(path, metadata_extras or {}, scan_profile=scan_profile)
+    )
 
 
-def _run(path: Path, metadata_extras: dict[str, Any]) -> tuple[list[Finding], dict[str, Any]]:
+def _run(
+    path: Path,
+    metadata_extras: dict[str, Any],
+    *,
+    scan_profile: str = "forensic",
+) -> tuple[list[Finding], dict[str, Any]]:
     findings: list[Finding] = []
     fonts: list[FontUsage] = []
     extracted_pages: list[dict[str, Any]] = []
     suffix = path.suffix.lower()
+    court_filing = scan_profile == "court_filing"
 
     if suffix == ".pdf":
         text_pages, font_map, pdf_findings = _pdf_text(path)
-        findings.extend(pdf_findings)
+        # Microscopic text / font-mix overlays are exhibit-forensics signals, not pleading packaging.
+        if not court_filing:
+            findings.extend(pdf_findings)
         extracted_pages = text_pages
         fonts = _fonts_from_map(font_map)
     elif suffix in {".jpg", ".jpeg", ".png", ".gif"}:
         text, ocr_findings = _ocr_image(load_image(path), page=1)
-        findings.extend(ocr_findings)
+        if not court_filing:
+            findings.extend(ocr_findings)
         extracted_pages = [{"page": 1, "text": text, "source": "ocr"}]
     elif suffix == ".docx":
         extracted_pages, docx_findings = _docx_text(path)
-        findings.extend(docx_findings)
+        if not court_filing:
+            findings.extend(docx_findings)
     elif suffix == ".xlsx":
         extracted_pages = _xlsx_text(path)
     elif suffix == ".txt":
@@ -66,16 +83,19 @@ def _run(path: Path, metadata_extras: dict[str, Any]) -> tuple[list[Finding], di
         "fonts": [f.model_dump() for f in fonts],
         "char_count": len(full_text),
         "full_text": full_text,
+        "scan_profile": scan_profile,
     }
 
-    if COURT_EFILING_HEADER_RE.search(full_text):
+    if COURT_EFILING_HEADER_RE.search(full_text) and not court_filing:
         findings = [_soften_micro_text_for_efiling(item) for item in findings]
 
-    if suffix == ".pdf":
+    if suffix == ".pdf" and not court_filing:
         findings.extend(_compare_ocr_vs_pdf_text(path, extracted_pages))
 
     doc_meta = (metadata_extras.get("metadata") or {}).get("document") or {}
-    findings.extend(_date_mismatch(full_text, doc_meta))
+    # Filing date / PDF creation vs pleading date is normal for e-filed complaints.
+    if not court_filing and not COURT_EFILING_HEADER_RE.search(full_text):
+        findings.extend(_date_mismatch(full_text, doc_meta))
     extras["font_models"] = fonts
     return findings, extras
 

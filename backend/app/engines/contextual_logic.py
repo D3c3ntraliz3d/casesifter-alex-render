@@ -365,11 +365,15 @@ def analyze_contextual(
     text: str,
     doc_meta: dict[str, Any] | None = None,
     source_file: Path | None = None,
+    *,
+    scan_profile: str = "forensic",
 ) -> ModuleResult:
     """Entry point matching the other engines: returns a ModuleResult of Findings.
 
     ``source_file`` is the original exhibit on disk. It is uploaded natively for tier-3
     document analysis and is ignored unless CONTEXTUAL_MULTIMODAL is enabled.
+    Court filings skip tier-3 multimodal fraud review; they still extract entities and
+    run claim checks for case consistency.
     """
     if not (text or "").strip() and source_file is None:
         return ModuleResult(
@@ -378,14 +382,24 @@ def analyze_contextual(
             summary="No extractable text or source file to analyze.",
             extras={"skipped": True, "reason": "no_content"},
         )
-    return timed_module("contextual_logic", lambda: _run(text, doc_meta or {}, source_file))
+    return timed_module(
+        "contextual_logic",
+        lambda: _run(text, doc_meta or {}, source_file, scan_profile=scan_profile),
+    )
 
 
 def _run(
-    text: str, doc_meta: dict[str, Any], source_file: Path | None
+    text: str,
+    doc_meta: dict[str, Any],
+    source_file: Path | None,
+    *,
+    scan_profile: str = "forensic",
 ) -> tuple[list[Finding], dict[str, Any]]:
+    court_filing = scan_profile == "court_filing"
     entities = extract_entities(text)
-    findings = check_internal_timeline(entities, doc_meta)
+    # File-creation vs body-date checks are exhibit-authenticity signals; pleadings are
+    # routinely e-filed years after the caption date.
+    findings = [] if court_filing else check_internal_timeline(entities, doc_meta)
     claims = build_claims(entities)
 
     extras: dict[str, Any] = {
@@ -395,6 +409,7 @@ def _run(
         "external_verification": "disabled",
         "document_analysis": "disabled",
         "provider": None,
+        "scan_profile": scan_profile,
         "gemini_usage": {
             "prompt_tokens": 0,
             "candidates_tokens": 0,
@@ -410,18 +425,17 @@ def _run(
     extras["provider"] = f"google:{settings.gemini_model}"
 
     try:
-        # Tier 3: full document review. Runs first because it is the more informative of the
-        # two remote calls, so a rate limit or outage does not consume the budget on claims.
-        if settings.contextual_multimodal:
+        # Tier 3 multimodal fraud review is for exhibits only.
+        if settings.contextual_multimodal and not court_filing:
             document_findings, status = _run_document_analysis(text, source_file, extras)
             findings.extend(document_findings)
             extras["document_analysis"] = status
+        elif court_filing:
+            extras["document_analysis"] = "skipped_court_filing"
         else:
             extras["document_analysis"] = "disabled"
 
         if extras["document_analysis"] == "error":
-            # The remote service is unreachable or rejecting requests; claim verification
-            # would fail the same way and only duplicate the notice.
             extras["external_verification"] = "skipped_after_error"
             return findings, extras
 

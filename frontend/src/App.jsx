@@ -55,6 +55,32 @@ const RISK = {
   red: "High risk",
 };
 
+const DOC_KIND_OPTIONS = [
+  ["complaint", "Complaint"],
+  ["answer", "Answer"],
+  ["motion", "Motion"],
+  ["order", "Order"],
+  ["affidavit", "Affidavit"],
+  ["affirmation", "Affirmation"],
+  ["summons", "Summons"],
+  ["stipulation", "Stipulation"],
+  ["transcript", "Transcript"],
+  ["letter", "Letter"],
+  ["exhibit", "Exhibit (forensic)"],
+  ["bill", "Statement / bill (forensic)"],
+  ["evidence", "Evidence (forensic)"],
+];
+
+const COURT_FILING_KINDS = new Set([
+  "complaint", "answer", "motion", "order", "affidavit", "affirmation",
+  "letter", "stipulation", "transcript", "summons", "notice", "brief",
+  "memorandum", "reply", "opposition", "filing",
+]);
+
+function profileForKind(kind) {
+  return COURT_FILING_KINDS.has((kind || "").toLowerCase()) ? "court filing" : "exhibit forensic";
+}
+
 const ACCEPTED = new Set([".pdf", ".docx", ".xlsx", ".txt", ".jpg", ".jpeg", ".png", ".gif"]);
 
 function extensionOf(name) {
@@ -412,6 +438,11 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
             onChange={(e) => onUpload(e.target.files)}
           />
         </div>
+        <p className="footnote" style={{ marginTop: 8 }}>
+          Complaints, motions, and other pleadings run a <strong>content + case-comparison</strong> scan.
+          Exhibits and statements run the full <strong>forensic alteration</strong> pipeline (whiteouts, page inserts, AcroForm, etc.).
+          Set the Kind column before re-scanning if auto-detect was wrong.
+        </p>
       </div>
 
       <div className="card">
@@ -431,7 +462,7 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
           <thead>
             <tr>
               <th>Name</th>
-              <th>Kind</th>
+              <th>Kind / scan</th>
               <th>Status</th>
               <th>Risk</th>
               <th />
@@ -467,7 +498,27 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
                   )}
                   <div className="footnote">{doc.original_filename}</div>
                 </td>
-                <td>{doc.doc_kind || "—"}</td>
+                <td>
+                  <select
+                    value={doc.doc_kind || ""}
+                    disabled={busy}
+                    onChange={async (e) => {
+                      const next = e.target.value || null;
+                      try {
+                        await patchDocument(caseData.id, doc.id, { doc_kind: next });
+                        await onRefresh();
+                      } catch (err) {
+                        onError(err.message);
+                      }
+                    }}
+                  >
+                    <option value="">Unknown (forensic)</option>
+                    {DOC_KIND_OPTIONS.map(([value, label]) => (
+                      <option key={value} value={value}>{label}</option>
+                    ))}
+                  </select>
+                  <div className="footnote">{profileForKind(doc.doc_kind)}</div>
+                </td>
                 <td>{doc.status}</td>
                 <td>{doc.risk_level ? `${RISK[doc.risk_level] || doc.risk_level}` : "—"}</td>
                 <td>
@@ -647,6 +698,14 @@ function ReportViewer({ job, report, findings, tab, setTab, docKind }) {
             {caseAlerts.length > 0 && (
               <p className="footnote" style={{ marginTop: 8 }}>
                 {caseAlerts.length} case-consistency alert{caseAlerts.length === 1 ? "" : "s"} vs prior filings.
+              </p>
+            )}
+            {report.comparison?.scan_profile && (
+              <p className="footnote" style={{ marginTop: 4 }}>
+                Scan profile: {report.comparison.scan_profile === "court_filing"
+                  ? "court filing (content + case compare)"
+                  : "exhibit forensic"}
+                {report.comparison.doc_kind ? ` · kind ${report.comparison.doc_kind}` : ""}
               </p>
             )}
           </div>

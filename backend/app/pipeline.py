@@ -21,21 +21,31 @@ from app.engines.ocr_text import analyze_ocr_text
 from app.engines.pdf_integrity import analyze_pdf_integrity
 from app.engines.structural import analyze_structural
 from app.ingestion import sha256_file, sniff_type
-from app.models import AuditTrail, Finding, FontUsage, PageDimension, Report, TimelineEvent
+from app.models import AuditTrail, Finding, FontUsage, ModuleResult, PageDimension, Report, TimelineEvent
 from app.report import executive_summary, pick_top_findings, recommended_actions, render_html, render_pdf, score_risk
+from app.scan_profile import PROFILE_COURT_FILING, PROFILE_FORENSIC, scan_profile_for_kind
 from app.storage import job_dir, update_job
 from app.telemetry import emit_scan_outcomes
 
 
-def _source_for_contextual(source: Path) -> Path | None:
-    """Hand the original file to tier-3 analysis, and only then.
-
-    Returns None unless multimodal analysis is explicitly enabled, so a default install
-    uploads nothing.
-    """
+def _source_for_contextual(source: Path, profile: str) -> Path | None:
+    """Native PDF upload for tier-3 fraud review — exhibits only."""
+    if profile == PROFILE_COURT_FILING:
+        return None
     if not (settings.contextual_multimodal and settings.gemini_api_key):
         return None
     return source
+
+
+def _skipped_module(name: str, reason: str) -> ModuleResult:
+    return ModuleResult(
+        name=name,
+        status="skipped",
+        duration_ms=0,
+        summary=reason,
+        findings=[],
+        extras={"skipped": True, "reason": reason},
+    )
 
 
 def run_pipeline(
@@ -48,6 +58,9 @@ def run_pipeline(
     display_name: str | None = None,
     doc_kind: str | None = None,
 ) -> Report:
+    profile = scan_profile_for_kind(doc_kind)
+    court_filing = profile == PROFILE_COURT_FILING
+
     update_job(job_id, status="running", stage="ingesting", percent=5, message="Reading file and hashing contents…")
     if document_id:
         cases_db.update_document(document_id, status="scanning", scan_job_id=job_id)
@@ -61,25 +74,58 @@ def run_pipeline(
     update_job(job_id, stage="metadata", percent=15, message="Extracting timestamps and authorship…")
     metadata = analyze_metadata(source)
 
-    update_job(job_id, stage="pdf_integrity", percent=30, message="Checking PDF structure and hidden content…")
-    pdf = analyze_pdf_integrity(source)
+    if court_filing:
+        update_job(
+            job_id,
+            stage="pdf_integrity",
+            percent=30,
+            message="Court filing profile — skipping exhibit forgery structure checks…",
+        )
+        pdf = _skipped_module(
+            "pdf_integrity",
+            "Skipped for court filings (complaints/motions). Use exhibit profile for AcroForm / JS checks.",
+        )
+        structural = _skipped_module(
+            "structural",
+            "Skipped for court filings. Mixed page size/rotation is normal in e-filed pleadings.",
+        )
+        images = _skipped_module(
+            "image_forensics",
+            "Skipped for court filings. Whiteout / ELA / clone detection runs on exhibits only.",
+        )
+    else:
+        update_job(job_id, stage="pdf_integrity", percent=30, message="Checking PDF structure and hidden content…")
+        pdf = analyze_pdf_integrity(source)
 
-    update_job(job_id, stage="structural", percent=45, message="Comparing page sizes and orientation…")
-    structural = analyze_structural(source)
+        update_job(job_id, stage="structural", percent=45, message="Comparing page sizes and orientation…")
+        structural = analyze_structural(source)
 
-    update_job(job_id, stage="image_forensics", percent=60, message="Running image manipulation detection…")
-    images = analyze_image_forensics(source, job_id)
+        update_job(job_id, stage="image_forensics", percent=60, message="Running image manipulation detection…")
+        images = analyze_image_forensics(source, job_id)
 
-    update_job(job_id, stage="ocr_text", percent=78, message="Extracting text and checking fonts…")
-    ocr = analyze_ocr_text(source, metadata.extras)
+    update_job(
+        job_id,
+        stage="ocr_text",
+        percent=78,
+        message="Extracting text for case logic…" if court_filing else "Extracting text and checking fonts…",
+    )
+    ocr = analyze_ocr_text(source, metadata.extras, scan_profile=profile)
     full_text = ocr.extras.pop("full_text", "") or ""
 
-    update_job(job_id, stage="contextual", percent=88, message="Checking entities and timeline logic…")
+    update_job(
+        job_id,
+        stage="contextual",
+        percent=88,
+        message="Extracting parties, dates, and claims for case comparison…"
+        if court_filing
+        else "Checking entities and exhibit fraud indicators…",
+    )
     doc_meta = (metadata.extras.get("metadata") or {}).get("document") or {}
     contextual = analyze_contextual(
         full_text,
         doc_meta,
-        source_file=_source_for_contextual(source),
+        source_file=_source_for_contextual(source, profile),
+        scan_profile=profile,
     )
 
     update_job(job_id, stage="generating_report", percent=94, message="Compiling the authenticity report…")
@@ -146,6 +192,8 @@ def run_pipeline(
         "entities": entities,
         "external_verification": (contextual.extras or {}).get("external_verification"),
         "case_consistency": (contextual.extras or {}).get("case_consistency"),
+        "scan_profile": profile,
+        "doc_kind": doc_kind,
     }
 
     risk_level, risk_score = score_risk(findings)
@@ -186,7 +234,6 @@ def run_pipeline(
     try:
         render_pdf(report)
     except Exception:
-        # HTML export still succeeds if PDF layout fails on an odd image.
         pass
 
     update_job(
@@ -194,7 +241,11 @@ def run_pipeline(
         status="complete",
         stage="complete",
         percent=100,
-        message="Analysis complete.",
+        message=(
+            "Court-filing scan complete (content + case comparison)."
+            if court_filing
+            else "Exhibit forensic scan complete."
+        ),
         report=report,
     )
 
@@ -206,7 +257,6 @@ def run_pipeline(
             risk_score=risk_score,
             scan_job_id=job_id,
         )
-        # Refresh snapshot findings to include consistency alerts.
         cases_db.save_scan_snapshot(
             document_id=document_id,
             case_id=case_id or "",
