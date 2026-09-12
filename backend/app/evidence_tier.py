@@ -88,7 +88,10 @@ SWORN_RECORD = re.compile(
     r"official\s+record"
     r")\b"
 )
-SERVICE_RECORD = re.compile(r"(?i)\baffidavit\s+of\s+service|proof\s+of\s+service|process\s+server\b")
+SERVICE_RECORD = re.compile(
+    r"(?i)\baffidavit\s+of\s+service|proof\s+of\s+service|process\s+server|"
+    r"served\s+the\s+within\b"
+)
 WEEKDAY_COMMA_DATE = re.compile(
     r"(?i)\b(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)"
     r",?\s+(January|February|March|April|May|June|July|August|September|October|November|December)"

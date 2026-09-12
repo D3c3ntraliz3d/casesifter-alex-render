@@ -43,7 +43,7 @@ from dateutil import parser as dateparser
 
 from app.config import settings
 from app.engines import finding, timed_module
-from app.finding_policy import is_header_or_arrears_noise
+from app.finding_policy import is_header_or_arrears_noise, is_recorded_instrument_math_noise
 from app.models import Finding, ModuleResult
 
 ORG_SUFFIXES = (
@@ -273,11 +273,15 @@ Examine:
    lenders show when payments stopped and that arrears remain. A past-due date that
    predates the letter is expected. Only flag if the letter's own dates cannot coexist
    (two different letter dates, a cure deadline before the letter was written, etc.).
-2. math_error — arithmetic that does not add up on ANY statement: line items that do not sum
-   to the stated subtotal, a tax or discount that does not match the stated rate, a balance
-   that is not total minus payments, running balances that skip, opening balance plus credits
-   minus debits that do not equal the closing balance. Check bank statements as carefully as
-   utility bills. State the numbers you used.
+2. math_error — arithmetic that does not add up on a bank, utility, telecom, or similar
+   account statement: line items that do not sum to the stated subtotal, a tax or discount
+   that does not match the stated rate, a balance that is not total minus payments, running
+   balances that skip, opening balance plus credits minus debits that do not equal the
+   closing balance. State the numbers you used.
+   Do NOT flag recorded public instruments (mortgages, deeds, assignments, indentures)
+   for rounding, interest computation, tax computation, principal/interest splits, or
+   other loan-math quirks. Those records are not bank statements. Only report math on
+   them if a figure looks pasted, overwritten, or otherwise altered.
 3. text_overlay — text that appears pasted over other content: misaligned baselines,
    different background tone behind a value, a figure or name that sits at a different
    angle or weight than its row, visible patching around an amount.
@@ -928,7 +932,7 @@ def _run_document_analysis(
     }
     findings: list[Finding] = []
     for index, item in enumerate(result["findings"][: settings.contextual_max_ai_findings]):
-        converted = _finding_from_analysis(item, index, result)
+        converted = _finding_from_analysis(item, index, result, text=text, source_file=source_file)
         if converted:
             findings.append(converted)
     return findings, "enabled"
@@ -1047,7 +1051,11 @@ SEVERITY_CAP = {"info": "info", "low": "low", "medium": "medium", "high": "mediu
 
 
 def _finding_from_analysis(
-    item: dict[str, Any], index: int, result: dict[str, Any]
+    item: dict[str, Any],
+    index: int,
+    result: dict[str, Any],
+    text: str = "",
+    source_file: Path | None = None,
 ) -> Finding | None:
     """Convert one model-reported observation into a Finding, discounted and labelled.
 
@@ -1090,14 +1098,16 @@ def _finding_from_analysis(
         page_no = None
 
     quoted = str(item.get("quoted_evidence", "")).strip()[:300]
-    if is_header_or_arrears_noise(
-        {
-            "title": str(item.get("title") or ""),
-            "observation": observation,
-            "quoted_evidence": quoted,
-            "analysis_type": analysis_type,
-        }
-    ):
+    draft = {
+        "title": str(item.get("title") or ""),
+        "observation": observation,
+        "quoted_evidence": quoted,
+        "analysis_type": analysis_type,
+    }
+    if is_header_or_arrears_noise(draft):
+        return None
+    source_name = str(source_file) if source_file is not None else ""
+    if is_recorded_instrument_math_noise(draft, text=text, source=source_name):
         return None
 
     label = ANALYSIS_TITLES[analysis_type]

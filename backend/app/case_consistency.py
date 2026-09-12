@@ -95,6 +95,10 @@ def findings_summary(findings: list[Finding]) -> list[dict[str, Any]]:
                 "evidence_label": (item.evidence or {}).get("evidence_label"),
                 "evidence_tier": (item.evidence or {}).get("evidence_tier"),
                 "self_undercut": (item.evidence or {}).get("self_undercut"),
+                "tainted_support": (item.evidence or {}).get("tainted_support"),
+                "explanation": item.explanation,
+                "why_suspicious": item.why_suspicious,
+                "quoted_evidence": (item.evidence or {}).get("quoted_evidence"),
                 "document_id": (item.evidence or {}).get("prior_document_id")
                 or item.evidence.get("document_id")
                 if isinstance(item.evidence, dict)
@@ -482,14 +486,33 @@ def _quote_key(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().lower())[:240]
 
 
+def _gotcha_cluster_key(item: dict[str, Any]) -> tuple[str, ...]:
+    """One card per fact theme (service at an address, settlement date), not per sentence."""
+    blob = f"{item.get('claim_quote') or ''} {item.get('evidence_quote') or ''}".lower()
+    dates = tuple(sorted(set(re.findall(r"\b(?:\d{1,2}/\d{1,2}/\d{2,4}|(?:19|20)\d{2})\b", blob))))[:2]
+    nums = tuple(sorted(set(re.findall(r"\b\d{3,5}\b", blob))))[:2]
+    if re.search(r"\b(serv(?:e|ed|ice)|summons|process\s+server|mailings?)\b", blob):
+        return ("service",) + dates + nums
+    if re.search(r"\b(settlement|conference)\b", blob):
+        return ("settlement",) + dates + nums
+    if re.search(r"\b(resid|lived|address)\b", blob) and nums:
+        return ("residence",) + nums
+    fact = str(item.get("fact_named") or "").strip().lower()[:80]
+    if fact:
+        return ("fact", fact)
+    return (
+        "quote",
+        _quote_key(str(item.get("claim_quote") or item.get("title") or "")),
+        _quote_key(str(item.get("evidence_quote") or "")),
+    )
+
+
 def dedupe_gotchas(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """One card per claim/evidence pair; later hits add related documents."""
-    grouped: dict[tuple[str, str], dict[str, Any]] = {}
-    order: list[tuple[str, str]] = []
+    """One card per claim/evidence fact; later hits add related documents."""
+    grouped: dict[tuple[str, ...], dict[str, Any]] = {}
+    order: list[tuple[str, ...]] = []
     for item in items:
-        claim = _quote_key(str(item.get("claim_quote") or item.get("title") or ""))
-        evidence = _quote_key(str(item.get("evidence_quote") or ""))
-        key = tuple(sorted((claim, evidence)))
+        key = _gotcha_cluster_key(item)
         related = {
             "document_id": item.get("document_id"),
             "display_name": item.get("display_name") or item.get("claim_source") or item.get("evidence_source"),

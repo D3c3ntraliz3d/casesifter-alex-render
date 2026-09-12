@@ -46,6 +46,24 @@ ARREARS_OK_RE = re.compile(
     r"installment\s+payment\s+is\s+still|missed\s+payment|past[\s-]due)"
 )
 
+RECORDED_KINDS = frozenset({"mortgage", "deed", "assignment", "satisfaction", "indenture"})
+RECORDED_PLEADING_NAME = re.compile(r"(?i)\b(notice|foreclosure|complaint|summons|motion)\b")
+RECORDED_NAME = re.compile(
+    r"(?i)\b(mortgage|deed|indenture|assignment\s+of\s+mortgage|satisfaction\s+of\s+mortgage)\b"
+)
+RECORDED_BODY = re.compile(
+    r"(?i)("
+    r"recorded\s+in\s+(?:the\s+)?(?:office|city\s+register)|"
+    r"office\s+of\s+the\s+(?:city\s+register|county\s+clerk)|"
+    r"\bcrfn\b|"
+    r"block\s+\d+[,\s]+lot\s+\d+|"
+    r"mortgage\s+tax|"
+    r"this\s+indenture|"
+    r"county\s+clerk'?s?\s+office|"
+    r"to\s+be\s+recorded\s+in"
+    r")"
+)
+
 MAJOR_AI_TYPES = frozenset(
     {
         "math_error",
@@ -118,6 +136,41 @@ def finding_blob(item: Finding | dict) -> str:
     )
 
 
+def looks_like_recorded_instrument(
+    text: str = "",
+    source: str = "",
+    doc_kind: str | None = None,
+) -> bool:
+    """True for a recorded mortgage, deed, or similar public instrument."""
+    if (doc_kind or "").strip().lower() in RECORDED_KINDS:
+        return True
+    name = str(source or "")
+    if RECORDED_NAME.search(name) and not RECORDED_PLEADING_NAME.search(name):
+        return True
+    return bool(RECORDED_BODY.search(text or ""))
+
+
+def is_recorded_instrument_math_noise(
+    item: Finding | dict,
+    *,
+    text: str = "",
+    source: str = "",
+    doc_kind: str | None = None,
+) -> bool:
+    """Loan-math on a recorded instrument is not a finding; alteration still is."""
+    analysis = ""
+    if isinstance(item, Finding):
+        analysis = str((item.evidence or {}).get("analysis_type") or "")
+        name = source or str(item.title or "")
+    else:
+        analysis = str(item.get("analysis_type") or "")
+        name = source or str(item.get("title") or "")
+    if analysis != "math_error":
+        return False
+    blob = finding_blob(item)
+    return looks_like_recorded_instrument(text, name, doc_kind) or bool(RECORDED_BODY.search(blob))
+
+
 def is_header_or_arrears_noise(item: Finding | dict) -> bool:
     blob = finding_blob(item)
     if HEADER_NOISE_RE.search(blob):
@@ -132,6 +185,8 @@ def is_header_or_arrears_noise(item: Finding | dict) -> bool:
     if analysis == "date_inconsistency" and (
         ARREARS_OK_RE.search(blob) or FILING_VS_BODY_RE.search(blob)
     ):
+        return True
+    if is_recorded_instrument_math_noise(item):
         return True
     return False
 

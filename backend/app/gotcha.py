@@ -1,5 +1,9 @@
 """Claim-versus-evidence gotchas for any practice area.
 
+This is systematic pattern detection and contradiction spotting with evidence
+fraud analysis. It is not argument synthesis: do not assemble a party's case,
+do not pair competing recitals as impeachment, and do not write advocacy.
+
 Pass 1 proposes candidate pairs. Pass 2 keeps a pair only if it is the same
 nameable fact, the evidence runs AGAINST the claim, the fact is material, and
 both quotes are grounded in the pulled text. Rejects are logged, not dropped
@@ -127,6 +131,78 @@ COUNTER_INSTANCE = re.compile(
     r")\b"
 )
 
+# Bare "I was not served" vs a process server's completed-service recital is the
+# ordinary traverse. A gotcha needs the claimant's own exhibit to undercut them.
+SERVICE_FACT = re.compile(
+    r"(?i)\b("
+    r"serv(?:e|ed|ice)|process\s+server|summons|complaint|"
+    r"mailings?|personal\s+jurisdiction|suitable\s+age|"
+    r"first\s+class\s+mail|conspicuous"
+    r")\b"
+)
+SERVICE_COMPLETED = re.compile(
+    r"(?i)("
+    r"(?:i\s+|1)?served\s+(?:the\s+)?(?:within\s+)?(?:summons|complaint|papers?)|"
+    r"on\s+\d{1,2}\s*/\s*\d{1,2}.{0,160}served|"
+    r"sent\s+a\s+copy\s+of\s+the\s+summons|"
+    r"by\s+first\s+class\s+mail|"
+    r"person\s+of\s+suitable\s+age|"
+    r"affidavit\s+of\s+service"
+    r")"
+)
+SETTLEMENT_NEG = re.compile(
+    r"(?i)\b((?:case\s+)?not\s+settled|settlement\s+was\s+not\s+reached|"
+    r"no\s+settlement\s+was\s+reached)\b"
+)
+RESIDENCE_ASSERT = re.compile(r"(?i)\b(reside[sd]?|residing|live[sd]?|living|dwelling)\b")
+RESIDENCE_DENY = re.compile(
+    r"(?i)\b((?:did|do|does|was|were)\s+not\s+(?:live|reside)|never\s+(?:lived|resided))\b"
+)
+CAPTION_OR_FORM = re.compile(
+    r"(?i)\b("
+    r"index/?case\s+number|county\s+of|court\s+of\s+the\s+state|"
+    r"plaintiff,?\s+vs\.?|un-?rep\s+parties|issue\s+joined|"
+    r"request\s+for\s+preliminary\s+conference|"
+    r"writ\s+of\s+habeas|poor\s+person\s+application|"
+    r"other\s+\(specify\)|certificate\s+of\s+merit"
+    r")\b"
+)
+MILITARY_FORM = re.compile(r"(?i)\b(military\s+service|active\s+military)\b")
+MAILING_FORM = re.compile(
+    r"(?i)\b(first\s+class|official\s+depositor|post-paid|personal\s+&\s+confidential)\b"
+)
+OPPORTUNITY_CHAR = re.compile(
+    r"(?i)\b(opportunity|did\s+not\s+have\s+the\s+chance|never\s+(?:went|had)\s+the\s+opportunity)\b"
+)
+DOCKET_LINE = re.compile(
+    r"(?i)\b(conference|adjourned|no\s+courtroom|appearance|foreclosure\s+pre-?\s*settlement)\b"
+)
+APPEARANCE_FACT = re.compile(
+    r"(?i)\b((?:did|does|have)\s+not\s+(?:answer|appear)|failed\s+to\s+answer|"
+    r"time\s+to\s+answer\s+has\s+expired)\b"
+)
+ROLE_OR_IDENTITY = re.compile(
+    r"(?i)\b(i\s+am\s+(?:the\s+|a\s+)?(?:defendant|plaintiff|attorney|counsel)|"
+    r"being\s+duly\s+sworn)\b"
+)
+EXHIBIT_TAG = re.compile(r"(?i)\bexhibit\s+([A-Z])(?:[_\-\s]+(\d{1,4}))?\b")
+PRODUCED_CUE = re.compile(
+    r"(?i)\b("
+    r"attach(?:ed|ing)|annexed|appended|herewith|hereto|"
+    r"i\s+submit|submitted\s+herewith|as\s+proof|in\s+support|"
+    r"i\s+produce"
+    r")\b"
+)
+TAINTED_ANALYSIS = frozenset(
+    {
+        "math_error",
+        "text_overlay",
+        "graphic_manipulation",
+        "historical_impossibility",
+        "date_inconsistency",
+    }
+)
+
 CANDIDATE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -219,10 +295,21 @@ VERIFY_SCHEMA = {
 }
 
 CANDIDATE_PROMPT = """Propose candidate claim/evidence pairs from any practice area.
+
+Role: forensic scan only. Systematic pattern detection and contradiction spotting
+with evidence-fraud analysis. Do not assemble a party's case. Do not write advocacy.
+Do not pair competing recitals as if that were impeachment.
+
 A claim is a factual assertion by a party, witness, or counsel. Evidence must be
 a sworn, documentary, or entered-court record about a discrete fact — not another
 motion, brief, proposed order, or attorney affirmation. Two opposing arguments
-are not a pair. Do not assign a final gotcha label. Quote only from the text.
+are not a pair. He-said-she-said (a denial versus the other side's competing
+recital, including a bare service denial versus an affidavit of service, or a
+service-attempt claim versus a DMV/address printout that lists or supports the
+same address) is not a pair. A pair is worth proposing when the claimant produced
+the record and that record appears false or internally defective. Do not pair
+a claim with a quote that restates it. Do not assign a final gotcha label.
+Quote only from the text.
 
 Claims:
 {claims}
@@ -231,16 +318,28 @@ Evidence excerpts:
 {evidence}
 """
 
-VERIFY_PROMPT = """Verify each candidate pair. A pair is a gotcha only if ALL four pass.
-Show work on every step. Do not infer unstated facts. Practice-area-neutral.
-If any step is uncertain, fail that step. Prefer reject over accept.
+VERIFY_PROMPT = """Verify each candidate pair. Forensic scan only — not argument synthesis.
+A pair is a gotcha only if ALL four pass. Show work on every step. Do not infer
+unstated facts. Practice-area-neutral. If any step is uncertain, fail that step.
+Prefer reject over accept. Do not assemble a party's case or treat ordinary
+dispute as impeachment.
 
 1. SAME FACT — one nameable fact (date, place, amount, act, knowledge, status).
-   Shared topic, person, or document is not enough.
+   Shared topic, person, party name, or caption is not enough. A form checkbox
+   or appearance-calendar line is not the same fact as a party's characterization
+   of whether they had a meaningful chance to participate.
 2. DIRECTIONALITY — one sentence: what the evidence quote asserts on its own.
    Then FOR, AGAINST, or NEITHER the claim. Qualify only if AGAINST.
    Related documents that document a defect or dispute about the same subject
    often SUPPORT a denial claim; that is FOR, not against.
+   If the evidence restates or corroborates the claim (for example "not settled"
+   versus "case not settled", or a residence claim versus a record listing that
+   same address), that is FOR, not against.
+   He-said-she-said is not a gotcha: a denial versus the other side's competing
+   recital, with no produced record that is false or fraudulent. Mark that FOR
+   or NEITHER. A gotcha is when they produce evidence and that evidence is
+   fraudulent or false — for example they deny living at an address and the
+   exhibit they produced lists that address, or the fraud check flags that exhibit.
 3. MATERIALITY — element, defense, procedure/foundation, credibility on a
    contested issue, or damages. Reject incidental details.
 4. TEXTUAL GROUNDING — every step must be in the two quotes. If you need
@@ -303,13 +402,15 @@ def find_gotchas(
         document_id=document_id,
         doc_kind=doc_kind,
     )
-    if not claims and not internals:
+    tainted = propose_tainted_support(claims, docs, snaps, filing_text=text)
+    if not claims and not internals and not tainted:
         return [], empty
-    if not evidence and not internals:
+    if not evidence and not internals and not tainted:
         return [], empty
 
     candidates = propose_candidates(claims, evidence) if claims and evidence else []
-    accepted, rejected = verify_candidates(candidates, case_docs=docs)
+    verified, rejected = verify_candidates(candidates, case_docs=docs)
+    accepted = list(tainted)
     for item in internals:
         accepted.append(
             {
@@ -318,7 +419,8 @@ def find_gotchas(
                 "verification": _force_internal_pass(item),
             }
         )
-    findings = [_to_finding(item, case_docs=docs) for item in accepted[:6] if _shippable(item, docs)]
+    accepted.extend(verified)
+    findings = [_to_finding(item, case_docs=docs) for item in accepted[:8] if _shippable(item, docs)]
     return findings, {
         "candidates": len(candidates) + len(internals),
         "accepted": len(findings),
@@ -387,6 +489,163 @@ def retrieve_evidence(
         if len(out) >= limit:
             break
     return out
+
+
+def propose_tainted_support(
+    claims: list[dict[str, Any]],
+    docs: list[dict[str, Any]],
+    snaps: dict[str, dict[str, Any]],
+    filing_text: str = "",
+) -> list[dict[str, Any]]:
+    """Claim + the record they produced, when that record looks fraudulent or false."""
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for claim in claims:
+        for doc in _supporting_exhibit_docs(claim, filing_text, docs, snaps):
+            snap = snaps.get(doc["id"]) or {}
+            rows = _tainted_rows(snap)
+            if not rows:
+                continue
+            row = rows[0]
+            quote = (
+                str(row.get("quoted_evidence") or "").strip()
+                or str(row.get("why_suspicious") or "").strip()
+                or str(row.get("explanation") or "").strip()
+                or str(row.get("title") or "Forensic or internal defect on the produced record.")
+            )
+            key = (claim["quote"][:120].lower(), doc["id"])
+            if key in seen:
+                continue
+            seen.add(key)
+            source = doc.get("display_name") or doc.get("original_filename") or "exhibit"
+            item = {
+                "title": "Apparent false or tainted supporting evidence",
+                "claim_quote": claim["quote"],
+                "claim_source": claim["source"],
+                "claim_document_id": claim.get("document_id"),
+                "claim_kind": claim.get("doc_kind"),
+                "evidence_quote": quote[:400],
+                "evidence_source": source,
+                "document_id": doc["id"],
+                "evidence_kind": doc.get("doc_kind") or "exhibit",
+                "evidence_tier": TIER_EVIDENCE,
+                "self_undercut": True,
+                "tainted_support": True,
+                "why_it_may_matter": (
+                    "The party produced this record in support of the claim, and the "
+                    "record itself appears fraudulent or internally false."
+                ),
+                "contradiction_type": "procedural_foundational",
+                "verification": _force_tainted_pass(claim["quote"], quote),
+            }
+            out.append(item)
+            if len(out) >= 6:
+                return out
+    return out
+
+
+def _supporting_exhibit_docs(
+    claim: dict[str, Any],
+    filing_text: str,
+    docs: list[dict[str, Any]],
+    snaps: dict[str, dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    claim_quote = str(claim.get("quote") or "")
+    window = _window_around_claim(filing_text, claim_quote)
+    cited = _exhibit_tags(claim_quote) | _exhibit_tags(window)
+    produced = bool(PRODUCED_CUE.search(claim_quote) or PRODUCED_CUE.search(window))
+    if not cited and not produced:
+        return []
+    matched: list[dict[str, Any]] = []
+    for doc in docs:
+        if doc.get("id") == claim.get("document_id"):
+            continue
+        tag = _doc_exhibit_tag(doc)
+        excerpt = ((snaps or {}).get(doc["id"]) or {}).get("text_excerpt") or ""
+        name = f"{doc.get('display_name') or ''} {doc.get('original_filename') or ''}"
+        if cited and tag and (tag in cited or any(_tags_compatible(tag, other) for other in cited)):
+            matched.append(doc)
+            continue
+        if produced and not cited and len(_stem_overlap(claim_quote, excerpt or name)) >= 2:
+            matched.append(doc)
+    return matched[:8]
+
+
+def _window_around_claim(text: str, quote: str, radius: int = 400) -> str:
+    hay = text or ""
+    needle = (quote or "")[:80]
+    at = hay.lower().find(needle.lower()) if needle else -1
+    if at < 0:
+        return quote
+    return hay[max(0, at - radius) : at + len(quote) + radius]
+
+
+def _exhibit_tags(text: str) -> set[str]:
+    tags: set[str] = set()
+    for match in EXHIBIT_TAG.finditer(text or ""):
+        letter = match.group(1).upper()
+        number = match.group(2)
+        tags.add(f"{letter}_{number}" if number else letter)
+    return tags
+
+
+def _doc_exhibit_tag(doc: dict[str, Any]) -> str | None:
+    tags = _exhibit_tags(f"{doc.get('display_name') or ''} {doc.get('original_filename') or ''}")
+    return next(iter(tags), None)
+
+
+def _tags_compatible(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    return left.split("_")[0] == right.split("_")[0] and (
+        "_" in left and "_" in right and left.split("_")[1] == right.split("_")[1]
+    )
+
+
+def _tainted_rows(snap: dict[str, Any]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for row in snap.get("findings_summary") or []:
+        if not isinstance(row, dict):
+            continue
+        if row.get("gotcha") or row.get("category") in {"gotcha", "case_consistency"}:
+            continue
+        if str(row.get("severity") or "") not in {"medium", "high", "critical"}:
+            continue
+        analysis = str(row.get("analysis_type") or "")
+        fid = str(row.get("id") or "")
+        if analysis in TAINTED_ANALYSIS:
+            out.append(row)
+        elif fid.startswith("img-ela-") or fid.startswith("img-copymove-"):
+            out.append(row)
+        elif fid == "md-editor-software":
+            out.append(row)
+    return out[:3]
+
+
+def _force_tainted_pass(claim: str, evidence: str) -> dict[str, Any]:
+    return {
+        "same_fact": {
+            "pass": True,
+            "fact_named": "supporting record offered for the claim",
+            "reason": "The claimant produced this record as proof of the claim.",
+        },
+        "directionality": {
+            "pass": True,
+            "evidence_asserts": evidence[:220],
+            "runs": "against",
+            "reason": "The produced record appears fraudulent or internally false.",
+        },
+        "materiality": {
+            "pass": True,
+            "tier": "foundation",
+            "reason": "A claim that rests on a tainted or false exhibit goes to credibility and foundation.",
+        },
+        "textual_grounding": {"pass": True, "reason": "The claim and the defect are in the pulled record."},
+        "contradiction_type": "procedural_foundational",
+        "pass": True,
+        "failed_step": None,
+        "gate": "tainted_support",
+    }
 
 
 def propose_candidates(
@@ -497,7 +756,21 @@ def hard_veto_step(candidate: dict[str, Any], local: dict[str, Any]) -> str | No
         return "textual_grounding"
     if _duty_vs_place(claim, evidence):
         return "same_fact"
+    if _caption_or_form(evidence) or _party_list_only(claim, evidence):
+        return "same_fact"
+    if _characterization_vs_docket(claim, evidence):
+        return "same_fact"
+    if _appearance_vs_service(claim, evidence) or _appearance_vs_identity(claim, evidence):
+        return "same_fact"
+    if _settlement_topic_only(claim, evidence):
+        return "same_fact"
+    if _service_vs_address_listing(claim, evidence):
+        return "same_fact"
     if PROCESS_DEFECT.search(evidence) and _is_denial(claim):
+        return "directionality"
+    if _ordinary_traverse(claim, evidence) or _process_form_variant(claim, evidence):
+        return "directionality"
+    if _corroborates(claim, evidence):
         return "directionality"
     if _date_format_only(claim, evidence) or _incidental(claim, evidence):
         return "materiality"
@@ -519,17 +792,48 @@ def verify_pair(candidate: dict[str, Any]) -> dict[str, Any]:
     }
     if _duty_vs_place(claim, evidence):
         same["reason"] = "Claim is about a duty or condition; evidence is about place. Different facts."
-    elif PLACE_FACT.search(claim) and PLACE_FACT.search(evidence) and _shared_year(claim, evidence):
+    elif _caption_or_form(evidence) or _party_list_only(claim, evidence):
+        same["reason"] = "Shared party names, a caption, or a form checkbox are not a nameable fact."
+    elif _characterization_vs_docket(claim, evidence):
+        same["reason"] = (
+            "A party's characterization of whether they had a chance to participate "
+            "is not the same fact as a calendar line that a conference was listed."
+        )
+    elif _appearance_vs_service(claim, evidence) or _appearance_vs_identity(claim, evidence):
+        same["reason"] = (
+            "Whether a party answered is not the same fact as identity, counsel, "
+            "or whether papers were mailed or served."
+        )
+    elif _settlement_topic_only(claim, evidence):
+        same["reason"] = "A 'not settled' claim is not the same fact as a document that merely names settlement."
+    elif _service_vs_address_listing(claim, evidence):
+        same["reason"] = (
+            "Whether process was attempted is not the same fact as an address or identity listing."
+        )
+    elif _denies_residence(claim) and _same_street_number(claim, evidence) and not _denies_residence(evidence):
+        same = {
+            "pass": True,
+            "fact_named": "residence at the stated address",
+            "reason": "The claim denies living at an address that the record lists.",
+        }
+    elif (
+        PLACE_FACT.search(claim)
+        and PLACE_FACT.search(evidence)
+        and _shared_year(claim, evidence)
+        and _different_places(claim, evidence)
+    ):
         same = {
             "pass": True,
             "fact_named": "whereabouts on a shared date",
             "reason": "Both quotes address where a person was on the same date.",
         }
-    elif len(overlap) >= 2:
+    elif len(overlap) >= 2 and _has_opposing_polarity(claim, evidence) and (
+        _predicate_overlap(claim, evidence) or _exclusive_vs_instance(claim, evidence)
+    ):
         same = {
             "pass": True,
             "fact_named": ", ".join(sorted(overlap)[:6]),
-            "reason": "Both quotes share the same discrete fact tokens.",
+            "reason": "Both quotes share the same discrete fact and opposing polarity.",
         }
     elif len(overlap) == 1 and (
         (_has_opposing_polarity(claim, evidence) and _predicate_overlap(claim, evidence))
@@ -545,7 +849,16 @@ def verify_pair(candidate: dict[str, Any]) -> dict[str, Any]:
     runs = "neither"
     direction_pass = False
     direction_reason = "Evidence does not clearly run against the claim."
-    if same["pass"] and PROCESS_DEFECT.search(evidence) and _is_denial(claim):
+    if _ordinary_traverse(claim, evidence) or _process_form_variant(claim, evidence):
+        runs = "neither"
+        direction_reason = (
+            "A denial of service or a process-server form variant versus the other side's "
+            "completed-service record is the ordinary traverse, not a gotcha."
+        )
+    elif _corroborates(claim, evidence):
+        runs = "for"
+        direction_reason = "The evidence quote restates or supports the claim on the same fact."
+    elif same["pass"] and PROCESS_DEFECT.search(evidence) and _is_denial(claim):
         runs = "for"
         direction_reason = (
             "Evidence describes a defect or failure about the same subject, which supports "
@@ -555,6 +868,10 @@ def verify_pair(candidate: dict[str, Any]) -> dict[str, Any]:
         runs = "against"
         direction_pass = True
         direction_reason = "The evidence appears to place the person somewhere else on the same date."
+    elif same["pass"] and same.get("fact_named") == "residence at the stated address":
+        runs = "against"
+        direction_pass = True
+        direction_reason = "The record lists the address the claimant says they did not live at."
     elif same["pass"] and _has_opposing_polarity(claim, evidence):
         runs = "against"
         direction_pass = True
@@ -705,7 +1022,13 @@ def _to_finding(item: dict[str, Any], case_docs: list[dict[str, Any]] | None = N
     ev_tier = TIER_EVIDENCE if evidence_is_probative(item, case_docs) else TIER_ADVOCACY
     c_tier = claim_tier(item, case_docs)
     self_hit = bool(item.get("self_undercut") or is_self_undercut(item))
-    if self_hit:
+    tainted_hit = bool(item.get("tainted_support"))
+    if tainted_hit:
+        severity = "high"
+        confidence = 90.0
+        title = "Apparent false or tainted supporting evidence"
+        self_hit = True
+    elif self_hit:
         severity = "high"
         confidence = 88.0
         title = "Apparent self-contradiction"
@@ -750,6 +1073,7 @@ def _to_finding(item: dict[str, Any], case_docs: list[dict[str, Any]] | None = N
             "evidence_tier": ev_tier,
             "claim_tier": c_tier,
             "self_undercut": self_hit,
+            "tainted_support": tainted_hit,
             "fact_named": fact_named,
             "direction_reason": direction_reason,
             "materiality_reason": material_reason,
@@ -922,10 +1246,11 @@ def _exclusive_vs_instance(claim: str, evidence: str) -> bool:
 
 def _predicate_overlap(claim: str, evidence: str) -> bool:
     shared = _stem_overlap(claim, evidence)
+    # Legal-process nouns (notice, motion, complaint, settlement) are topics,
+    # not a nameable fact. Keep markers that name a discrete act or status.
     markers = {
         "signed",
         "signature",
-        "notice",
         "income",
         "injury",
         "contact",
@@ -934,20 +1259,21 @@ def _predicate_overlap(claim: str, evidence: str) -> bool:
         "warning",
         "theft",
         "store",
-        "settlement",
         "stipulation",
         "knowledge",
         "delivered",
         "authorized",
         "disclosed",
         "account",
-        "complaint",
+        "complaints",
     }
     return bool(shared & markers)
 
 
 def _has_opposing_polarity(claim: str, evidence: str) -> bool:
     if PROCESS_DEFECT.search(evidence) and _is_denial(claim):
+        return False
+    if _corroborates(claim, evidence) or _ordinary_traverse(claim, evidence):
         return False
     if _is_denial(claim) and not _is_denial(evidence):
         return True
@@ -957,6 +1283,124 @@ def _has_opposing_polarity(claim: str, evidence: str) -> bool:
         return True
     if re.search(r"(?i)\b(after|despite|continued|kept)\b", claim) and re.search(
         r"(?i)\b(agree|stipulat|settlement|cancel|discharge|order)\b", evidence
+    ):
+        return True
+    return False
+
+
+def _street_numbers(text: str) -> set[str]:
+    years = set(re.findall(r"\b(?:19|20)\d{2}\b", text or ""))
+    return set(re.findall(r"\b\d{3,5}\b", text or "")) - years
+
+
+def _same_street_number(claim: str, evidence: str) -> bool:
+    left, right = _street_numbers(claim), _street_numbers(evidence)
+    return bool(left and right and left & right)
+
+
+def _different_places(claim: str, evidence: str) -> bool:
+    left, right = _street_numbers(claim), _street_numbers(evidence)
+    if left and right:
+        return not bool(left & right)
+    return True
+
+
+def _denies_residence(text: str) -> bool:
+    return bool(RESIDENCE_DENY.search(text or ""))
+
+
+def _asserts_residence(text: str) -> bool:
+    return bool(RESIDENCE_ASSERT.search(text or "")) and not _denies_residence(text or "")
+
+
+def _caption_or_form(text: str) -> bool:
+    return bool(CAPTION_OR_FORM.search(text or ""))
+
+
+def _party_list_only(claim: str, evidence: str) -> bool:
+    """Shared person-name tokens with a caption or party list are not a fact."""
+    if not _caption_or_form(evidence) and not _caption_or_form(claim):
+        return False
+    overlap = _stem_overlap(claim, evidence)
+    if not overlap:
+        return True
+    return not _predicate_overlap(claim, evidence)
+
+
+def _characterization_vs_docket(claim: str, evidence: str) -> bool:
+    return bool(OPPORTUNITY_CHAR.search(claim or "") and DOCKET_LINE.search(evidence or ""))
+
+
+def _appearance_vs_service(claim: str, evidence: str) -> bool:
+    return bool(
+        APPEARANCE_FACT.search(claim or "")
+        and (SERVICE_COMPLETED.search(evidence or "") or SERVICE_FACT.search(evidence or ""))
+    )
+
+
+def _appearance_vs_identity(claim: str, evidence: str) -> bool:
+    """Default/appearance status is not the same fact as 'I am the defendant/attorney'."""
+    return bool(APPEARANCE_FACT.search(claim or "") and ROLE_OR_IDENTITY.search(evidence or ""))
+
+
+def _settlement_topic_only(claim: str, evidence: str) -> bool:
+    """'Not settled' versus a document that merely names settlement as a topic."""
+    if not SETTLEMENT_NEG.search(claim or ""):
+        return False
+    if SETTLEMENT_NEG.search(evidence or ""):
+        return False
+    if re.search(r"(?i)\b(case\s+settled|settlement\s+was\s+reached|settled\s+the\s+(?:case|action))\b", evidence or ""):
+        return False
+    return bool(re.search(r"(?i)\bsettlement\b", evidence or ""))
+
+
+def _service_vs_address_listing(claim: str, evidence: str) -> bool:
+    """A service-attempt claim is not the same fact as an address or identity printout."""
+    denies_service = _is_denial(claim) and bool(SERVICE_FACT.search(claim))
+    if not denies_service:
+        return False
+    if SERVICE_COMPLETED.search(evidence) or SERVICE_FACT.search(evidence):
+        return False
+    return _same_street_number(claim, evidence)
+
+
+def _ordinary_traverse(claim: str, evidence: str) -> bool:
+    """Competing service recitals are the ordinary traverse, not a gotcha.
+
+    A denial versus an affidavit of service, a mailing form, or an address
+    listing is the ordinary dispute. Two affidavits arguing about whether
+    service was attempted is the same thing. A residence denial versus a
+    record that lists that address can still be a gotcha — that is their
+    exhibit undercutting them, not a traverse.
+    """
+    if _denies_residence(claim) and _same_street_number(claim, evidence) and not SERVICE_COMPLETED.search(evidence):
+        return False
+    claim_service = bool(SERVICE_FACT.search(claim))
+    evidence_service = bool(SERVICE_COMPLETED.search(evidence) or SERVICE_FACT.search(evidence))
+    if claim_service and evidence_service:
+        return True
+    denies_service = _is_denial(claim) and claim_service
+    if not denies_service or _is_denial(evidence):
+        return False
+    return _same_street_number(claim, evidence)
+
+
+def _process_form_variant(claim: str, evidence: str) -> bool:
+    if MILITARY_FORM.search(claim or "") and MILITARY_FORM.search(evidence or ""):
+        return True
+    if MAILING_FORM.search(claim or "") and MAILING_FORM.search(evidence or ""):
+        return True
+    return False
+
+
+def _corroborates(claim: str, evidence: str) -> bool:
+    if SETTLEMENT_NEG.search(claim or "") and SETTLEMENT_NEG.search(evidence or ""):
+        return True
+    if (
+        _asserts_residence(claim)
+        and _same_street_number(claim, evidence)
+        and not _denies_residence(evidence)
+        and not SERVICE_COMPLETED.search(evidence)
     ):
         return True
     return False

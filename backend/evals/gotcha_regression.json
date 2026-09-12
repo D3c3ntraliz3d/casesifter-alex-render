@@ -169,6 +169,86 @@
           "claim_quote": "The occupant was required to keep the property in good repair.",
           "evidence_quote": "A bank charge places a cardholder purchase in Brooklyn in July.",
           "expect_fail": "same_fact"
+        },
+        {
+          "id": "proc-fp-settlement-corroboration",
+          "label": "fp",
+          "claim_quote": "A settlement was not reached and the case was released from the settlement conference part on May 22, 2024.",
+          "evidence_quote": "05/22/2024 Conference-Foreclosure Settlement No Courtroom Case Not Settled Edwards, Hon. Cenceria P.",
+          "expect_fail": "directionality"
+        },
+        {
+          "id": "proc-fp-caption-party-names",
+          "label": "fp",
+          "claim_quote": "The following Defendant(s) did not answer or appear and their time to answer has expired: Evelyn Lefkowitz a/k/a Evelyn Lefkowits, Minky Goldstein.",
+          "evidence_quote": "COURT OF THE STATE OF NEW YORK COUNTY OF KINGS Specialized Loan Servicing LLC, Plaintiff, vs. Evelyn Lefkowitz a/k/a Evelyn Lefkowits; Minky Goldstein, as Trustee.",
+          "expect_fail": "same_fact"
+        },
+        {
+          "id": "proc-fp-residence-supported",
+          "label": "fp",
+          "claim_quote": "Simply put, the process server did not attempt to serve Defendant on the third floor, where Defendant resides at 1739 46th Street, third floor, Brooklyn, NY 11204.",
+          "evidence_quote": "1739 46TH STREET 3 HEIGHT: 5-5 EYE COLOR: BROWN BROOKLYN NY 11204",
+          "expect_fail": "same_fact"
+        },
+        {
+          "id": "proc-fp-ocr-dmv-not-service",
+          "label": "fp",
+          "claim_quote": "Sim ply put, the process server did not attempt to serve Defendant on the third floor, where Defendant reside s at 1739 46th Street, third floor, Brooklyn, NY 11204 .",
+          "evidence_quote": "1739 46TH STREET 3 HEIGHT: 5-5 EYE COLOR: BROWN BROOKLYN NY 11204",
+          "expect_fail": "same_fact"
+        },
+        {
+          "id": "proc-fp-ordinary-traverse",
+          "label": "fp",
+          "claim_quote": "I was not served in this case by any means whatsoever.",
+          "evidence_quote": "On 12/14/2023 at 9:08 PM at 1739 46TH STREET 3 BROOKLYN, NEW YORK 11204, I served the within SUMMONS; COMPLAINT.",
+          "expect_fail": "directionality"
+        },
+        {
+          "id": "proc-fp-ocr-aos-third-floor",
+          "label": "fp",
+          "claim_quote": "5' As the process server did not attempt to serve me on the third floor, where I reside at 1739 46th Street, third floor, Brooklyn, NY 11204, service is defective and the Complaint should be dismissed for lack of personal jurisdiction.",
+          "evidence_quote": "On 12/14 / 2023 at 9:08 PM at 1739 46TH STREET 3 BROOKLYN, NEW YORK 11204,1served the within SUMMONS ; COMPLAINT FOR MORTGAGE FORECLOSURE which contains the additional notice requirements in accordance with RPAPL §1320",
+          "expect_fail": "directionality"
+        },
+        {
+          "id": "proc-fp-default-vs-mailing",
+          "label": "fp",
+          "claim_quote": "The following Defendant(s) did not answer or appear and their time to answer has expired: Evelyn Lefkowitz.",
+          "evidence_quote": "On 12/19/2023 I sent a copy of the Summons by First Class Mail to EVELYN LEFKOWITZ, the defendant herein.",
+          "expect_fail": "same_fact"
+        },
+        {
+          "id": "proc-fp-counsel-says-no-denial-vs-denial",
+          "label": "fp",
+          "claim_quote": "While Borrower points to alleged discrepancies between service of the Summons at the Property, she does not swear under penalty of perjury or make any statement denying service at her place of residence at 1739 46th Street 3, Brooklyn, New York 11204.",
+          "evidence_quote": "this second affidavit of service pursuant to alleged service on me is also defective because the process server did not come to my correct address to serve me at 1739 46th Street, 3rd Floor, Brooklyn, NY 11204.",
+          "expect_fail": "directionality"
+        },
+        {
+          "id": "proc-fp-default-vs-i-am-defendant",
+          "label": "fp",
+          "claim_quote": "The following Defendant(s) did not answer or appear and their time to answer has expired: Evelyn Lefkowitz a/k/a Evelyn Lefkowits, Minky Goldstein.",
+          "evidence_quote": "EVELYN LEFKOWITZ, being duly sworn, states the following pursuant to the penalties of perjury: 1. I am a Defendant in this action, and as such, I am familiar with the facts and circumstances herein.",
+          "expect_fail": "same_fact"
+        },
+        {
+          "id": "proc-fp-settlement-power-not-outcome",
+          "label": "fp",
+          "claim_quote": "A settlement was not reached and the case was released from the settlement conference part on May 22, 2024.",
+          "evidence_quote": "The Owner Trustee may transact business of any kind regarding the Loans, including but not limited to dismissal, termination, cancellation, rescission and settlement.",
+          "expect_fail": "same_fact"
+        },
+        {
+          "id": "proc-tp-own-exhibit-undercuts-residence",
+          "label": "tp",
+          "claim_quote": "I did not live at 1739 46th Street at the time of the alleged service.",
+          "claim_source": "Defendant affidavit",
+          "evidence_quote": "Con Edison bill attached as Exhibit A for November 2023 lists service address 1739 46th Street, Apt 3, Brooklyn NY 11204.",
+          "evidence_source": "Exhibit A utility bill",
+          "evidence_kind": "exhibit",
+          "expect_fail": null
         }
       ]
     },
@@ -199,15 +279,15 @@
           "expect_fail": "evidence_tier"
         },
         {
-          "id": "tier-tp-affidavit-vs-aos",
-          "label": "tp",
+          "id": "tier-fp-affidavit-vs-aos",
+          "label": "fp",
           "claim_quote": "I was not served via my daughter, the process server, nor from anyone.",
           "claim_source": "Defendant affidavit",
           "claim_kind": "affidavit",
           "evidence_quote": "Affidavit of service: on March 3, 2024 at 6:15 p.m. I served Jane Doe at 5616 14th Avenue by delivering a copy to her daughter, a person of suitable age.",
           "evidence_source": "Affidavit of Service",
           "evidence_kind": "affidavit",
-          "expect_fail": null
+          "expect_fail": "directionality"
         }
       ]
     }

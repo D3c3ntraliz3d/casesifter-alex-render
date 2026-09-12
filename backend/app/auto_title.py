@@ -5,19 +5,49 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-KIND_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
-    ("complaint", re.compile(r"\b(verified\s+)?complaint\b", re.I), "Complaint"),
-    ("answer", re.compile(r"\banswer\b", re.I), "Answer"),
-    ("motion", re.compile(r"\bmotion\s+to\s+([a-z][a-z\s]{2,40})", re.I), "Motion"),
-    ("motion", re.compile(r"\bnotice\s+of\s+motion\b", re.I), "Notice of Motion"),
-    ("order", re.compile(r"\b(order|decision\s+and\s+order)\b", re.I), "Order"),
-    ("affidavit", re.compile(r"\baffidavit\b", re.I), "Affidavit"),
-    ("affirmation", re.compile(r"\baffirmation\b", re.I), "Affirmation"),
-    ("letter", re.compile(r"\b(cover\s+)?letter\b", re.I), "Letter"),
-    ("stipulation", re.compile(r"\bstipulation\b", re.I), "Stipulation"),
-    ("transcript", re.compile(r"\b(transcript|deposition)\b", re.I), "Transcript"),
-    ("bill", re.compile(r"\b(utility\s+bill|account\s+statement|bank\s+statement)\b", re.I), "Statement"),
-    ("summons", re.compile(r"\bsummons\b", re.I), "Summons"),
+# Filename / NYSCEF type first. Caption body almost always contains "complaint"
+# or "answer" and must not override AFFIDAVIT OF SERVICE, NOTICE OF MOTION, etc.
+FILENAME_KIND_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("proof_of_service", re.compile(r"(?i)\b(affidavit|affirmation)\b.{0,40}\bof\s+service\b|\baos\b")),
+    ("motion", re.compile(
+        r"(?i)\bnotice\s+of\s+(?:cross[\s-]*)?mot(?:ion)?\b|\bcross[\s-]mot(?:ion)?\b|\bmotion\s+to\b"
+    )),
+    ("rji", re.compile(r"(?i)\brji\b|request\s+for\s+judicial\s+intervention")),
+    ("filing", re.compile(
+        r"(?i)authorization\s+for\s+electronic|statement\s+of\s+author|"
+        r"certificate\s+of\s+merit"
+    )),
+    ("notice_of_pendency", re.compile(r"(?i)\bnotice\s+of\s+pendency\b")),
+    ("calendar", re.compile(r"(?i)\b(appearance\s+detail|court\s+appearance|calendar)\b")),
+    ("notice", re.compile(r"(?i)\bnotice\s+of\s+(?:entry|appearance|rejection|cross|mortgage)\b")),
+    ("order", re.compile(r"(?i)\b(proposed\s+)?order\b|decision\s+and\s+order")),
+    ("affidavit", re.compile(r"(?i)\baffidavit\b")),
+    ("affirmation", re.compile(r"(?i)\baffirmation\b")),
+    ("letter", re.compile(r"(?i)\b(cover\s+)?letter\b")),
+    ("stipulation", re.compile(r"(?i)\bstipulation\b")),
+    ("transcript", re.compile(r"(?i)\b(transcript|deposition)\b")),
+    ("bill", re.compile(r"(?i)\b(utility\s+bill|account\s+statement|bank\s+statement)\b")),
+    ("summons", re.compile(r"(?i)\bsummons\b")),
+    ("complaint", re.compile(r"(?i)\b(verified\s+)?complaint\b")),
+    ("answer", re.compile(r"(?i)\banswer\b")),
+]
+
+# Body peek: specific types only. Never complaint/answer — those words live in every caption.
+BODY_KIND_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    pair
+    for pair in FILENAME_KIND_PATTERNS
+    if pair[0]
+    in {
+        "proof_of_service",
+        "motion",
+        "affidavit",
+        "affirmation",
+        "order",
+        "letter",
+        "stipulation",
+        "transcript",
+        "bill",
+    }
 ]
 
 # Filename like EXHIBIT_S__83 or Exhibit S_41 — letter plus the docket/file number.
@@ -43,7 +73,9 @@ def propose_document_title(
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     # Kind may come from the file body; the visible name stays filename-based
     # so two uploads cannot collapse to the same short label.
-    kind = _kind_from_text(f"{cleaned}\n{text_sample[:4000]}")
+    kind = _kind_from_filename(cleaned) or _kind_from_body(text_sample[:4000])
+    if kind in {"affidavit", "affirmation"} and _looks_like_service(text_sample):
+        kind = "proof_of_service"
     if kind == "motion":
         motion = _motion_title(cleaned) or _motion_title(text_sample[:4000])
         if motion:
@@ -60,6 +92,12 @@ def propose_document_title(
             "transcript": "Transcript",
             "bill": "Statement",
             "summons": "Summons",
+            "proof_of_service": "Affidavit of Service",
+            "filing": "Filing",
+            "notice": "Notice",
+            "rji": "RJI",
+            "notice_of_pendency": "Notice of Pendency",
+            "calendar": "Calendar",
         }.get(kind, kind.title())
         titled = _filename_title(cleaned)
         name = titled if _keeps_file_identity(titled, stem) else f"{label} — {titled}"
@@ -112,11 +150,39 @@ def _stem(filename: str) -> str:
     return re.sub(r"\s*\(\d+\)\s*$", "", stem).strip()
 
 
-def _kind_from_text(haystack: str) -> str | None:
-    for kind, pattern, _label in KIND_PATTERNS:
-        if pattern.search(haystack):
+def _kind_from_filename(haystack: str) -> str | None:
+    for kind, pattern in FILENAME_KIND_PATTERNS:
+        if pattern.search(haystack or ""):
             return kind
     return None
+
+
+def _kind_from_body(haystack: str) -> str | None:
+    for kind, pattern in BODY_KIND_PATTERNS:
+        if pattern.search(haystack or ""):
+            return kind
+    return None
+
+
+def _looks_like_service(text: str) -> bool:
+    return bool(
+        re.search(
+            r"(?i)\b("
+            r"affidavit\s+of\s+service|proof\s+of\s+service|"
+            r"served\s+the\s+within|i\s+served|process\s+server"
+            r")\b",
+            text or "",
+        )
+    )
+
+
+def _kind_from_text(haystack: str) -> str | None:
+    """Filename tokens first; body is only for specific types, never caption 'complaint'."""
+    cleaned = re.sub(r"[_\-]+", " ", haystack or "")
+    kind = _kind_from_filename(cleaned) or _kind_from_body(cleaned)
+    if kind in {"affidavit", "affirmation"} and _looks_like_service(haystack):
+        return "proof_of_service"
+    return kind
 
 
 def _motion_title(text: str) -> str | None:
@@ -165,18 +231,21 @@ def retitle_case_documents(case_id: str) -> list[dict[str, str]]:
     from app import cases_db
 
     docs = cases_db.list_documents(case_id)
+    snaps = {item["document_id"]: item for item in cases_db.list_case_snapshots(case_id)}
     taken: list[str] = []
     changes: list[dict[str, str]] = []
     for doc in docs:
         filename = doc.get("original_filename") or ""
-        proposed, kind = propose_document_title(filename, "")
+        excerpt = (snaps.get(doc["id"]) or {}).get("text_excerpt") or ""
+        proposed, kind = propose_document_title(filename, excerpt[:4000])
         unique = uniquify_display_name(proposed, taken, filename)
         taken.append(unique)
         fields: dict[str, str] = {}
         if unique != (doc.get("display_name") or ""):
             fields["display_name"] = unique
-        if kind == "exhibit" and (doc.get("doc_kind") or "").lower() != "exhibit":
-            fields["doc_kind"] = "exhibit"
+        current_kind = (doc.get("doc_kind") or "").strip().lower()
+        if kind and kind != current_kind:
+            fields["doc_kind"] = kind
         if fields:
             cases_db.update_document(doc["id"], **fields)
             changes.append(
@@ -184,6 +253,8 @@ def retitle_case_documents(case_id: str) -> list[dict[str, str]]:
                     "id": doc["id"],
                     "before": doc.get("display_name") or "",
                     "after": unique,
+                    "kind_before": current_kind,
+                    "kind_after": kind or current_kind,
                 }
             )
     return changes

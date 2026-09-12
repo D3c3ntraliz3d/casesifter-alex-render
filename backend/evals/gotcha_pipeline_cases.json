@@ -64,6 +64,58 @@
           "text": "The suppression court found the warning defective and the statement inadmissible."
         }
       ]
+    },
+    {
+      "id": "pipe-fp-ordinary-traverse",
+      "area": "civil_procedure_example",
+      "label": "fp",
+      "filing_name": "Defendant affidavit",
+      "filing_text": "I was not served in this case by any means whatsoever. The process server never came to my home to attempt to serve me.",
+      "exhibits": [
+        {
+          "name": "Affidavit of Service",
+          "text": "On 12/14/2023 at 9:08 PM at 1739 46TH STREET 3 BROOKLYN, NEW YORK 11204, I served the within SUMMONS; COMPLAINT by delivering a copy to a person of suitable age."
+        }
+      ]
+    },
+    {
+      "id": "pipe-fp-dmv-address-not-service",
+      "area": "civil_procedure_example",
+      "label": "fp",
+      "filing_name": "533445 2023 Specialized Loan Servi v Specialized Loan Servi AFFIDAVIT OR AFFIRM 64",
+      "filing_text": "Sim ply put, the process server did not attempt to serve Defendant on the third floor, where Defendant reside s at 1739 46th Street, third floor, Brooklyn, NY 11204 .",
+      "exhibits": [
+        {
+          "name": "Exhibit S_55",
+          "text": "1739 46TH STREET 3 HEIGHT: 5-5 EYE COLOR: BROWN BROOKLYN NY 11204"
+        }
+      ]
+    },
+    {
+      "id": "pipe-fp-ocr-aos-third-floor",
+      "area": "civil_procedure_example",
+      "label": "fp",
+      "filing_name": "533445 2023 Specialized Loan Servi v Specialized Loan Servi AFFIDAVIT OR AFFIRM 58",
+      "filing_text": "5' As the process server did not attempt to serve me on the third floor, where I reside at 1739 46th Street, third floor, Brooklyn, NY 11204, service is defective and the Complaint should be dismissed for lack of personal jurisdiction.",
+      "exhibits": [
+        {
+          "name": "Exhibit S_53",
+          "text": "On 12/14 / 2023 at 9:08 PM at 1739 46TH STREET 3 BROOKLYN, NEW YORK 11204,1served the within SUMMONS ; COMPLAINT FOR MORTGAGE FORECLOSURE which contains the additional notice requirements in accordance with RPAPL §1320"
+        }
+      ]
+    },
+    {
+      "id": "pipe-tp-own-exhibit-residence",
+      "area": "civil_procedure_example",
+      "label": "tp",
+      "filing_name": "Defendant affidavit",
+      "filing_text": "I did not live at 1739 46th Street at the time of the alleged service. I attach the utility bill as proof.",
+      "exhibits": [
+        {
+          "name": "Exhibit A utility bill",
+          "text": "Con Edison bill for November 2023 lists service address 1739 46th Street, Apt 3, Brooklyn NY 11204 for the named customer."
+        }
+      ]
     }
   ]
 }

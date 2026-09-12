@@ -71,10 +71,14 @@ const DOC_KIND_OPTIONS = [
   ["order", "Order"],
   ["affidavit", "Affidavit"],
   ["affirmation", "Affirmation"],
+  ["proof_of_service", "Affidavit of service"],
   ["summons", "Summons"],
   ["stipulation", "Stipulation"],
   ["transcript", "Transcript"],
   ["letter", "Letter"],
+  ["notice", "Notice"],
+  ["filing", "Administrative filing"],
+  ["rji", "RJI"],
   ["exhibit", "Exhibit (forensic)"],
   ["bill", "Statement / bill (forensic)"],
   ["evidence", "Evidence (forensic)"],
@@ -83,11 +87,12 @@ const DOC_KIND_OPTIONS = [
 const COURT_FILING_KINDS = new Set([
   "complaint", "answer", "motion", "order", "affidavit", "affirmation",
   "letter", "stipulation", "transcript", "summons", "notice", "brief",
-  "memorandum", "reply", "opposition", "filing",
+  "memorandum", "reply", "opposition", "filing", "proof_of_service",
+  "rji", "notice_of_pendency", "calendar",
 ]);
 
 function profileForKind(kind) {
-  if (!kind) return "auto (pleading vs exhibit)";
+  if (!kind) return "needs review — kind not set (not a risk score)";
   return COURT_FILING_KINDS.has((kind || "").toLowerCase()) ? "court filing" : "exhibit forensic";
 }
 
@@ -848,7 +853,7 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
                       }
                     }}
                   >
-                    <option value="">Unknown (auto: pleading vs exhibit)</option>
+                    <option value="">Unknown — needs review</option>
                     {DOC_KIND_OPTIONS.map(([value, label]) => (
                       <option key={value} value={value}>{label}</option>
                     ))}
@@ -975,9 +980,14 @@ function CaseGotchaBoard({ caseId, documents, onOpenReport }) {
                 {item.evidence_source ? ` — ${item.evidence_source}` : ""}
               </p>
             )}
-            {item.self_undercut && (
+            {item.tainted_support ? (
+              <p className="footnote">
+                They produced this record in support of the claim, and the record itself appears
+                fraudulent or false.
+              </p>
+            ) : item.self_undercut ? (
               <p className="footnote">This party’s own record appears to undercut their claim.</p>
-            )}
+            ) : null}
             {(item.attorney_why || item.materiality_reason || item.fact_named) && (
               <p className="gotcha-why">
                 {item.attorney_why

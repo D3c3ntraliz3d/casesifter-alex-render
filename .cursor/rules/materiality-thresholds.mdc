@@ -5,9 +5,15 @@ alwaysApply: true
 
 # Gotchas only
 
+This is systematic pattern detection and contradiction spotting with evidence fraud analysis. It is not argument synthesis. Do not assemble a party's case, pair competing recitals as impeachment, or write advocacy.
+
 A gotcha is a claim checked against real evidence (sworn, documentary, or an entered court act) that passes all four: same nameable fact, evidence runs AGAINST the claim, material to an element/procedure/credibility/damages, and both quotes are in the pulled text. Two motions or a claim vs a proposed order is advocacy, not a gotcha. A model pass without those four completed steps does not ship. When a pair is ambiguous, suppress it.
 
-Related documents that show a defect about the same subject often SUPPORT a denial. That is not a gotcha. Shared topic or person is not the same fact.
+Related documents that show a defect about the same subject often SUPPORT a denial. That is not a gotcha. Shared topic, person, or caption is not the same fact. Evidence that restates the claim (not settled / case not settled; I live at X / a record lists X) is FOR, not against.
+
+He-said-she-said is not a gotcha. A denial versus the other side's competing recital (including a bare service denial versus an affidavit of service, or a service-attempt claim versus a DMV/address printout that lists or supports the same address) is the ordinary dispute. The gotcha is when that party produces evidence and that evidence is fraudulent or false — their exhibit undercuts the claim, or the fraud/forensic check flags the exhibit they offered.
+
+Recorded public instruments (mortgages, deeds, assignments) are not bank statements. Do not treat rounding, loan-math, or similar numeric quirks on those records as findings unless there is a genuine alteration or fraud signal.
 
 Do not hardcode practice-area phrases. Types are only: factual contradiction, chronology inconsistency, material omission, procedural/foundational, admission against interest.
 

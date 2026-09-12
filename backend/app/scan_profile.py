@@ -96,8 +96,9 @@ def scan_profile_for_kind(doc_kind: str | None) -> str:
         return PROFILE_COURT_FILING
     if kind in EXHIBIT_KINDS:
         return PROFILE_FORENSIC
-    # Unknown / blank: treat as exhibit so alteration checks still run by default.
-    return PROFILE_FORENSIC
+    # Unknown is not a risk signal. Do not send administrative NYSCEF forms
+    # through exhibit forensics just because the kind dropdown is blank.
+    return PROFILE_COURT_FILING
 
 
 def is_court_filing(doc_kind: str | None) -> bool:
@@ -128,7 +129,7 @@ def resolve_scan_profile(doc_kind: str | None, peek_text: str = "") -> str:
     if kind in EXHIBIT_KINDS:
         return PROFILE_FORENSIC
     inferred = infer_profile_from_text(peek_text)
-    return inferred or PROFILE_FORENSIC
+    return inferred or PROFILE_COURT_FILING
 
 
 def peek_pdf_text(path: Path, max_pages: int = 2) -> str:
