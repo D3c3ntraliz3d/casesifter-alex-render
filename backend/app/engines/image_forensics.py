@@ -14,14 +14,39 @@ from app.ingestion import extract_embedded_images, load_image, render_pdf_pages
 from app.models import Finding, ModuleResult
 from app.storage import artifact_dir
 
-def analyze_image_forensics(path: Path, job_id: str) -> ModuleResult:
-    return timed_module("image_forensics", lambda: _run(path, job_id))
+def analyze_image_forensics(
+    path: Path,
+    job_id: str,
+    origin: dict[str, Any] | None = None,
+) -> ModuleResult:
+    return timed_module("image_forensics", lambda: _run(path, job_id, origin or {}))
 
 
-def _run(path: Path, job_id: str) -> tuple[list[Finding], dict[str, Any]]:
+def _run(
+    path: Path, job_id: str, origin: dict[str, Any]
+) -> tuple[list[Finding], dict[str, Any]]:
     findings: list[Finding] = []
     artifacts: list[str] = []
-    extras: dict[str, Any] = {"pages_analyzed": 0, "artifacts": artifacts}
+    # Court exhibits are almost always scans of paper or photos of paper. Copy-move and
+    # ELA fire constantly on form lines, stamps, and JPEG scan texture unless we soft-pedal.
+    suffix = path.suffix.lower()
+    digitally_born_pdf = (
+        suffix == ".pdf"
+        and origin.get("guess") == "native-text"
+        and not origin.get("scan_heavy")
+    )
+    scan_heavy = (
+        bool(origin.get("scan_heavy"))
+        or origin.get("guess") in {"image-only", "mostly-scanned", "scanned", "hybrid"}
+        or suffix in {".jpg", ".jpeg", ".png", ".gif"}
+        or (suffix == ".pdf" and not digitally_born_pdf)
+    )
+    extras: dict[str, Any] = {
+        "pages_analyzed": 0,
+        "artifacts": artifacts,
+        "scan_heavy": scan_heavy,
+        "origin_guess": origin.get("guess"),
+    }
     images = _collect_images(path)
     extras["pages_analyzed"] = len(images)
     if not images:
@@ -39,56 +64,76 @@ def _run(path: Path, job_id: str) -> tuple[list[Finding], dict[str, Any]]:
         artifacts.append(ela_name)
 
         if ela_score >= 18 and ela_blob >= 450 and 0.004 <= ela_hotspots <= 0.18:
-            findings.append(
-                finding(
-                    fid=f"img-ela-{prefix}",
-                    category="image",
-                    severity="high" if ela_score >= 40 else "medium",
-                    title=f"Uneven JPEG recompression in {label}",
-                    explanation=(
-                        f"Error Level Analysis found localized patches that recompress differently "
-                        f"(score {ela_score:.1f}, hotspot coverage {ela_hotspots:.1%}). "
-                        "That pattern often appears when part of an image was pasted from another photo."
-                    ),
-                    why_suspicious="Spliced regions usually have a different JPEG history than the rest of the frame.",
-                    confidence=min(92, 50 + ela_score),
-                    page=page_no,
-                    evidence={
-                        "heatmap": f"/api/jobs/{job_id}/artifacts/{ela_name}",
-                        "ela_score": round(ela_score, 2),
-                        "hotspot_ratio": round(ela_hotspots, 4),
-                        "largest_blob_px": ela_blob,
-                    },
-                    recommended_action="Inspect the ELA heatmap. Bright regions deserve a closer look, not an automatic fraud finding.",
+            if scan_heavy:
+                # Scanned pages re-JPEG differently across the sheet; keep as a soft note only
+                # when the signal is extreme.
+                if ela_score >= 48 and ela_blob >= 1200:
+                    findings.append(
+                        finding(
+                            fid=f"img-ela-{prefix}",
+                            category="image",
+                            severity="info",
+                            title=f"Uneven recompression on scanned page {label}",
+                            explanation=(
+                                f"Error Level Analysis found localized patches (score {ela_score:.1f}). "
+                                "On a scanned exhibit this is often scanner JPEG texture, not a paste. "
+                                "Worth a glance at the heatmap only if a specific field looks retouched."
+                            ),
+                            why_suspicious=(
+                                "Weak signal on scan-heavy PDFs. Digitally born photos with sharp ELA "
+                                "edges remain more meaningful."
+                            ),
+                            confidence=32,
+                            page=page_no,
+                            evidence={
+                                "heatmap": f"/api/jobs/{job_id}/artifacts/{ela_name}",
+                                "ela_score": round(ela_score, 2),
+                                "hotspot_ratio": round(ela_hotspots, 4),
+                                "largest_blob_px": ela_blob,
+                                "scan_heavy": True,
+                            },
+                        )
+                    )
+            else:
+                findings.append(
+                    finding(
+                        fid=f"img-ela-{prefix}",
+                        category="image",
+                        severity="high" if ela_score >= 40 else "medium",
+                        title=f"Uneven JPEG recompression in {label}",
+                        explanation=(
+                            f"Error Level Analysis found localized patches that recompress differently "
+                            f"(score {ela_score:.1f}, hotspot coverage {ela_hotspots:.1%}). "
+                            "That pattern often appears when part of an image was pasted from another photo."
+                        ),
+                        why_suspicious="Spliced regions usually have a different JPEG history than the rest of the frame.",
+                        confidence=min(92, 50 + ela_score),
+                        page=page_no,
+                        evidence={
+                            "heatmap": f"/api/jobs/{job_id}/artifacts/{ela_name}",
+                            "ela_score": round(ela_score, 2),
+                            "hotspot_ratio": round(ela_hotspots, 4),
+                            "largest_blob_px": ela_blob,
+                        },
+                        recommended_action="Inspect the ELA heatmap. Bright regions deserve a closer look, not an automatic fraud finding.",
+                    )
                 )
-            )
 
         overlay, match_count, match_shift = detect_copy_move(image)
-        if overlay is not None and match_count >= 12:
-            cm_name = f"{prefix}-copymove.png"
-            overlay.save(out / cm_name)
-            artifacts.append(cm_name)
-            findings.append(
-                finding(
-                    fid=f"img-copymove-{prefix}",
-                    category="image",
-                    severity="high",
-                    title=f"Repeated (cloned) regions in {label}",
-                    explanation=(
-                        f"Copy-move analysis found {match_count} matching blocks offset by "
-                        f"about {match_shift} pixels. Cloning is used to hide content or duplicate stamps/signatures."
-                    ),
-                    why_suspicious="Natural photographs rarely contain large duplicated pixel patches at a consistent offset.",
-                    confidence=min(90, 55 + match_count),
-                    page=page_no,
-                    evidence={
-                        "heatmap": f"/api/jobs/{job_id}/artifacts/{cm_name}",
-                        "matches": match_count,
-                        "offset": match_shift,
-                    },
-                    recommended_action="Compare the highlighted regions. Repeated background texture can be a false alarm; repeated numbers or signatures are more serious.",
-                )
-            )
+        clone_finding = _copy_move_finding(
+            label=label,
+            page_no=page_no,
+            job_id=job_id,
+            prefix=prefix,
+            overlay=overlay,
+            match_count=match_count,
+            match_shift=match_shift,
+            scan_heavy=scan_heavy,
+            out=out,
+            artifacts=artifacts,
+        )
+        if clone_finding:
+            findings.append(clone_finding)
 
         dpi_finding = _dpi_and_quality(image, label, page_no, path)
         if dpi_finding:
@@ -99,6 +144,86 @@ def _run(path: Path, job_id: str) -> tuple[list[Finding], dict[str, Any]]:
             findings.append(crop_finding)
 
     return findings, extras
+
+
+def _copy_move_finding(
+    *,
+    label: str,
+    page_no: int | None,
+    job_id: str,
+    prefix: str,
+    overlay: Image.Image | None,
+    match_count: int,
+    match_shift: tuple[int, int],
+    scan_heavy: bool,
+    out: Path,
+    artifacts: list[str],
+) -> Finding | None:
+    if overlay is None or match_count < 12:
+        return None
+
+    cm_name = f"{prefix}-copymove.png"
+    overlay.save(out / cm_name)
+    artifacts.append(cm_name)
+    evidence = {
+        "heatmap": f"/api/jobs/{job_id}/artifacts/{cm_name}",
+        "matches": match_count,
+        "offset": match_shift,
+        "scan_heavy": scan_heavy,
+    }
+
+    # Pure horizontal/vertical offsets are extremely common on scanned forms (ruled lines,
+    # letterhead repeats, column structure). Treat those as packaging noise on scans.
+    axis_aligned = match_shift[0] == 0 or match_shift[1] == 0
+
+    if scan_heavy:
+        # Default: do not raise clone warnings on scanned exhibits.
+        # Only surface an informational note when the vote count is extreme and not a
+        # simple form-line shift.
+        if match_count < 55 or axis_aligned:
+            return None
+        return finding(
+            fid=f"img-copymove-{prefix}",
+            category="image",
+            severity="info",
+            title=f"Repeated blocks on scanned page {label}",
+            explanation=(
+                f"Copy-move analysis found {match_count} matching blocks offset by about "
+                f"{match_shift} pixels. This file looks like a scan of paper. Matching blocks "
+                "on scans usually come from form lines, stamps, or JPEG texture — not cloning. "
+                "Check the overlay only if a signature, amount, or stamp looks duplicated by eye."
+            ),
+            why_suspicious=(
+                "Not a primary fraud signal for scanned court exhibits. Digitally born photos "
+                "with cloned patches remain more meaningful."
+            ),
+            confidence=28,
+            page=page_no,
+            evidence=evidence,
+            recommended_action=(
+                "Ignore unless the highlighted regions are clearly the same signature, stamp, "
+                "or dollar amount pasted twice."
+            ),
+        )
+
+    return finding(
+        fid=f"img-copymove-{prefix}",
+        category="image",
+        severity="high",
+        title=f"Repeated (cloned) regions in {label}",
+        explanation=(
+            f"Copy-move analysis found {match_count} matching blocks offset by "
+            f"about {match_shift} pixels. Cloning is used to hide content or duplicate stamps/signatures."
+        ),
+        why_suspicious="Natural photographs rarely contain large duplicated pixel patches at a consistent offset.",
+        confidence=min(90, 55 + match_count),
+        page=page_no,
+        evidence=evidence,
+        recommended_action=(
+            "Compare the highlighted regions. Repeated background texture can be a false alarm; "
+            "repeated numbers or signatures are more serious."
+        ),
+    )
 
 
 def _collect_images(path: Path) -> list[tuple[str, Image.Image]]:

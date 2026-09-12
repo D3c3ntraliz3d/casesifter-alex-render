@@ -101,7 +101,11 @@ def run_pipeline(
         structural = analyze_structural(source)
 
         update_job(job_id, stage="image_forensics", percent=60, message="Running image manipulation detection…")
-        images = analyze_image_forensics(source, job_id)
+        images = analyze_image_forensics(
+            source,
+            job_id,
+            origin=(pdf.extras or {}).get("origin_guess") or {},
+        )
 
     update_job(
         job_id,
