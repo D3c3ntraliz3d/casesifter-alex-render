@@ -139,6 +139,9 @@ ORG_STOPWORDS = {
     "the company",
     "the group",
     "case",
+    "partners",
+    "partners, pllc",
+    "partners pllc",
 }
 
 # PDF text extraction joins lines with spaces, so a heading or street line runs straight
@@ -1179,6 +1182,15 @@ def _clean_org(raw: str) -> str | None:
         return None
     lowered = name.lower()
     if any(lowered.startswith(word) for word in ORG_STOPWORDS):
+        return None
+    if lowered in ORG_STOPWORDS:
+        return None
+    # Counsel letterhead is ubiquitous on pleadings; do not treat it as a case party/issuer.
+    if re.search(r"\b(pllc|l\.l\.p\.?|llp)\b", lowered) and not re.search(
+        r"\b(bank|trust|national\s+grid|edison|verizon|citibank)\b", lowered
+    ):
+        return None
+    if re.search(r"\b(attorney|attorneys|law\s+office|law\s+firm|counsel)\b", lowered):
         return None
     if not re.search(r"[a-z]", name):  # all-caps headers like "TERMS AND CO"
         return None

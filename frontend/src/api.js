@@ -33,6 +33,14 @@ export function exportUrl(jobId, kind) {
   return `/api/jobs/${jobId}/export/${kind}`;
 }
 
+export function documentFileUrl(caseId, documentId) {
+  return `/api/cases/${caseId}/documents/${documentId}/file`;
+}
+
+export function jobSourceUrl(jobId) {
+  return `/api/jobs/${jobId}/source`;
+}
+
 export async function listCases() {
   const res = await fetch("/api/cases", { headers: jsonHeaders });
   const data = await readJson(res);

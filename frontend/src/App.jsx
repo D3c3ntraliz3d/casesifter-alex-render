@@ -2,10 +2,12 @@ import { useEffect, useRef, useState } from "react";
 import { FolderOpen, ShieldAlert, Upload } from "lucide-react";
 import {
   createCase,
+  documentFileUrl,
   exportUrl,
   getCase,
   getEntitlement,
   getJob,
+  jobSourceUrl,
   listCases,
   loginCloud,
   logoutCloud,
@@ -254,6 +256,12 @@ export default function App() {
               tab={tab}
               setTab={setTab}
               docKind={caseData?.documents?.find((d) => d.id === selectedDocId)?.doc_kind}
+              caseId={caseId}
+              documentId={selectedDocId}
+              documentName={
+                caseData?.documents?.find((d) => d.id === selectedDocId)?.display_name
+                || job.filename
+              }
             />
           )}
         </>
@@ -681,16 +689,25 @@ function ProgressPanel({ job, filename }) {
   );
 }
 
-function ReportViewer({ job, report, findings, tab, setTab, docKind }) {
+function ReportViewer({ job, report, findings, tab, setTab, docKind, caseId, documentId, documentName }) {
   const material = findings.filter((f) => f.severity !== "info");
   const caseAlerts = findings.filter((f) => f.category === "case_consistency");
+  const [showDoc, setShowDoc] = useState(true);
+  const fileUrl = caseId && documentId
+    ? documentFileUrl(caseId, documentId)
+    : jobSourceUrl(job.job_id);
+  const lowerName = (documentName || job.filename || "").toLowerCase();
+  const isPdf = lowerName.endsWith(".pdf");
+  const isImage = /\.(png|jpe?g|gif)$/i.test(lowerName);
+  const isText = lowerName.endsWith(".txt");
+
   return (
     <>
       <div className="card">
         <div className="row" style={{ justifyContent: "space-between" }}>
           <div>
             <p className="kicker">Authenticity report</p>
-            <h2 className="serif" style={{ margin: "4px 0 8px" }}>{report.audit.filename}</h2>
+            <h2 className="serif" style={{ margin: "4px 0 8px" }}>{documentName || report.audit.filename}</h2>
             <span className={`risk ${report.risk_level}`}>
               <ShieldAlert size={16} />
               {RISK[report.risk_level]} · {report.risk_score}/100
@@ -710,6 +727,16 @@ function ReportViewer({ job, report, findings, tab, setTab, docKind }) {
             )}
           </div>
           <div className="actions">
+            <button
+              className={`btn ${showDoc ? "gold" : "secondary"}`}
+              type="button"
+              onClick={() => setShowDoc((v) => !v)}
+            >
+              {showDoc ? "Hide document" : "View document"}
+            </button>
+            <a className="btn secondary" href={fileUrl} target="_blank" rel="noreferrer">
+              Open in new tab
+            </a>
             <a className="btn gold" href={exportUrl(job.job_id, "html")}>Export HTML</a>
             <a className="btn" href={exportUrl(job.job_id, "pdf")}>Export PDF</a>
             <a className="btn secondary" href={exportUrl(job.job_id, "json")}>Export JSON</a>
@@ -718,130 +745,172 @@ function ReportViewer({ job, report, findings, tab, setTab, docKind }) {
         <p style={{ marginTop: 16 }}>{report.executive_summary}</p>
       </div>
 
-      <div className="card">
-        <div className="tabs">
-          {TABS.map(([id, label]) => (
-            <button key={id} className={tab === id ? "active" : ""} onClick={() => setTab(id)}>
-              {label}
-            </button>
-          ))}
-        </div>
+      <div className={`report-layout ${showDoc ? "with-doc" : ""}`}>
+        {showDoc && (
+          <div className="card doc-pane">
+            <div className="row" style={{ justifyContent: "space-between", marginBottom: 10 }}>
+              <p className="kicker" style={{ margin: 0 }}>Source document</p>
+              <a className="footnote" href={fileUrl} target="_blank" rel="noreferrer">Fullscreen</a>
+            </div>
+            <DocumentPreview url={fileUrl} isPdf={isPdf} isImage={isImage} isText={isText} name={lowerName} />
+          </div>
+        )}
 
-        {tab === "summary" && (
-          <div className="grid-2">
+        <div className="card report-pane">
+          <div className="tabs">
+            {TABS.map(([id, label]) => (
+              <button key={id} className={tab === id ? "active" : ""} onClick={() => setTab(id)}>
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {tab === "summary" && (
+            <div className="grid-2">
+              <div>
+                <h3 className="serif">Top findings</h3>
+                {(report.top_findings || []).length === 0 && <p>No material findings.</p>}
+                {(report.top_findings || []).map((item) => (
+                  <FindingCard key={item.id} item={item} docKind={docKind} />
+                ))}
+              </div>
+              <div>
+                <h3 className="serif">Recommended actions</h3>
+                <ol>
+                  {(report.recommended_actions || []).map((action) => (
+                    <li key={action}>{action}</li>
+                  ))}
+                </ol>
+                <p className="disclaimer">{report.disclaimer}</p>
+              </div>
+            </div>
+          )}
+
+          {tab === "findings" && (
             <div>
-              <h3 className="serif">Top findings</h3>
-              {(report.top_findings || []).length === 0 && <p>No material findings.</p>}
-              {(report.top_findings || []).map((item) => (
+              <p className="footnote">{material.length} material finding(s), {findings.length} total including notes.</p>
+              {findings.map((item) => (
                 <FindingCard key={item.id} item={item} docKind={docKind} />
               ))}
+              {findings.length === 0 && <p>The automated modules did not flag this file.</p>}
             </div>
-            <div>
-              <h3 className="serif">Recommended actions</h3>
-              <ol>
-                {(report.recommended_actions || []).map((action) => (
-                  <li key={action}>{action}</li>
-                ))}
-              </ol>
-              <p className="disclaimer">{report.disclaimer}</p>
-            </div>
-          </div>
-        )}
+          )}
 
-        {tab === "findings" && (
-          <div>
-            <p className="footnote">{material.length} material finding(s), {findings.length} total including notes.</p>
-            {findings.map((item) => (
-              <FindingCard key={item.id} item={item} docKind={docKind} />
-            ))}
-            {findings.length === 0 && <p>The automated modules did not flag this file.</p>}
-          </div>
-        )}
-
-        {tab === "timeline" && (
-          <table className="data">
-            <thead>
-              <tr>
-                <th>Event</th>
-                <th>Timestamp</th>
-                <th>Source</th>
-                <th>Note</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(report.timeline || []).map((event, i) => (
-                <tr key={`${event.label}-${i}`}>
-                  <td>{event.label}{event.anomaly ? " ⚠" : ""}</td>
-                  <td>{event.timestamp || "—"}</td>
-                  <td>{event.source}</td>
-                  <td>{event.note || ""}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-
-        {tab === "comparison" && (
-          <>
-            <h3 className="serif">Page dimensions</h3>
+          {tab === "timeline" && (
             <table className="data">
               <thead>
                 <tr>
-                  <th>Page</th><th>W (pt)</th><th>H (pt)</th><th>W (px)</th><th>H (px)</th><th>DPI</th><th>Orientation</th>
+                  <th>Event</th>
+                  <th>Timestamp</th>
+                  <th>Source</th>
+                  <th>Note</th>
                 </tr>
               </thead>
               <tbody>
-                {(report.page_dimensions || []).map((dim) => (
-                  <tr key={dim.page}>
-                    <td>{dim.page}</td>
-                    <td>{fmt(dim.width_pts)}</td>
-                    <td>{fmt(dim.height_pts)}</td>
-                    <td>{fmt(dim.width_px)}</td>
-                    <td>{fmt(dim.height_px)}</td>
-                    <td>{fmt(dim.dpi)}</td>
-                    <td>{dim.orientation || "—"}</td>
+                {(report.timeline || []).map((event, i) => (
+                  <tr key={`${event.label}-${i}`}>
+                    <td>{event.label}{event.anomaly ? " ⚠" : ""}</td>
+                    <td>{event.timestamp || "—"}</td>
+                    <td>{event.source}</td>
+                    <td>{event.note || ""}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
-            <h3 className="serif" style={{ marginTop: 20 }}>Fonts</h3>
-            {(report.fonts || []).length === 0 && <p>No embedded font inventory for this file type.</p>}
-            {(report.fonts || []).length > 0 && (
+          )}
+
+          {tab === "comparison" && (
+            <>
+              <h3 className="serif">Page dimensions</h3>
               <table className="data">
                 <thead>
-                  <tr><th>Font</th><th>Pages</th><th>Sizes</th><th>Sample</th></tr>
+                  <tr>
+                    <th>Page</th><th>W (pt)</th><th>H (pt)</th><th>W (px)</th><th>H (px)</th><th>DPI</th><th>Orientation</th>
+                  </tr>
                 </thead>
                 <tbody>
-                  {report.fonts.map((font) => (
-                    <tr key={font.name}>
-                      <td>{font.name}</td>
-                      <td>{(font.pages || []).join(", ")}</td>
-                      <td>{(font.sizes || []).join(", ")}</td>
-                      <td>{font.sample || ""}</td>
+                  {(report.page_dimensions || []).map((dim) => (
+                    <tr key={dim.page}>
+                      <td>{dim.page}</td>
+                      <td>{fmt(dim.width_pts)}</td>
+                      <td>{fmt(dim.height_pts)}</td>
+                      <td>{fmt(dim.width_px)}</td>
+                      <td>{fmt(dim.height_px)}</td>
+                      <td>{fmt(dim.dpi)}</td>
+                      <td>{dim.orientation || "—"}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
-            )}
-          </>
-        )}
+              <h3 className="serif" style={{ marginTop: 20 }}>Fonts</h3>
+              {(report.fonts || []).length === 0 && <p>No embedded font inventory for this file type.</p>}
+              {(report.fonts || []).length > 0 && (
+                <table className="data">
+                  <thead>
+                    <tr><th>Font</th><th>Pages</th><th>Sizes</th><th>Sample</th></tr>
+                  </thead>
+                  <tbody>
+                    {report.fonts.map((font) => (
+                      <tr key={font.name}>
+                        <td>{font.name}</td>
+                        <td>{(font.pages || []).join(", ")}</td>
+                        <td>{(font.sizes || []).join(", ")}</td>
+                        <td>{font.sample || ""}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </>
+          )}
 
-        {tab === "audit" && (
-          <table className="data">
-            <tbody>
-              <tr><th>Scanned at</th><td>{report.audit.scanned_at}</td></tr>
-              <tr><th>Submitted by</th><td>{report.audit.submitted_by}</td></tr>
-              <tr><th>Analysis version</th><td>{report.audit.analysis_version}</td></tr>
-              <tr><th>Modules</th><td>{(report.audit.modules_run || []).join(", ")}</td></tr>
-              <tr><th>File type</th><td>{report.audit.file_type}</td></tr>
-              <tr><th>Size</th><td>{report.audit.file_size_bytes} bytes</td></tr>
-              <tr><th>SHA-256</th><td style={{ wordBreak: "break-all" }}>{report.audit.sha256}</td></tr>
-              <tr><th>Job ID</th><td>{job.job_id}</td></tr>
-            </tbody>
-          </table>
-        )}
+          {tab === "audit" && (
+            <table className="data">
+              <tbody>
+                <tr><th>Scanned at</th><td>{report.audit.scanned_at}</td></tr>
+                <tr><th>Submitted by</th><td>{report.audit.submitted_by}</td></tr>
+                <tr><th>Analysis version</th><td>{report.audit.analysis_version}</td></tr>
+                <tr><th>Modules</th><td>{(report.audit.modules_run || []).join(", ")}</td></tr>
+                <tr><th>File type</th><td>{report.audit.file_type}</td></tr>
+                <tr><th>Size</th><td>{report.audit.file_size_bytes} bytes</td></tr>
+                <tr><th>SHA-256</th><td style={{ wordBreak: "break-all" }}>{report.audit.sha256}</td></tr>
+                <tr><th>Job ID</th><td>{job.job_id}</td></tr>
+              </tbody>
+            </table>
+          )}
+        </div>
       </div>
     </>
+  );
+}
+
+function DocumentPreview({ url, isPdf, isImage, isText, name }) {
+  if (isPdf) {
+    return (
+      <iframe
+        className="doc-frame"
+        title="Source document"
+        src={`${url}#view=FitH`}
+      />
+    );
+  }
+  if (isImage) {
+    return (
+      <div className="doc-image-wrap">
+        <img className="doc-image" src={url} alt="Source document" />
+      </div>
+    );
+  }
+  if (isText) {
+    return (
+      <iframe className="doc-frame" title="Source document" src={url} />
+    );
+  }
+  return (
+    <div className="doc-fallback">
+      <p>Inline preview is not available for this file type{name ? ` (${name})` : ""}.</p>
+      <a className="btn" href={url} target="_blank" rel="noreferrer">Download / open file</a>
+    </div>
   );
 }
 

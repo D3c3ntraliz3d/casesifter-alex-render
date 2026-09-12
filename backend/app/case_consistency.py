@@ -1,6 +1,11 @@
 """Compare a newly scanned document against prior case snapshots.
 
 Emits findings on the *new* document that name the conflicting prior file and fact.
+
+Court filings share counsel letterhead (e.g. "Partners, PLLC") and many different
+signature / service dates in the same month. Those must not fan out into hundreds of
+false "inconsistent with Doc X" alerts. Comparisons require a substantive shared party
+or issuer — not counsel alone.
 """
 
 from __future__ import annotations
@@ -11,11 +16,21 @@ from typing import Any
 
 from app.engines import finding
 from app.models import Finding
+from app.scan_profile import COURT_FILING_KINDS
 
 
 AMOUNT_RE = re.compile(
     r"(?i)(?:total|balance|amount\s+due|new\s+charges|payment)\D{0,24}"
     r"(\$?\s?\d{1,3}(?:,\d{3})*(?:\.\d{2})?)"
+)
+
+COUNSEL_ORG_RE = re.compile(
+    r"(?i)\b("
+    r"pllc|l\.l\.p\.?|llp|"
+    r"attorney|attorneys|counsel|esquire|esq|"
+    r"law\s+office|law\s+offices|law\s+firm|law\s+group|"
+    r"partners,?\s+pllc"
+    r")\b"
 )
 
 
@@ -74,31 +89,36 @@ def compare_to_case(
     new_amounts: list[dict[str, Any]],
     new_fingerprint: str | None,
     prior_snapshots: list[dict[str, Any]],
+    new_doc_kind: str | None = None,
 ) -> list[Finding]:
     """Return case-consistency findings for the newly scanned document."""
     findings: list[Finding] = []
-    new_orgs = {_norm(x) for x in (new_entities.get("organizations") or []) if x}
+    new_orgs = _substance_orgs(new_entities.get("organizations") or [])
     new_locs = {_norm(x) for x in (new_entities.get("locations") or []) if x}
     new_dates = set(new_entities.get("dates") or [])
     new_amount_values = {a["value"] for a in new_amounts if a.get("value")}
+    new_is_filing = _is_court_filing_kind(new_doc_kind)
 
     for prior in prior_snapshots:
         prior_name = prior.get("display_name") or prior.get("original_filename") or "prior document"
         prior_id = prior.get("document_id")
         prior_entities = prior.get("entities") or {}
-        prior_orgs = {_norm(x) for x in (prior_entities.get("organizations") or []) if x}
+        prior_orgs = _substance_orgs(prior_entities.get("organizations") or [])
         prior_locs = {_norm(x) for x in (prior_entities.get("locations") or []) if x}
         prior_dates = set(prior_entities.get("dates") or [])
         prior_amounts = {a.get("value") for a in (prior.get("amounts") or []) if a.get("value")}
+        prior_is_filing = _is_court_filing_kind(prior.get("doc_kind"))
 
         shared_orgs = sorted(new_orgs & prior_orgs)
-        if not shared_orgs and not (new_fingerprint and new_fingerprint == prior.get("text_fingerprint")):
-            # Unrelated documents in the same case are normal; only compare when they share an issuer
-            # or look like near-duplicates.
+        same_fingerprint = bool(
+            new_fingerprint and prior.get("text_fingerprint") and new_fingerprint == prior["text_fingerprint"]
+        )
+
+        if not shared_orgs and not same_fingerprint:
             continue
 
-        # Near-duplicate under a different name still deserves a note, not a fraud alert.
-        if new_fingerprint and prior.get("text_fingerprint") and new_fingerprint == prior["text_fingerprint"]:
+        # Near-duplicate under a different name.
+        if same_fingerprint:
             findings.append(
                 _case_finding(
                     prior_id=prior_id,
@@ -118,8 +138,15 @@ def compare_to_case(
                 )
             )
 
-        # Same issuer, conflicting service locations.
-        if shared_orgs and new_locs and prior_locs:
+        # Two pleadings that only share counsel letterhead are not comparable for dates/locales.
+        if new_is_filing and prior_is_filing and not shared_orgs:
+            continue
+        if not shared_orgs:
+            continue
+
+        # Same issuer / party, conflicting service locations (exhibit-style signal).
+        # Skip between two court filings — counsel vs property addresses differ by design.
+        if not (new_is_filing and prior_is_filing) and new_locs and prior_locs:
             only_new = sorted(new_locs - prior_locs)
             only_prior = sorted(prior_locs - new_locs)
             if only_new and only_prior and not (new_locs & prior_locs):
@@ -142,9 +169,7 @@ def compare_to_case(
                     )
                 )
 
-        # Shared org + shared label-ish amounts that disagree for the same numeric field family.
-        if shared_orgs and new_amount_values and prior_amounts:
-            # Flag only when both discuss totals/balances and values diverge sharply for same org pair.
+        if not (new_is_filing and prior_is_filing) and new_amount_values and prior_amounts:
             if not (new_amount_values & prior_amounts) and len(new_amount_values) <= 6 and len(prior_amounts) <= 6:
                 findings.append(
                     _case_finding(
@@ -165,41 +190,62 @@ def compare_to_case(
                     )
                 )
 
-        # Date clusters for the same issuer that are years apart beyond packaging stamps.
-        if shared_orgs and new_dates and prior_dates:
-            new_years = {_year(d) for d in new_dates if _year(d)}
-            prior_years = {_year(d) for d in prior_dates if _year(d)}
-            if new_years and prior_years:
-                gap = abs(min(new_years) - max(prior_years)) if min(new_years) > max(prior_years) else abs(
-                    min(prior_years) - max(new_years)
-                )
-                # Large year gaps for the same issuer can be legitimate (multi-year case). Soft note only
-                # when both claim the same narrow month window with conflicting days — skip broad gaps.
-                overlap_months = _month_keys(new_dates) & _month_keys(prior_dates)
-                if overlap_months and new_dates != prior_dates:
-                    conflicting_new = sorted(d for d in new_dates if d[:7] in overlap_months)[:4]
-                    conflicting_prior = sorted(d for d in prior_dates if d[:7] in overlap_months)[:4]
-                    if set(conflicting_new) != set(conflicting_prior):
-                        findings.append(
-                            _case_finding(
-                                prior_id=prior_id,
-                                prior_name=prior_name,
-                                field="dates",
-                                new_value=", ".join(conflicting_new),
-                                prior_value=", ".join(conflicting_prior),
-                                title=f"Inconsistent with “{prior_name}” — dates",
-                                explanation=(
-                                    f"Both files mention {shared_orgs[0]} with dates in the same month(s) "
-                                    f"({', '.join(sorted(overlap_months)[:3])}) that do not match. "
-                                    f"This file: {', '.join(conflicting_new)}. "
-                                    f"“{prior_name}”: {', '.join(conflicting_prior)}."
-                                ),
-                                why="Edited statement dates often leave a twin exhibit with the original calendar.",
-                                confidence=70,
-                            )
+        # Date conflicts: only for exhibit-style pairs with a substantive shared issuer.
+        # Different signature dates across affirmations/motions in the same month are normal.
+        if not (new_is_filing and prior_is_filing) and new_dates and prior_dates:
+            overlap_months = _month_keys(new_dates) & _month_keys(prior_dates)
+            if overlap_months and new_dates != prior_dates:
+                conflicting_new = sorted(d for d in new_dates if d[:7] in overlap_months)[:4]
+                conflicting_prior = sorted(d for d in prior_dates if d[:7] in overlap_months)[:4]
+                if set(conflicting_new) != set(conflicting_prior):
+                    findings.append(
+                        _case_finding(
+                            prior_id=prior_id,
+                            prior_name=prior_name,
+                            field="dates",
+                            new_value=", ".join(conflicting_new),
+                            prior_value=", ".join(conflicting_prior),
+                            title=f"Inconsistent with “{prior_name}” — dates",
+                            explanation=(
+                                f"Both files mention {shared_orgs[0]} with dates in the same month(s) "
+                                f"({', '.join(sorted(overlap_months)[:3])}) that do not match. "
+                                f"This file: {', '.join(conflicting_new)}. "
+                                f"“{prior_name}”: {', '.join(conflicting_prior)}."
+                            ),
+                            why="Edited statement dates often leave a twin exhibit with the original calendar.",
+                            confidence=70,
                         )
+                    )
 
-    return findings[:12]
+    return findings[:8]
+
+
+def _substance_orgs(names: list[str]) -> set[str]:
+    """Organizations that are parties/issuers — not counsel letterhead."""
+    out: set[str] = set()
+    for name in names:
+        if not name or _is_counsel_org(name):
+            continue
+        out.add(_norm(name))
+    return out
+
+
+def _is_counsel_org(name: str) -> bool:
+    n = _norm(name)
+    if not n:
+        return True
+    if n in {"partners, pllc", "partners pllc", "partners"}:
+        return True
+    if COUNSEL_ORG_RE.search(n):
+        return True
+    # Bare professional suffixes with almost no identity.
+    if re.fullmatch(r"(partners|associates|attorneys?)(,?\s*(pllc|llp|llc|pc))?", n):
+        return True
+    return False
+
+
+def _is_court_filing_kind(kind: str | None) -> bool:
+    return (kind or "").strip().lower() in COURT_FILING_KINDS
 
 
 def _case_finding(

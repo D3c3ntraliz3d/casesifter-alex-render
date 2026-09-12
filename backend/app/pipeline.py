@@ -165,6 +165,7 @@ def run_pipeline(
             new_amounts=amounts,
             new_fingerprint=fingerprint,
             prior_snapshots=priors,
+            new_doc_kind=doc_kind,
         )
         findings.extend(consistency)
         contextual.extras["case_consistency"] = {

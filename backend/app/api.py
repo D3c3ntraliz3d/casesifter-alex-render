@@ -342,6 +342,54 @@ def api_get_document(case_id: str, document_id: str):
     }
 
 
+@router.get("/cases/{case_id}/documents/{document_id}/file")
+def api_document_file(case_id: str, document_id: str):
+    """Serve the original uploaded filing for in-app review beside the report."""
+    _validate_id(case_id)
+    _validate_id(document_id)
+    doc = cases_db.get_document(document_id)
+    if doc is None or doc["case_id"] != case_id:
+        raise HTTPException(404, "Unknown document.")
+    path = Path(doc["stored_path"])
+    if not path.exists() or not path.is_file():
+        raise HTTPException(404, "Stored file is missing on disk.")
+    media = _media_type_for(path)
+    return FileResponse(
+        path,
+        media_type=media,
+        filename=doc.get("original_filename") or path.name,
+        content_disposition_type="inline",
+    )
+
+
+@router.get("/jobs/{job_id}/source")
+def api_job_source(job_id: str):
+    """Serve the exhibit file stored with a scan job (fallback when not in a case)."""
+    source = _source_file(job_id)
+    if source is None:
+        raise HTTPException(404, "No source file for this job.")
+    return FileResponse(
+        source,
+        media_type=_media_type_for(source),
+        filename=source.name,
+        content_disposition_type="inline",
+    )
+
+
+def _media_type_for(path: Path) -> str:
+    suffix = path.suffix.lower()
+    return {
+        ".pdf": "application/pdf",
+        ".txt": "text/plain; charset=utf-8",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".gif": "image/gif",
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    }.get(suffix, "application/octet-stream")
+
+
 @router.get("/report/{job_id}")
 def get_report_alias(job_id: str):
     return get_report(job_id)

@@ -31,6 +31,44 @@ body {
 h1, h2, h3, .serif { font-family: "Libre Baskerville", Georgia, serif; }
 
 .app { max-width: 1180px; margin: 0 auto; padding: 28px 20px 64px; }
+.app:has(.report-layout.with-doc) { max-width: 1480px; }
+
+.report-layout {
+  display: block;
+}
+.report-layout.with-doc {
+  display: grid;
+  grid-template-columns: minmax(320px, 1fr) minmax(360px, 1.05fr);
+  gap: 18px;
+  align-items: start;
+}
+.doc-pane { position: sticky; top: 16px; }
+.doc-frame {
+  width: 100%;
+  height: min(78vh, 920px);
+  border: 1px solid var(--line);
+  background: #fff;
+}
+.doc-image-wrap {
+  max-height: min(78vh, 920px);
+  overflow: auto;
+  border: 1px solid var(--line);
+  background: #fff;
+}
+.doc-image { display: block; max-width: 100%; height: auto; }
+.doc-fallback {
+  border: 1px dashed var(--line);
+  padding: 28px 16px;
+  text-align: center;
+  background: #faf6ee;
+}
+@media (max-width: 980px) {
+  .report-layout.with-doc {
+    grid-template-columns: 1fr;
+  }
+  .doc-pane { position: static; }
+  .doc-frame { height: 55vh; }
+}
 
 .masthead {
   display: flex;
