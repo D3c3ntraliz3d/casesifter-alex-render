@@ -5,8 +5,10 @@ alwaysApply: true
 
 # Gotchas only
 
-A **gotcha** is a specific claim in a pleading or affidavit that hard evidence in another case document proves false. Quote both. If both can be true, do not flag.
+A gotcha is a claim/evidence pair that passes all four: same nameable fact, evidence runs AGAINST the claim, material to an element/procedure/credibility/damages, and both quotes are in the pulled text.
 
-**Flag:** “never received notice” vs certified-mail receipt; “no income” vs pay records; “never knew” vs a letter they were sent; “did not sign” vs a notarized signature; arithmetic on a statement that cannot add up.
+Related documents that show a defect about the same subject often SUPPORT a denial. That is not a gotcha. Shared topic or person is not the same fact.
 
-**Do not flag:** mortgage dated vs recorded; 4.5% vs 4.6%; $318,000 vs $318,500; Jose vs J.; NYSCEF headers; overlapping party names on unrelated exhibits; anything that is a discrepancy rather than a lie.
+Do not hardcode practice-area phrases. Types are only: factual contradiction, chronology inconsistency, material omission, procedural/foundational, admission against interest.
+
+Risk scores from verified findings only — never document type or title.

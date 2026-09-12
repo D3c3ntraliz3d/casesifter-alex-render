@@ -72,8 +72,16 @@ def main() -> None:
     started = 0
     start_failures = 0
     for doc in docs:
-        while len(busy_docs(get(f"{BASE}/api/cases/{CASE}"))) >= 2:
+        waited = 0
+        while True:
+            busy = busy_docs(get(f"{BASE}/api/cases/{CASE}"))
+            if len(busy) < 2:
+                break
             time.sleep(8)
+            waited += 8
+            if waited >= 48:
+                print("BUSY STALE — continuing so a new scan can start", flush=True)
+                break
         name = doc.get("display_name") or doc.get("original_filename")
         try:
             post(f"{BASE}/api/cases/{CASE}/documents/{doc['id']}/scan")

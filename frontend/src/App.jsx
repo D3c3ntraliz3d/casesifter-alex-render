@@ -914,7 +914,9 @@ function CaseGotchaBoard({ caseId, documents, onOpenReport }) {
         return (
           <div key={`${item.id || item.title}-${item.document_id}`} className="gotcha-item">
             <h3>{item.title}</h3>
-            {item.gotcha_level && <p className="footnote">{item.gotcha_level}</p>}
+            {(item.contradiction_type || item.gotcha_level) && (
+              <p className="footnote">{item.gotcha_level || item.contradiction_type}</p>
+            )}
             {item.claim_quote && (
               <p className="gotcha-quote">
                 <strong>Claim:</strong> “{item.claim_quote}”

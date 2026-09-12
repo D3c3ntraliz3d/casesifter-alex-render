@@ -82,6 +82,8 @@ def findings_summary(findings: list[Finding]) -> list[dict[str, Any]]:
                 "analysis_type": (item.evidence or {}).get("analysis_type"),
                 "gotcha": bool((item.evidence or {}).get("gotcha")),
                 "gotcha_level": (item.evidence or {}).get("gotcha_level"),
+                "contradiction_type": (item.evidence or {}).get("contradiction_type"),
+                "verified": bool((item.evidence or {}).get("verified")),
                 "claim_quote": (item.evidence or {}).get("claim_quote"),
                 "evidence_quote": (item.evidence or {}).get("evidence_quote"),
                 "claim_source": (item.evidence or {}).get("claim_source"),

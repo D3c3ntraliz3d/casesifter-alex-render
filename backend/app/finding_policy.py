@@ -159,7 +159,11 @@ def is_material_finding(item: Finding) -> bool:
     if evidence.get("ai_generated"):
         return analysis in MAJOR_AI_TYPES
     if item.category == "gotcha":
-        return bool(evidence.get("gotcha")) and item.severity in {"medium", "high", "critical"}
+        return bool(evidence.get("gotcha") and evidence.get("verified")) and item.severity in {
+            "medium",
+            "high",
+            "critical",
+        }
     if item.category == "case_consistency":
         return bool(evidence.get("material")) and item.severity in {"medium", "high", "critical"}
     if item.id.startswith("img-ela-"):

@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 
 from app.finding_policy import is_material_finding
+from app.gotcha import TYPE_SCORE_WEIGHT
 from app.models import Finding, Report, RiskLevel
 
 
@@ -18,10 +19,11 @@ SEVERITY_RANK = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 
 
 def score_risk(findings: list[Finding]) -> tuple[RiskLevel, int]:
-    """Only major issues move a file off green.
+    """Score from verified findings only — never document type or title.
 
-    Packaging notes (e-filing stamps, page-size mix, AcroForm, scan clone texture,
-    create/modify gaps after NYSCEF restamp) do not interrupt an attorney.
+    Two affidavits (or two exhibits) must score differently if one has verified
+    gotchas and the other does not. Procedural and admission gotchas weigh more
+    than a minor factual inconsistency.
     """
     actionable = [
         f
@@ -30,7 +32,11 @@ def score_risk(findings: list[Finding]) -> tuple[RiskLevel, int]:
     ]
     raw = 0
     for item in actionable:
-        raw += int(SEVERITY_WEIGHT[item.severity] * (item.confidence / 100.0))
+        weight = SEVERITY_WEIGHT[item.severity] * (item.confidence / 100.0)
+        if item.category == "gotcha":
+            gotcha_type = str((item.evidence or {}).get("contradiction_type") or "")
+            weight *= TYPE_SCORE_WEIGHT.get(gotcha_type, 1.15)
+        raw += int(weight)
     score = min(100, raw)
 
     if any(f.severity == "critical" and f.confidence >= 70 for f in actionable):

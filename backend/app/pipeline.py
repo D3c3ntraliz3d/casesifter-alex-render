@@ -194,7 +194,7 @@ def run_pipeline(
             percent=93,
             message="Checking claims against hard evidence in this case…",
         )
-        gotchas = find_gotchas(
+        gotchas, gotcha_log = find_gotchas(
             case_id=case_id,
             document_id=document_id,
             display_name=name,
@@ -206,6 +206,7 @@ def run_pipeline(
             "prior_documents": len(priors),
             "alerts": len(consistency),
             "gotchas": len(gotchas),
+            "gotcha_log": gotcha_log,
             "facts": facts,
             "fact_matrix": fact_matrix,
         }
@@ -232,6 +233,7 @@ def run_pipeline(
         "entities": entities,
         "external_verification": (contextual.extras or {}).get("external_verification"),
         "case_consistency": (contextual.extras or {}).get("case_consistency"),
+        "gotcha_log": ((contextual.extras or {}).get("case_consistency") or {}).get("gotcha_log"),
         "facts": facts,
         "fact_matrix": fact_matrix,
         "scan_profile": profile,

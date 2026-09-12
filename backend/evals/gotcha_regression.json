@@ -1,0 +1,129 @@
+{
+  "areas": [
+    {
+      "area": "contracts",
+      "pairs": [
+        {
+          "id": "contract-tp-never-signed",
+          "label": "tp",
+          "claim_quote": "I never signed the supply agreement dated March 3, 2022.",
+          "evidence_quote": "The supply agreement was executed before a notary on March 3, 2022, and bears the claimant's acknowledged signature.",
+          "expect_fail": null
+        },
+        {
+          "id": "contract-tp-no-knowledge",
+          "label": "tp",
+          "claim_quote": "I had no knowledge of the change-order until this lawsuit.",
+          "evidence_quote": "Email from claimant to vendor dated June 8, 2023: I received the change-order and agree to the new price.",
+          "expect_fail": null
+        },
+        {
+          "id": "contract-fp-same-topic-support",
+          "label": "fp",
+          "claim_quote": "The seller never delivered conforming goods under section 12.",
+          "evidence_quote": "The court previously found the section 12 shipment defective and non-conforming.",
+          "expect_fail": "directionality"
+        },
+        {
+          "id": "contract-fp-shared-person",
+          "label": "fp",
+          "claim_quote": "Acme Corp never authorized the wire.",
+          "evidence_quote": "Acme Corp's registered office is listed on the secretary of state printout.",
+          "expect_fail": "same_fact"
+        }
+      ]
+    },
+    {
+      "area": "personal_injury",
+      "pairs": [
+        {
+          "id": "pi-tp-location",
+          "label": "tp",
+          "claim_quote": "I was at home in Albany the entire afternoon of May 2, 2024.",
+          "evidence_quote": "Hospital intake record: patient arrived at 2:40 p.m. on May 2, 2024, after a fall at the job site in Queens.",
+          "expect_fail": null
+        },
+        {
+          "id": "pi-tp-no-prior-injury",
+          "label": "tp",
+          "claim_quote": "I had no prior injury to my lower back.",
+          "evidence_quote": "Treating note dated January 11, 2023: patient reports chronic lower back pain after a prior workplace lift.",
+          "expect_fail": null
+        },
+        {
+          "id": "pi-fp-repair-vs-place",
+          "label": "fp",
+          "claim_quote": "The property owner promised to keep the walkway in good repair.",
+          "evidence_quote": "The incident report lists the walkway address as 200 Smith Street, Brooklyn.",
+          "expect_fail": "same_fact"
+        },
+        {
+          "id": "pi-fp-shared-physician",
+          "label": "fp",
+          "claim_quote": "Dr. Chen never told me the surgery was optional.",
+          "evidence_quote": "Dr. Chen's letterhead lists a Manhattan office address.",
+          "expect_fail": "same_fact"
+        }
+      ]
+    },
+    {
+      "area": "criminal",
+      "pairs": [
+        {
+          "id": "crim-tp-alibi",
+          "label": "tp",
+          "claim_quote": "I was not in the store on the night of the theft.",
+          "evidence_quote": "Register video log: the defendant appears at register three at 9:14 p.m. on the night of the theft.",
+          "expect_fail": null
+        },
+        {
+          "id": "crim-tp-no-contact",
+          "label": "tp",
+          "claim_quote": "I have never contacted the complaining witness.",
+          "evidence_quote": "Phone extract: twelve outbound texts from the defendant to the complaining witness in the week before the arrest.",
+          "expect_fail": null
+        },
+        {
+          "id": "crim-fp-defective-process",
+          "label": "fp",
+          "claim_quote": "I never received the required warning before questioning.",
+          "evidence_quote": "The suppression court found the warning defective and the statement inadmissible.",
+          "expect_fail": "directionality"
+        },
+        {
+          "id": "crim-fp-incidental-date-format",
+          "label": "fp",
+          "claim_quote": "The interview occurred on 3/15/09.",
+          "evidence_quote": "The detective's memo says the interview occurred on March 15, 2009.",
+          "expect_fail": "directionality"
+        }
+      ]
+    },
+    {
+      "area": "civil_procedure_example",
+      "pairs": [
+        {
+          "id": "proc-tp-after-agreement",
+          "label": "tp",
+          "claim_quote": "After agreeing to cancel collection, the other side continued to send monthly demand statements.",
+          "evidence_quote": "The stipulation of settlement cancels collection on the account and discharges it as of January 18, 2024.",
+          "expect_fail": null
+        },
+        {
+          "id": "proc-fp-denial-vs-defect",
+          "label": "fp",
+          "claim_quote": "I never received the required statutory notice.",
+          "evidence_quote": "The court already found that type of notice defective and insufficient.",
+          "expect_fail": "directionality"
+        },
+        {
+          "id": "proc-fp-duty-vs-place",
+          "label": "fp",
+          "claim_quote": "The occupant was required to keep the property in good repair.",
+          "evidence_quote": "A bank charge places a cardholder purchase in Brooklyn in July.",
+          "expect_fail": "same_fact"
+        }
+      ]
+    }
+  ]
+}
