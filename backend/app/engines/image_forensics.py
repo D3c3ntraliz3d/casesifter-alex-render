@@ -27,13 +27,15 @@ def _run(
 ) -> tuple[list[Finding], dict[str, Any]]:
     findings: list[Finding] = []
     artifacts: list[str] = []
-    # Court exhibits are almost always scans of paper or photos of paper. Copy-move and
-    # ELA fire constantly on form lines, stamps, and JPEG scan texture unless we soft-pedal.
+    # Court exhibits are almost always scans or photos of paper. An OCR text layer does
+    # not make a PDF "digitally born" — only a native-text PDF with no page rasters does.
     suffix = path.suffix.lower()
+    raster_pages = int(origin.get("raster_pages") or 0)
     digitally_born_pdf = (
         suffix == ".pdf"
         and origin.get("guess") == "native-text"
         and not origin.get("scan_heavy")
+        and raster_pages == 0
     )
     scan_heavy = (
         bool(origin.get("scan_heavy"))
