@@ -4,6 +4,7 @@ import re
 import shutil
 import threading
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
@@ -174,6 +175,7 @@ def api_get_case(case_id: str):
     case = cases_db.get_case(case_id)
     if case is None:
         raise HTTPException(404, "Unknown case.")
+    _reap_stale_scans(case_id)
     docs = cases_db.list_documents(case_id)
     return {**case, "documents": docs}
 
@@ -427,6 +429,39 @@ def _validate_id(value: str) -> None:
         raise HTTPException(400, "Invalid id.")
 
 
+def _reap_stale_scans(case_id: str, stale_seconds: int = 720) -> None:
+    """Mark scans that stopped writing progress (crash / OOM / reload) as failed."""
+    now = datetime.now(timezone.utc)
+    for doc in cases_db.list_documents(case_id):
+        if doc.get("status") not in {"scanning", "queued"}:
+            continue
+        job_id = doc.get("scan_job_id")
+        if not job_id:
+            cases_db.update_document(doc["id"], status="failed")
+            continue
+        progress = load_progress(job_id)
+        if progress is None:
+            cases_db.update_document(doc["id"], status="failed")
+            continue
+        if progress.status in {"complete", "failed"}:
+            cases_db.update_document(doc["id"], status=progress.status)
+            continue
+        updated = progress.updated_at
+        if updated.tzinfo is None:
+            updated = updated.replace(tzinfo=timezone.utc)
+        if (now - updated).total_seconds() < stale_seconds:
+            continue
+        update_job(
+            job_id,
+            status="failed",
+            stage="failed",
+            percent=100,
+            message="Scan stalled. Re-scan this file.",
+            error="No progress for more than 12 minutes. Large exhibits can stall image review; try Re-scan.",
+        )
+        cases_db.update_document(doc["id"], status="failed")
+
+
 def _start_analysis(
     job_id: str,
     dest: Path,
@@ -533,13 +568,16 @@ def _peek_text(path: Path, limit: int = 2500) -> str:
 
 
 @router.get("/jobs/{job_id}")
-def get_job(job_id: str):
+def get_job(job_id: str, include_report: bool = Query(default=False)):
     progress = load_progress(job_id)
     if progress is None:
         raise HTTPException(404, "Unknown job.")
     payload = progress.model_dump(mode="json")
-    if progress.status != "complete":
-        payload["report"] = None
+    payload["report"] = None
+    if include_report and progress.status == "complete":
+        report = load_report(job_id)
+        if report is not None:
+            payload["report"] = report.model_dump(mode="json")
     return payload
 
 

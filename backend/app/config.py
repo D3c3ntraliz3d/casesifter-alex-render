@@ -23,9 +23,9 @@ class Settings(BaseSettings):
         ".png",
         ".gif",
     }
-    # Heavy image forensics is capped so a 50-page PDF stays near the 2-minute target.
-    max_forensic_pages: int = 50
-    render_scale: float = 1.4
+    # Heavy image forensics is capped so a large exhibit cannot pin the machine.
+    max_forensic_pages: int = 12
+    render_scale: float = 1.15
     ela_quality: int = 90
     ela_scale: int = 18
 

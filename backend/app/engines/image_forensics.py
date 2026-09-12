@@ -10,7 +10,7 @@ from PIL import Image
 
 from app.config import settings
 from app.engines import finding, timed_module
-from app.ingestion import extract_embedded_images, load_image, render_pdf_pages
+from app.ingestion import extract_embedded_images, iter_pdf_pages, load_image
 from app.models import Finding, ModuleResult
 from app.storage import artifact_dir
 
@@ -50,13 +50,13 @@ def _run(
         "origin_guess": origin.get("guess"),
     }
     images = _collect_images(path)
-    extras["pages_analyzed"] = len(images)
-    if not images:
-        extras["note"] = "No raster images were available for forensic analysis."
-        return findings, extras
-
+    extras["pages_analyzed"] = 0
+    extras["forensic_budget"] = _forensic_budget(path)
     out = artifact_dir(job_id)
+    analyzed = 0
     for index, (label, image) in enumerate(images, start=1):
+        analyzed += 1
+        extras["pages_analyzed"] = analyzed
         page_no = index if label.startswith("page-") else None
         prefix = f"{label}"
 
@@ -121,7 +121,9 @@ def _run(
                     )
                 )
 
-        overlay, match_count, match_shift = detect_copy_move(image)
+        overlay, match_count, match_shift = (None, 0, (0, 0))
+        if not scan_heavy:
+            overlay, match_count, match_shift = detect_copy_move(image)
         clone_finding = _copy_move_finding(
             label=label,
             page_no=page_no,
@@ -144,7 +146,10 @@ def _run(
         crop_finding = _aspect_and_crop_hints(image, label, page_no)
         if crop_finding:
             findings.append(crop_finding)
+        image.close()
 
+    if analyzed == 0:
+        extras["note"] = "No raster images were available for forensic analysis."
     return findings, extras
 
 
@@ -228,17 +233,33 @@ def _copy_move_finding(
     )
 
 
-def _collect_images(path: Path) -> list[tuple[str, Image.Image]]:
+def _forensic_budget(path: Path) -> dict[str, Any]:
+    size = path.stat().st_size if path.exists() else 0
+    mb = size / (1024 * 1024)
+    if mb >= 12:
+        return {"max_pages": 6, "scale": 1.0}
+    if mb >= 4:
+        return {"max_pages": 8, "scale": 1.0}
+    return {"max_pages": settings.max_forensic_pages, "scale": settings.render_scale}
+
+
+def _collect_images(path: Path):
     suffix = path.suffix.lower()
     if suffix in {".jpg", ".jpeg", ".png", ".gif"}:
-        return [("image", load_image(path))]
+        yield "image", load_image(path)
+        return
     if suffix == ".pdf":
-        pages = render_pdf_pages(path)
-        return [(f"page-{i}", img) for i, img in enumerate(pages, start=1)]
+        budget = _forensic_budget(path)
+        for i, img in enumerate(
+            iter_pdf_pages(path, max_pages=budget["max_pages"], scale=budget["scale"]),
+            start=1,
+        ):
+            yield f"page-{i}", img
+        return
     if suffix in {".docx", ".xlsx"}:
         embedded = extract_embedded_images(path)
-        return [(f"embedded-{i}-{name.replace('/', '_')}", img) for i, (name, img) in enumerate(embedded, start=1)]
-    return []
+        for i, (name, img) in enumerate(embedded, start=1):
+            yield f"embedded-{i}-{name.replace('/', '_')}", img
 
 
 def error_level_analysis(image: Image.Image, quality: int | None = None, amplify: int | None = None) -> tuple[Image.Image, float, float, int]:

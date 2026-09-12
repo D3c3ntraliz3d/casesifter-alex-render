@@ -42,23 +42,27 @@ def load_image(path: Path) -> Image.Image:
 
 
 def render_pdf_pages(path: Path, max_pages: int | None = None, scale: float | None = None):
+    return list(iter_pdf_pages(path, max_pages=max_pages, scale=scale))
+
+
+def iter_pdf_pages(path: Path, max_pages: int | None = None, scale: float | None = None):
+    """Yield one rendered page at a time so large exhibits do not stay in RAM."""
     import pypdfium2 as pdfium
 
     scale = scale if scale is not None else settings.render_scale
     max_pages = max_pages if max_pages is not None else settings.max_forensic_pages
     doc = pdfium.PdfDocument(str(path))
-    pages = []
     try:
         count = min(len(doc), max_pages)
         for index in range(count):
             page = doc[index]
-            bitmap = page.render(scale=scale)
-            pil = bitmap.to_pil().convert("RGB")
-            pages.append(pil)
-            page.close()
+            try:
+                bitmap = page.render(scale=scale)
+                yield bitmap.to_pil().convert("RGB")
+            finally:
+                page.close()
     finally:
         doc.close()
-    return pages
 
 
 def extract_embedded_images(path: Path) -> list[tuple[str, Image.Image]]:

@@ -195,13 +195,17 @@ export default function App() {
           const doc = next?.documents?.find((d) => d.id === selectedDocId);
           if (doc?.scan_job_id) {
             const progress = await getJob(doc.scan_job_id);
-            setJob(progress);
+            if (progress.status === "complete") {
+              setJob(await getJob(doc.scan_job_id, { includeReport: true }));
+            } else {
+              setJob(progress);
+            }
           }
         }
       } catch {
         /* keep polling */
       }
-    }, 1000);
+    }, 4000);
     return () => clearInterval(timer);
   }, [caseData?.id, caseData?.documents, selectedDocId]);
 
@@ -224,7 +228,7 @@ export default function App() {
       setError("This document has not been scanned yet.");
       return;
     }
-    const progress = await getJob(doc.scan_job_id);
+    const progress = await getJob(doc.scan_job_id, { includeReport: true });
     setJob(progress);
     setView("report");
   }

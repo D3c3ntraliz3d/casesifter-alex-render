@@ -35,6 +35,11 @@ def _source_for_contextual(source: Path, profile: str) -> Path | None:
         return None
     if not (settings.contextual_multimodal and settings.gemini_api_key):
         return None
+    try:
+        if source.stat().st_size > 8 * 1024 * 1024:
+            return None
+    except OSError:
+        return None
     return source
 
 

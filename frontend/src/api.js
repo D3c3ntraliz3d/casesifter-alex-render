@@ -24,8 +24,9 @@ export async function uploadExhibit(file, submittedBy = "court-staff") {
   return readJson(res);
 }
 
-export async function getJob(jobId) {
-  const res = await fetch(`/api/jobs/${jobId}`, { headers: jsonHeaders });
+export async function getJob(jobId, { includeReport = false } = {}) {
+  const qs = includeReport ? "?include_report=true" : "";
+  const res = await fetch(`/api/jobs/${jobId}${qs}`, { headers: jsonHeaders });
   return readJson(res);
 }
 

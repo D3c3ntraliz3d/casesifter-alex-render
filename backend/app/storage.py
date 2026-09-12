@@ -29,8 +29,11 @@ def _progress_path(job_id: str) -> Path:
 def save_progress(progress: JobProgress) -> None:
     progress.updated_at = utcnow()
     path = _progress_path(progress.job_id)
+    # Keep the report in report.json only. Embedding it here made every status
+    # poll reread a multi-megabyte file and froze the UI after large exhibits.
+    slim = progress.model_copy(update={"report": None})
     with _lock:
-        path.write_text(progress.model_dump_json(indent=2), encoding="utf-8")
+        path.write_text(slim.model_dump_json(indent=2), encoding="utf-8")
 
 
 def load_progress(job_id: str) -> JobProgress | None:
