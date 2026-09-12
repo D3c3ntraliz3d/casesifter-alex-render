@@ -61,6 +61,21 @@ export async function getCase(caseId) {
   return readJson(res);
 }
 
+export async function archiveCase(caseId) {
+  const res = await fetch(`/api/cases/${caseId}/archive`, { method: "POST", headers: jsonHeaders });
+  return readJson(res);
+}
+
+export async function unarchiveCase(caseId) {
+  const res = await fetch(`/api/cases/${caseId}/unarchive`, { method: "POST", headers: jsonHeaders });
+  return readJson(res);
+}
+
+export async function deleteCase(caseId) {
+  const res = await fetch(`/api/cases/${caseId}`, { method: "DELETE", headers: jsonHeaders });
+  return readJson(res);
+}
+
 export async function updateCase(caseId, payload) {
   const res = await fetch(`/api/cases/${caseId}`, {
     method: "PATCH",

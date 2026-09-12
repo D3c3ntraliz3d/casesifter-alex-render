@@ -191,6 +191,24 @@ def api_patch_case(case_id: str, body: CaseUpdate):
     return case
 
 
+@router.post("/cases/{case_id}/archive")
+def api_archive_case(case_id: str):
+    _validate_id(case_id)
+    case = cases_db.set_archived(case_id, True)
+    if case is None:
+        raise HTTPException(404, "Unknown case.")
+    return case
+
+
+@router.post("/cases/{case_id}/unarchive")
+def api_unarchive_case(case_id: str):
+    _validate_id(case_id)
+    case = cases_db.set_archived(case_id, False)
+    if case is None:
+        raise HTTPException(404, "Unknown case.")
+    return case
+
+
 @router.delete("/cases/{case_id}")
 def api_delete_case(case_id: str):
     _validate_id(case_id)

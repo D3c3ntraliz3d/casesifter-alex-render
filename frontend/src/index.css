@@ -598,3 +598,62 @@ table.data select {
   align-items: flex-start;
   gap: 2px;
 }
+
+.toolbar.tight {
+  align-items: center;
+  margin-bottom: 10px;
+}
+.row-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  white-space: nowrap;
+}
+.icon-btn {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  padding: 5px 7px;
+  border-radius: 7px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font: 500 12px "IBM Plex Sans", sans-serif;
+}
+.icon-btn:hover:not(:disabled) {
+  color: var(--navy);
+  background: #f4efe6;
+  border-color: var(--line);
+}
+.icon-btn.danger:hover:not(:disabled),
+.btn.secondary.danger:hover:not(:disabled) {
+  color: var(--red);
+  background: var(--red-bg);
+  border-color: #e2b4b4;
+}
+.btn.secondary.danger { color: var(--muted); }
+.btn.secondary.danger { display: inline-flex; align-items: center; gap: 6px; }
+.btn.secondary { display: inline-flex; align-items: center; gap: 6px; }
+table.data th.actions-col,
+table.data td.row-actions { width: 1%; text-align: right; }
+.archive-panel {
+  margin-top: 16px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.archive-panel > summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 18px;
+  color: var(--navy);
+  font-weight: 600;
+}
+.archive-panel > summary::-webkit-details-marker { display: none; }
+.archive-panel > summary span { color: var(--muted); font-weight: 500; font-size: 13px; }

@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { FolderOpen, Search, ShieldAlert, Upload, X } from "lucide-react";
+import { Archive, FolderOpen, RotateCcw, Search, ShieldAlert, Trash2, Upload, X } from "lucide-react";
 import {
+  archiveCase,
   createCase,
+  deleteCase,
   documentFileUrl,
   exportUrl,
   getCase,
@@ -16,6 +18,7 @@ import {
   scanDocument,
   sendFindingFeedback,
   setShareOutcomes,
+  unarchiveCase,
   uploadCaseDocument,
 } from "./api";
 
@@ -226,10 +229,74 @@ export default function App() {
     setView("report");
   }
 
-  const filteredCases = useMemo(
-    () => cases.filter((item) => matchesQuery(caseSearchText(item), query)),
-    [cases, query]
+  const activeCases = useMemo(() => cases.filter((item) => !item.archived_at), [cases]);
+  const archivedCases = useMemo(() => cases.filter((item) => item.archived_at), [cases]);
+  const filteredActive = useMemo(
+    () => activeCases.filter((item) => matchesQuery(caseSearchText(item), query)),
+    [activeCases, query]
   );
+  const filteredArchived = useMemo(
+    () => archivedCases.filter((item) => matchesQuery(caseSearchText(item), query)),
+    [archivedCases, query]
+  );
+  const searchHits = query.trim() ? [...filteredActive, ...filteredArchived] : filteredActive;
+
+  async function handleArchive(item) {
+    if (!window.confirm(`Archive “${item.caption}”? It will leave the active list and can be restored later.`)) {
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      await archiveCase(item.id);
+      if (caseId === item.id) {
+        setView("cases");
+        setCaseId(null);
+        setCaseData(null);
+      }
+      await refreshCases();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleUnarchive(item) {
+    setBusy(true);
+    setError("");
+    try {
+      await unarchiveCase(item.id);
+      await refreshCases();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDelete(item) {
+    const count = item.document_count || 0;
+    if (!window.confirm(`Permanently delete “${item.caption}” and ${count} local file${count === 1 ? "" : "s"}? This cannot be undone.`)) {
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      await deleteCase(item.id);
+      if (caseId === item.id) {
+        setView("cases");
+        setCaseId(null);
+        setCaseData(null);
+        setJob(null);
+      }
+      await refreshCases();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
 
   return (
     <div className="app">
@@ -247,15 +314,15 @@ export default function App() {
             onChange={setQuery}
             placeholder="Search cases, parties, index, or court…"
             onKeyDown={(e) => {
-              if (e.key === "Enter" && filteredCases.length === 1) {
+              if (e.key === "Enter" && searchHits.length === 1) {
                 setQuery("");
-                openCase(filteredCases[0].id);
+                openCase(searchHits[0].id);
               }
             }}
           />
-          {query.trim() && view !== "cases" && filteredCases.length > 0 && (
+          {query.trim() && view !== "cases" && searchHits.length > 0 && (
             <div className="search-results">
-              {filteredCases.slice(0, 8).map((item) => (
+              {searchHits.slice(0, 8).map((item) => (
                 <button
                   key={item.id}
                   type="button"
@@ -266,7 +333,7 @@ export default function App() {
                 >
                   <strong>{item.caption}</strong>
                   <span>
-                    {[item.index_number, item.court].filter(Boolean).join(" · ") || "No index"}
+                    {[item.archived_at ? "Archived" : null, item.index_number, item.court].filter(Boolean).join(" · ") || "No index"}
                   </span>
                 </button>
               ))}
@@ -290,8 +357,10 @@ export default function App() {
 
       {view === "cases" && (
         <CasesPage
-          cases={filteredCases}
-          totalCount={cases.length}
+          cases={filteredActive}
+          archived={filteredArchived}
+          totalCount={activeCases.length}
+          archivedCount={archivedCases.length}
           query={query}
           busy={busy}
           onCreate={async (payload) => {
@@ -308,6 +377,9 @@ export default function App() {
             }
           }}
           onOpen={openCase}
+          onArchive={handleArchive}
+          onUnarchive={handleUnarchive}
+          onDelete={handleDelete}
         />
       )}
 
@@ -320,6 +392,9 @@ export default function App() {
           onError={setError}
           onOpenReport={openDocumentReport}
           setBusy={setBusy}
+          onArchive={() => handleArchive(caseData)}
+          onUnarchive={() => handleUnarchive(caseData)}
+          onDelete={() => handleDelete(caseData)}
         />
       )}
 
@@ -369,7 +444,7 @@ export default function App() {
   );
 }
 
-function CasesPage({ cases, totalCount, query, busy, onCreate, onOpen }) {
+function CasesPage({ cases, archived, totalCount, archivedCount, query, busy, onCreate, onOpen, onArchive, onUnarchive, onDelete }) {
   const [caption, setCaption] = useState("");
   const [court, setCourt] = useState("");
   const [indexNumber, setIndexNumber] = useState("");
@@ -383,8 +458,9 @@ function CasesPage({ cases, totalCount, query, busy, onCreate, onOpen }) {
           <h2 className="serif">Cases</h2>
           <p className="footnote">
             {query.trim()
-              ? `${cases.length} match${cases.length === 1 ? "" : "es"} of ${totalCount}`
-              : `${totalCount} matter${totalCount === 1 ? "" : "s"} on this machine`}
+              ? `${cases.length} match${cases.length === 1 ? "" : "es"} of ${totalCount} active`
+              : `${totalCount} active matter${totalCount === 1 ? "" : "s"}`}
+            {archivedCount ? ` · ${archivedCount} archived` : ""}
           </p>
         </div>
         <button className="btn" type="button" onClick={() => setShowNew((v) => !v)}>
@@ -450,34 +526,93 @@ function CasesPage({ cases, totalCount, query, busy, onCreate, onOpen }) {
                 <th>Index</th>
                 <th>Court</th>
                 <th>Files</th>
+                <th className="actions-col"> </th>
               </tr>
             </thead>
             <tbody>
-              {cases.map((item) => {
-                const parties = partiesFromCaption(item.caption);
-                return (
-                  <tr key={item.id} className="click-row" onClick={() => onOpen(item.id)}>
-                    <td>
-                      <strong className="matter-name">{item.caption}</strong>
-                    </td>
-                    <td className="muted">
-                      {parties.length > 1 ? parties.join(" · ") : parties[0] || "—"}
-                    </td>
-                    <td className="mono">{item.index_number || "—"}</td>
-                    <td className="muted">{item.court || "—"}</td>
-                    <td className="num">{item.document_count || 0}</td>
-                  </tr>
-                );
-              })}
+              {cases.map((item) => (
+                <CaseRow key={item.id} item={item} busy={busy} onOpen={onOpen} onArchive={onArchive} onDelete={onDelete} />
+              ))}
             </tbody>
           </table>
         )}
       </div>
+
+      {(archived.length > 0 || (!query.trim() && archivedCount > 0)) && (
+        <details className="archive-panel" open={Boolean(query.trim())}>
+          <summary>
+            Archived
+            <span>{query.trim() ? `${archived.length} shown` : archivedCount}</span>
+          </summary>
+          {archived.length === 0 ? (
+            <p className="empty-copy">No archived cases match that search.</p>
+          ) : (
+            <table className="data cases">
+              <thead>
+                <tr>
+                  <th>Caption</th>
+                  <th>Index</th>
+                  <th>Files</th>
+                  <th className="actions-col"> </th>
+                </tr>
+              </thead>
+              <tbody>
+                {archived.map((item) => (
+                  <tr key={item.id}>
+                    <td>
+                      <button type="button" className="linkish" onClick={() => onOpen(item.id)}>
+                        {item.caption}
+                      </button>
+                    </td>
+                    <td className="mono">{item.index_number || "—"}</td>
+                    <td className="num">{item.document_count || 0}</td>
+                    <td className="row-actions" onClick={(e) => e.stopPropagation()}>
+                      <button type="button" className="icon-btn" disabled={busy} title="Restore" onClick={() => onUnarchive(item)}>
+                        <RotateCcw size={15} />
+                        <span>Restore</span>
+                      </button>
+                      <button type="button" className="icon-btn danger" disabled={busy} title="Delete permanently" onClick={() => onDelete(item)}>
+                        <Trash2 size={15} />
+                        <span>Delete</span>
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </details>
+      )}
     </>
   );
 }
 
-function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenReport, setBusy }) {
+function CaseRow({ item, busy, onOpen, onArchive, onDelete }) {
+  const parties = partiesFromCaption(item.caption);
+  return (
+    <tr className="click-row" onClick={() => onOpen(item.id)}>
+      <td>
+        <strong className="matter-name">{item.caption}</strong>
+      </td>
+      <td className="muted">
+        {parties.length > 1 ? parties.join(" · ") : parties[0] || "—"}
+      </td>
+      <td className="mono">{item.index_number || "—"}</td>
+      <td className="muted">{item.court || "—"}</td>
+      <td className="num">{item.document_count || 0}</td>
+      <td className="row-actions" onClick={(e) => e.stopPropagation()}>
+        <button type="button" className="icon-btn" disabled={busy} title="Archive" onClick={() => onArchive(item)}>
+          <Archive size={15} />
+        </button>
+        <button type="button" className="icon-btn danger" disabled={busy} title="Delete permanently" onClick={() => onDelete(item)}>
+          <Trash2 size={15} />
+        </button>
+      </td>
+    </tr>
+  );
+}
+
+function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenReport, setBusy, onArchive, onUnarchive, onDelete }) {
   const [drag, setDrag] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [editName, setEditName] = useState("");
@@ -549,8 +684,24 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
   return (
     <>
       <div className="card case-hero">
-        <button className="text-link" type="button" onClick={onBack}>← All cases</button>
-        <p className="kicker">Case</p>
+        <div className="toolbar tight">
+          <button className="text-link" type="button" onClick={onBack}>← All cases</button>
+          <div className="row-actions">
+            {caseData.archived_at ? (
+              <button className="btn secondary" type="button" disabled={busy} onClick={onUnarchive}>
+                <RotateCcw size={14} /> Restore
+              </button>
+            ) : (
+              <button className="btn secondary" type="button" disabled={busy} onClick={onArchive}>
+                <Archive size={14} /> Archive
+              </button>
+            )}
+            <button className="btn secondary danger" type="button" disabled={busy} onClick={onDelete}>
+              <Trash2 size={14} /> Delete
+            </button>
+          </div>
+        </div>
+        <p className="kicker">{caseData.archived_at ? "Archived case" : "Case"}</p>
         <h2 className="serif">{caseData.caption}</h2>
         <p className="meta-line">
           {partiesFromCaption(caseData.caption).join(" · ") || "Parties from caption"}
@@ -559,6 +710,9 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
           <span className="dot" />
           {caseData.court || "Court not set"}
         </p>
+        {caseData.archived_at ? (
+          <p className="footnote">This matter is archived. Restore it to add filings.</p>
+        ) : (
         <div
           className={`dropzone compact ${drag ? "active" : ""}`}
           onDragOver={(e) => { e.preventDefault(); setDrag(true); }}
@@ -584,6 +738,7 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
             onChange={(e) => onUpload(e.target.files)}
           />
         </div>
+        )}
       </div>
 
       <CaseRiskSummary
@@ -605,9 +760,11 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
             onChange={setDocQuery}
             placeholder="Filter by name, kind, or risk…"
           />
+          {!caseData.archived_at && (
           <button className="btn secondary" type="button" disabled={busy} onClick={() => inputRef.current?.click()}>
             Upload
           </button>
+          )}
         </div>
         {docs.length === 0 && <p className="empty-copy">Drop complaints, motions, and exhibits as the matter progresses.</p>}
         {docs.length > 0 && visibleDocs.length === 0 && (

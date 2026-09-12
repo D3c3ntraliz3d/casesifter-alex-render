@@ -47,6 +47,7 @@ def connect() -> Iterator[sqlite3.Connection]:
     ensure_schema()
     conn = sqlite3.connect(str(db_path()), check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
     try:
         yield conn
         conn.commit()
@@ -120,10 +121,17 @@ def ensure_schema() -> None:
                 );
                 """
             )
+            _migrate_schema(conn)
             conn.commit()
         finally:
             conn.close()
         _INITIALIZED = True
+
+
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(cases)")}
+    if "archived_at" not in cols:
+        conn.execute("ALTER TABLE cases ADD COLUMN archived_at TEXT")
 
 
 def _row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -144,8 +152,8 @@ def create_case(
     with connect() as conn:
         conn.execute(
             """
-            INSERT INTO cases (id, caption, court, index_number, notes, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO cases (id, caption, court, index_number, notes, created_at, updated_at, archived_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
             """,
             (case_id, caption.strip(), court or None, index_number or None, notes or None, now, now),
         )
@@ -193,6 +201,18 @@ def update_case(case_id: str, **fields: Any) -> dict[str, Any] | None:
         )
         if cur.rowcount == 0:
             return None
+    return get_case(case_id)
+
+
+def set_archived(case_id: str, archived: bool) -> dict[str, Any] | None:
+    if get_case(case_id) is None:
+        return None
+    now = utcnow_iso()
+    with connect() as conn:
+        conn.execute(
+            "UPDATE cases SET archived_at = ?, updated_at = ? WHERE id = ?",
+            (now if archived else None, now, case_id),
+        )
     return get_case(case_id)
 
 
