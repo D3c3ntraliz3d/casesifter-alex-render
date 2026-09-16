@@ -1,8 +1,10 @@
 """Compare a newly scanned document against prior case snapshots.
 
 Only MATERIAL contradictions interrupt the attorney: a key date that cannot
-coexist, a referenced exhibit that is not in the case, or a near-duplicate
-upload. Note rate, default rate, principal balance, and installment amount
+coexist, same-CRFN discharge vs continued reliance, or a near-duplicate upload.
+Exhibit letter/number labels routinely change between initial filing and the
+recorded packet — citing “Exhibit A” when the case file uses another label is
+not a flag. Note rate, default rate, principal balance, and installment amount
 are expected to move with payment and default — they are not flags.
 
 Name abbreviations (WaMu / Washington Mutual) and same-month day shifts are
@@ -17,7 +19,7 @@ import re
 from typing import Any
 
 from app.engines import finding
-from app.fact_extract import FACT_META, GOTCHA_KEYS, extract_facts, referenced_exhibits
+from app.fact_extract import FACT_META, GOTCHA_KEYS, extract_facts
 from app.models import Finding
 from app.scan_profile import COURT_FILING_KINDS
 
@@ -35,15 +37,6 @@ COUNSEL_ORG_RE = re.compile(
     r"partners,?\s+pllc"
     r")\b"
 )
-
-# Real NYSCEF exhibit filenames read "EXHIBIT(S) - A (Motion #1) Deed.pdf", not
-# "Exhibit A" — the old `exhibit\s+(tag)` pattern never matched past "(S) - " and
-# _known_exhibits() silently registered zero exhibits for every case, so every
-# affidavit that cited "Exhibit A"/"Exhibit 1" in its own text fired a false
-# "Referenced Exhibit X is not in this case" finding even when that exact exhibit
-# was uploaded. Tolerate the "(S)" plural marker and a short run of punctuation
-# (dash, space, parens) between "exhibit" and the tag.
-EXHIBIT_NAME_RE = re.compile(r"(?i)\bexhibit\b(?:\(s\))?[^A-Za-z0-9]{0,6}([A-Z0-9]{1,3})\b")
 
 # NYC ACRIS recording cover sheets ("CROSS REFERENCE DATA") cite the county
 # clerk's recording number as "CRFN: 2008000207462" — sometimes with no space
@@ -171,6 +164,7 @@ def compare_to_case(
 ) -> tuple[list[Finding], list[dict[str, Any]]]:
     """Return (findings, fact matrix rows) for the newly scanned document."""
     del new_amounts  # unlabeled dollar dumps are too noisy; labeled facts only
+    del case_documents  # exhibit-letter title matching is not an interrupt (labels change)
     findings: list[Finding] = []
     matrix: list[dict[str, Any]] = []
     facts = list(new_facts or [])
@@ -208,30 +202,6 @@ def compare_to_case(
             prior_snapshots=prior_snapshots,
         )
     )
-
-    known_exhibits = _known_exhibits(case_documents, prior_snapshots, new_display_name)
-    for tag in referenced_exhibits(new_text or ""):
-        if tag in known_exhibits:
-            continue
-        findings.append(
-            _case_finding(
-                prior_id=None,
-                prior_name="case file",
-                field="missing_exhibit",
-                new_value=f"Exhibit {tag}",
-                prior_value="not in case",
-                title=f"Referenced Exhibit {tag} is not in this case",
-                explanation=(
-                    f"“{new_display_name}” refers to Exhibit {tag} as attached or annexed, "
-                    "but no document in this case is titled that exhibit."
-                ),
-                why="A motion that relies on a missing exhibit cannot be verified against the record you have.",
-                confidence=78,
-                severity="high",
-                material=True,
-                recommended_action=f"Upload Exhibit {tag} or confirm the reference is a docket citation only.",
-            )
-        )
 
     new_orgs = _substance_orgs(new_entities.get("organizations") or [])
     new_locs = {_norm(x) for x in (new_entities.get("locations") or []) if x}
@@ -549,19 +519,6 @@ def _unique_facts(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         seen.add(token)
         out.append(item)
     return out
-
-
-def _known_exhibits(
-    case_documents: list[dict[str, Any]] | None,
-    priors: list[dict[str, Any]],
-    new_name: str,
-) -> set[str]:
-    tags: set[str] = set()
-    for source in list(case_documents or []) + list(priors) + [{"display_name": new_name}]:
-        hay = f"{source.get('display_name') or ''} {source.get('original_filename') or ''}"
-        for match in EXHIBIT_NAME_RE.finditer(hay):
-            tags.add(match.group(1).upper())
-    return tags
 
 
 def _substance_orgs(names: list[str]) -> set[str]:

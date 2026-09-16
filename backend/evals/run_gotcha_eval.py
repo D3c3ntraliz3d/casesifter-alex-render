@@ -16,6 +16,7 @@ from app.gotcha import (
     extract_claims,
     hard_veto_step,
     merge_verdicts,
+    keep_board_gotcha,
     propose_tainted_support,
     retrieve_evidence,
     verify_candidates,
@@ -445,6 +446,53 @@ def evaluate_tainted_support() -> dict:
     citation_focus = propose_tainted_support(
         citation, docs, snaps, filing_text=citation[0]["quote"], focus_document_id="ex-a"
     )
+    in_support = propose_tainted_support(
+        [
+            {
+                "quote": "I submit this affirmation in support of the motion.",
+                "source": "Attorney affirmation",
+                "document_id": "aff-1",
+                "doc_kind": "affidavit",
+            }
+        ],
+        docs,
+        snaps,
+        filing_text="I submit this affirmation in support of the motion.",
+    )
+    copied = {
+        "tainted_support": True,
+        "document_id": "s-76",
+        "evidence_kind": "exhibit",
+        "evidence_quote": "16th day of May, 2022",
+        "verified": True,
+        "gotcha": True,
+    }
+    live = {
+        "tainted_support": True,
+        "document_id": "ex-a",
+        "evidence_kind": "exhibit",
+        "evidence_quote": "16th day of May, 2022",
+        "verified": True,
+        "gotcha": True,
+    }
+    two_filings = {
+        "claim_kind": "affidavit",
+        "evidence_kind": "affidavit",
+        "claim_quote": "Plaintiff had no way of knowing.",
+        "evidence_quote": "I did not know if it was a fact.",
+        "claim_source": "AFFIDAVIT 99",
+        "evidence_source": "AFFIDAVIT 101",
+    }
+    year_only = {
+        "claim_quote": (
+            "affidavits of service filed for the week of April 2-6, 2007 "
+            "in US Bank v Alexander, Index 11467/2007"
+        ),
+        "evidence_quote": (
+            "your Notice of Appearance, dated 1/15/2016, on behalf of Wayne "
+            "Alexander in US Bank v Alexander, Inde 11467/2007"
+        ),
+    }
     return {
         "produced_tainted_hits": len(produced) == 1,
         "produced_uses_their_exhibit": bool(produced) and produced[0].get("document_id") == "ex-a",
@@ -460,6 +508,15 @@ def evaluate_tainted_support() -> dict:
         "one_card_per_exhibit": len(citation_focus) == 1,
         "does_not_quote_unrelated_filing": bool(citation_focus)
         and "Gewirtz" not in str(citation_focus[0].get("claim_quote") or ""),
+        "in_support_does_not_taint_case": in_support == [],
+        "copied_jurat_dropped": keep_board_gotcha(
+            copied, [{"id": "s-76", "doc_kind": "exhibit", "display_name": "Exhibit S_76"}], {"s-76": {}}
+        )
+        is False,
+        "defective_exhibit_kept": keep_board_gotcha(live, docs, snaps) is True,
+        "two_filings_dropped": keep_board_gotcha(two_filings, docs, snaps) is False,
+        "index_year_is_not_same_day": (verify_pair(year_only).get("same_fact") or {}).get("fact_named")
+        != "whereabouts on a shared date",
         "all_pass": False,
     }
 
@@ -609,6 +666,26 @@ def evaluate_template_fabrication() -> dict:
     )
     upgraded = review_print_scan_ela([ela], clean, scan_profile="forensic")
     buried = review_print_scan_ela([ela], "This indenture made the first day of June.", scan_profile="forensic")
+    scan_ela = Finding(
+        id="img-ela-page-3",
+        category="image",
+        severity="medium",
+        title="Uneven recompression",
+        explanation="x",
+        why_suspicious="y",
+        confidence=55,
+        evidence={"ela_score": 40, "largest_blob_px": 1200, "scan_heavy": True},
+    )
+    meta = Finding(
+        id="md-editor-software",
+        category="metadata",
+        severity="medium",
+        title="Editor software detected",
+        explanation="x",
+        why_suspicious="y",
+        confidence=60,
+        evidence={},
+    )
     return {
         "leftover_template_flagged": len(hits) == 1 and hits[0].evidence.get("analysis_type") == "template_fabrication",
         "leftover_is_material": bool(hits) and is_material_finding(hits[0]),
@@ -617,6 +694,9 @@ def evaluate_template_fabrication() -> dict:
         "sample_of_notice_quiet": sample_of == [],
         "statement_ela_upgraded": bool(upgraded) and upgraded[0].severity == "medium",
         "non_statement_ela_stays_info": bool(buried) and buried[0].severity == "info",
+        "scan_heavy_ela_not_material": not is_material_finding(scan_ela),
+        "editor_metadata_not_material": not is_material_finding(meta),
+        "print_scan_ela_is_material": bool(upgraded) and is_material_finding(upgraded[0]),
         "all_pass": False,
     }
 
@@ -695,6 +775,123 @@ def evaluate_statement_dates() -> dict:
     }
 
 
+def evaluate_case_impact() -> dict:
+    """Only element/procedure/credibility/damages interrupts; scan noise and advocacy do not."""
+    residence = {
+        "claim_quote": "I did not live at 5616 14th Avenue when I was served.",
+        "evidence_quote": "Con Edison bill lists service at 5616 14th Avenue for November 2023.",
+        "claim_source": "Alexander affidavit",
+        "evidence_source": "Exhibit S_41",
+        "claim_kind": "affidavit",
+        "evidence_kind": "exhibit",
+    }
+    two_filings = {
+        "claim_quote": "Plaintiff had no way of knowing the service address was not his residence.",
+        "evidence_quote": "I did not know if it was a fact that that was the address of the individual.",
+        "claim_source": "AFFIDAVIT 99",
+        "evidence_source": "AFFIDAVIT 101",
+        "claim_kind": "affidavit",
+        "evidence_kind": "affidavit",
+    }
+    incidental = {
+        "claim_quote": "The note is dated March 3, 2006.",
+        "evidence_quote": "The note is dated 03/03/2006.",
+        "claim_source": "Complaint",
+        "evidence_source": "Note",
+    }
+    docs = [
+        {"id": "ex-a", "display_name": "Exhibit A utility bill", "doc_kind": "exhibit"},
+        {"id": "aff-1", "display_name": "Affidavit", "doc_kind": "affidavit"},
+    ]
+    snaps = {
+        "ex-a": {
+            "findings_summary": [
+                {
+                    "id": "txt-stmtdate-1",
+                    "category": "contextual",
+                    "severity": "high",
+                    "title": "Statement date cannot fall with this service period",
+                    "analysis_type": "date_inconsistency",
+                    "explanation": (
+                        "The statement date printed on the bill is 03/02/2018, but the "
+                        "service period on the same page is 11/01/2023-11/30/2023."
+                    ),
+                    "why_suspicious": (
+                        "A consumer bill cannot cover a 2023 service period while "
+                        "showing a 2018 statement date on its face."
+                    ),
+                    "quoted_evidence": "Statement date 03/02/2018 vs service period 11/01/2023-11/30/2023.",
+                }
+            ]
+        },
+        "aff-1": {"findings_summary": []},
+    }
+    edited = propose_tainted_support([], docs, snaps, focus_document_id="ex-a")
+    jurat_card = {
+        "tainted_support": True,
+        "document_id": "ex-clean",
+        "evidence_kind": "exhibit",
+        "evidence_quote": "16th day of May, 2022",
+        "verified": True,
+        "gotcha": True,
+    }
+    ela_only = {
+        "tainted_support": True,
+        "document_id": "ex-ela",
+        "evidence_kind": "exhibit",
+        "evidence_quote": "ELA hotspot",
+        "verified": True,
+        "gotcha": True,
+    }
+    snaps_ela = {
+        "ex-ela": {
+            "findings_summary": [
+                {
+                    "id": "img-ela-1",
+                    "category": "image",
+                    "severity": "high",
+                    "analysis_type": "graphic_manipulation",
+                    "scan_heavy": True,
+                    "quoted_evidence": "Whole-page scan texture",
+                }
+            ]
+        }
+    }
+    residence_v = verify_pair(residence)
+    residence_ok = bool(
+        residence_v.get("pass")
+        and hard_veto_step(residence, residence_v) is None
+        and (residence_v.get("materiality") or {}).get("tier") == "element"
+    )
+    two_v = verify_pair(two_filings)
+    incidental_v = verify_pair(incidental)
+    return {
+        "residence_hits_element": residence_ok,
+        "two_filings_dropped": keep_board_gotcha(two_filings, docs, snaps) is False
+        or hard_veto_step(two_filings, two_v) is not None
+        or not two_v.get("pass"),
+        "date_format_not_material": not incidental_v.get("pass"),
+        "defective_statement_one_edited_card": len(edited) == 1
+        and edited[0].get("title") == "Exhibit appears fraudulently edited"
+        and "03/02/2018" in str(edited[0].get("evidence_quote") or "")
+        and "2023" in str(edited[0].get("evidence_quote") or "")
+        and "fraudulently edited. Open the scan report" not in str(edited[0].get("why_it_may_matter") or ""),
+        "jurat_spam_dropped": keep_board_gotcha(
+            jurat_card,
+            [{"id": "ex-clean", "doc_kind": "exhibit", "display_name": "Exhibit S_76"}],
+            {"ex-clean": {}},
+        )
+        is False,
+        "bare_ela_not_tainted_board": keep_board_gotcha(
+            ela_only,
+            [{"id": "ex-ela", "doc_kind": "exhibit", "display_name": "Exhibit S_58"}],
+            snaps_ela,
+        )
+        is False,
+        "all_pass": False,
+    }
+
+
 def evaluate() -> dict:
     dedupe = evaluate_dedupe()
     dedupe["all_pass"] = all(dedupe[key] for key in dedupe if key != "all_pass")
@@ -712,6 +909,8 @@ def evaluate() -> dict:
     statement_dates["all_pass"] = all(
         statement_dates[key] for key in statement_dates if key != "all_pass"
     )
+    case_impact = evaluate_case_impact()
+    case_impact["all_pass"] = all(case_impact[key] for key in case_impact if key != "all_pass")
     return {
         "pairs": evaluate_pairs(),
         "pipeline": evaluate_pipeline(),
@@ -724,6 +923,7 @@ def evaluate() -> dict:
         "recorded_math": recorded,
         "template_fabrication": templates,
         "statement_dates": statement_dates,
+        "case_impact": case_impact,
     }
 
 
@@ -749,6 +949,7 @@ def main() -> None:
     print("RECORDED MATH", result["recorded_math"])
     print("TEMPLATE FABRICATION", result["template_fabrication"])
     print("STATEMENT DATES", result["statement_dates"])
+    print("CASE IMPACT", result["case_impact"])
     failed = bool(
         misses
         or pipe["misses"]
@@ -760,6 +961,7 @@ def main() -> None:
         or not result["recorded_math"]["all_pass"]
         or not result["template_fabrication"]["all_pass"]
         or not result["statement_dates"]["all_pass"]
+        or not result["case_impact"]["all_pass"]
     )
     if not result["score_independence"]["title_does_not_matter"]:
         failed = True

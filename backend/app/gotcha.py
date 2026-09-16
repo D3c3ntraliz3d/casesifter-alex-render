@@ -560,40 +560,176 @@ def propose_tainted_support(
 
 def _exhibit_edited_item(doc: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
     source = doc.get("display_name") or doc.get("original_filename") or "exhibit"
-    summary = _flagged_item_summary(rows)
+    detail, matter = _flagged_issue_detail(rows)
     return {
         "title": "Exhibit appears fraudulently edited",
         "claim_quote": "",
         "claim_source": source,
         "claim_document_id": doc.get("id"),
         "claim_kind": doc.get("doc_kind") or "exhibit",
-        "evidence_quote": summary,
+        "evidence_quote": detail,
         "evidence_source": source,
         "document_id": doc["id"],
         "evidence_kind": doc.get("doc_kind") or "exhibit",
         "evidence_tier": TIER_EVIDENCE,
         "self_undercut": True,
         "tainted_support": True,
-        "why_it_may_matter": (
-            "This exhibit appears fraudulently edited. Open the scan report "
-            "and review each flagged item before treating the record as proof."
-        ),
+        "why_it_may_matter": matter,
         "contradiction_type": "procedural_foundational",
-        "verification": _force_tainted_pass("", summary),
+        "verification": _force_tainted_pass("", detail),
     }
 
 
+JURAT_OR_BARE_DATE = re.compile(
+    r"(?i)^\s*(?:the\s+)?(?:\d{1,2}(?:st|nd|rd|th)?\s+day\s+of\s+)?"
+    r"(?:january|february|march|april|may|june|july|august|september|october|november|december)"
+    r"[,]?\s+\d{1,2},?\s+\d{4}\s*$"
+    r"|^\s*\d{1,2}(?:st|nd|rd|th)?\s+day\s+of\s+"
+    r"(?:january|february|march|april|may|june|july|august|september|october|november|december)"
+    r",?\s+\d{4}\s*$"
+)
+FILING_NARRATIVE_KINDS = frozenset(
+    {
+        "motion",
+        "complaint",
+        "answer",
+        "brief",
+        "memorandum",
+        "reply",
+        "opposition",
+        "letter",
+        "notice",
+        "affirmation",
+        "affidavit",
+        "filing",
+        "summons",
+    }
+)
+
+
+def keep_board_gotcha(
+    item: dict[str, Any],
+    docs: list[dict[str, Any]],
+    snaps: dict[str, dict[str, Any]],
+) -> bool:
+    """Drop copied jurat dates and 'edited' cards that are not on a defective exhibit."""
+    if item.get("tainted_support"):
+        return _keep_tainted_board_card(item, docs, snaps)
+    if _two_court_filings(item):
+        return False
+    claim = str(item.get("claim_quote") or "")
+    evidence = str(item.get("evidence_quote") or "")
+    if _ocr_broken(claim) or _ocr_broken(evidence):
+        return False
+    return True
+
+
+def _keep_tainted_board_card(
+    item: dict[str, Any],
+    docs: list[dict[str, Any]],
+    snaps: dict[str, dict[str, Any]],
+) -> bool:
+    doc_id = str(item.get("document_id") or "")
+    doc = next((row for row in docs if row.get("id") == doc_id), None)
+    kind = ((doc or {}).get("doc_kind") or item.get("evidence_kind") or "").lower()
+    if kind in COURT_FILING_KINDS:
+        return False
+    snap = snaps.get(doc_id) or {}
+    rows = _standalone_tainted_rows(doc or {"id": doc_id}, snap)
+    if rows:
+        detail, matter = _flagged_issue_detail(rows)
+        item["title"] = "Exhibit appears fraudulently edited"
+        item["claim_quote"] = ""
+        item["evidence_quote"] = detail
+        item["why_it_may_matter"] = matter
+        item["gotcha_level"] = "Exhibit appears fraudulently edited"
+        if doc:
+            item["display_name"] = doc.get("display_name") or doc.get("original_filename")
+            item["related_documents"] = [
+                {"document_id": doc_id, "display_name": item["display_name"]}
+            ]
+        return True
+    quote = str(item.get("evidence_quote") or "").strip()
+    if JURAT_OR_BARE_DATE.match(quote) or (
+        "day of" in quote.lower() and "flagged" not in quote.lower() and len(quote) < 80
+    ):
+        return False
+    return False
+
+
+def _two_court_filings(item: dict[str, Any]) -> bool:
+    claim_kind = str(item.get("claim_kind") or "").lower()
+    evidence_kind = str(item.get("evidence_kind") or "").lower()
+    if not claim_kind:
+        claim_kind = _kind_from_source(str(item.get("claim_source") or ""))
+    if not evidence_kind:
+        evidence_kind = _kind_from_source(str(item.get("evidence_source") or ""))
+    return claim_kind in FILING_NARRATIVE_KINDS and evidence_kind in FILING_NARRATIVE_KINDS
+
+
+def _kind_from_source(name: str) -> str:
+    blob = name.lower()
+    if "exhibit" in blob:
+        return "exhibit"
+    if "affidavit" in blob or "affirm" in blob:
+        return "affidavit"
+    if "notice" in blob:
+        return "notice"
+    if "motion" in blob:
+        return "motion"
+    return ""
+
+
+def _ocr_broken(text: str) -> bool:
+    blob = text or ""
+    if re.search(r"(?i)\b(tounsel|namemendoned|icater|plainitff)\b", blob):
+        return True
+    mixed = len(re.findall(r"[a-z][A-Z]", blob))
+    return mixed >= 3
+
+
+def _flagged_issue_detail(rows: list[dict[str, Any]]) -> tuple[str, str]:
+    """Concrete issue text + why it matters, from the exhibit's forensic findings."""
+    if not rows:
+        return (
+            "This exhibit appears fraudulently edited.",
+            "Open the scan report and review each flagged item before treating the record as proof.",
+        )
+
+    primary = rows[0]
+    title = str(primary.get("title") or "").strip()
+    explanation = str(primary.get("explanation") or "").strip()
+    why = str(primary.get("why_suspicious") or "").strip()
+    quoted = str(primary.get("quoted_evidence") or "").strip()
+    analysis = str(primary.get("analysis_type") or "").replace("_", " ").strip()
+
+    detail = explanation or why or title or analysis
+    detail = re.sub(r"(?i)^Automated document review reported:\s*", "", detail).strip()
+    detail = re.sub(r"(?i)^Flagged on this exhibit:\s*", "", detail).strip()
+    if quoted and quoted not in detail:
+        detail = f"{detail.rstrip('.')} Quoted on the page: “{quoted}”." if detail else f"Quoted on the page: “{quoted}”."
+    if not detail:
+        detail = "Content on this exhibit appears altered."
+
+    extras: list[str] = []
+    for row in rows[1:3]:
+        label = str(row.get("title") or "").strip()
+        if not label:
+            label = str(row.get("analysis_type") or "").replace("_", " ").strip()
+        if label and label not in detail and label not in extras:
+            extras.append(label)
+    if extras:
+        detail = detail.rstrip(".") + ". Also flagged: " + "; ".join(extras) + "."
+
+    matter = why if why and why not in detail else (
+        "A party's own exhibit that looks altered is not reliable proof until each flagged item is reviewed."
+    )
+    return detail, matter
+
+
 def _flagged_item_summary(rows: list[dict[str, Any]]) -> str:
-    titles: list[str] = []
-    for row in rows[:6]:
-        title = str(row.get("title") or "").strip()
-        analysis = str(row.get("analysis_type") or "").replace("_", " ").strip()
-        label = title or analysis
-        if label and label not in titles:
-            titles.append(label)
-    if titles:
-        return "Flagged on this exhibit: " + "; ".join(titles) + ". See the report for each item."
-    return "This exhibit appears fraudulently edited. See the report for each flagged item."
+    detail, _ = _flagged_issue_detail(rows)
+    return detail
 
 
 def _supporting_exhibit_docs(
@@ -630,19 +766,7 @@ def _claim_uses_exhibit(
     window = _window_around_claim(claim_excerpt, claim_quote)
     cited = _exhibit_tags(claim_quote) | _exhibit_tags(window)
     tag = _doc_exhibit_tag(doc)
-    if cited and tag and (tag in cited or any(_tags_compatible(tag, other) for other in cited)):
-        return True
-    produced = bool(PRODUCED_CUE.search(claim_quote) or PRODUCED_CUE.search(window))
-    excerpt = str((snaps.get(doc["id"]) or {}).get("text_excerpt") or "")
-    name = f"{doc.get('display_name') or ''} {doc.get('original_filename') or ''}"
-    kind = (doc.get("doc_kind") or "").lower()
-    if kind in {"proof_of_service"} and not produced and not (cited and tag):
-        return False
-    if produced and len(_stem_overlap(claim_quote, excerpt or name)) >= 2:
-        return True
-    if produced and _same_street_number(claim_quote, excerpt):
-        return True
-    return False
+    return _cited_exhibit_match(cited, tag)
 
 
 def _explicitly_uses_exhibit(
@@ -655,10 +779,14 @@ def _explicitly_uses_exhibit(
     claim_excerpt = str((snaps.get(claim.get("document_id") or "") or {}).get("text_excerpt") or filing_text)
     window = _window_around_claim(claim_excerpt, claim_quote)
     cited = _exhibit_tags(claim_quote) | _exhibit_tags(window)
-    tag = _doc_exhibit_tag(doc)
-    if cited and tag and (tag in cited or any(_tags_compatible(tag, other) for other in cited)):
-        return True
-    return bool(PRODUCED_CUE.search(claim_quote) or PRODUCED_CUE.search(window))
+    return _cited_exhibit_match(cited, _doc_exhibit_tag(doc))
+
+
+def _cited_exhibit_match(cited: set[str], tag: str | None) -> bool:
+    """Only a named exhibit tag binds. 'In support' on an affidavit is not a cite."""
+    if not cited or not tag:
+        return False
+    return tag in cited or any(_tags_compatible(tag, other) for other in cited)
 
 
 def _is_proof_oriented(text: str) -> bool:
@@ -744,6 +872,7 @@ def _tags_compatible(left: str, right: str) -> bool:
 
 
 def _tainted_rows(snap: dict[str, Any]) -> list[dict[str, Any]]:
+    """Content defects that survive a paper scan. Bare ELA / metadata alone do not count."""
     out: list[dict[str, Any]] = []
     for row in snap.get("findings_summary") or []:
         if not isinstance(row, dict):
@@ -753,12 +882,10 @@ def _tainted_rows(snap: dict[str, Any]) -> list[dict[str, Any]]:
         if str(row.get("severity") or "") not in {"medium", "high", "critical"}:
             continue
         analysis = str(row.get("analysis_type") or "")
-        fid = str(row.get("id") or "")
-        if analysis in TAINTED_ANALYSIS:
+        if analysis in INTERNAL_TAINTED:
             out.append(row)
-        elif fid.startswith("img-ela-") or fid.startswith("img-copymove-"):
-            out.append(row)
-        elif fid == "md-editor-software":
+            continue
+        if analysis in {"text_overlay", "graphic_manipulation"} and not row.get("scan_heavy"):
             out.append(row)
     return out[:3]
 
@@ -869,13 +996,13 @@ def merge_verdicts(
     if _complete_pass(local):
         out = dict(local)
         out["gate"] = "local"
-        return out
+        return _require_case_impact(candidate, out)
     model_type = _canonical_type(model.get("contradiction_type") if model else None, allow_retire_remap=False)
     if model and _complete_pass(model) and model_type:
         out = dict(model)
         out["contradiction_type"] = model_type
         out["gate"] = "model_complete"
-        return out
+        return _require_case_impact(candidate, out)
     if model and not model.get("pass"):
         out = dict(model)
         out["pass"] = False
@@ -886,6 +1013,36 @@ def merge_verdicts(
     out["pass"] = False
     out["failed_step"] = out.get("failed_step") or _first_fail(out)
     out["gate"] = "suppressed_ambiguous"
+    return out
+
+
+def _require_case_impact(candidate: dict[str, Any], verdict: dict[str, Any]) -> dict[str, Any]:
+    """Ambiguous pairs that cannot name a case-impact bucket do not ship."""
+    if candidate.get("tainted_support"):
+        return verdict
+    claim = str(candidate.get("claim_quote") or "")
+    evidence = str(candidate.get("evidence_quote") or "")
+    fact = str((verdict.get("same_fact") or {}).get("fact_named") or "")
+    bucket = _case_impact_bucket(claim, evidence, fact)
+    if bucket:
+        material = dict(verdict.get("materiality") or {})
+        material["pass"] = True
+        material["tier"] = bucket
+        material["reason"] = f"The contradicted fact bears on {bucket}."
+        out = dict(verdict)
+        out["materiality"] = material
+        return out
+    out = dict(verdict)
+    out["pass"] = False
+    out["failed_step"] = "materiality"
+    out["gate"] = "no_case_impact"
+    material = dict(out.get("materiality") or {})
+    material["pass"] = False
+    material["tier"] = "incidental"
+    material["reason"] = (
+        "Cannot name an element, procedure, credibility, or damages impact — suppress."
+    )
+    out["materiality"] = material
     return out
 
 
@@ -915,8 +1072,17 @@ def hard_veto_step(candidate: dict[str, Any], local: dict[str, Any]) -> str | No
         return "directionality"
     if _date_format_only(claim, evidence) or _incidental(claim, evidence):
         return "materiality"
+    if _two_court_filings(candidate):
+        return "same_fact"
+    if _ocr_broken(claim) or _ocr_broken(evidence):
+        return "textual_grounding"
     if local.get("failed_step") == "textual_grounding":
         return "textual_grounding"
+    fact_named = str((local.get("same_fact") or {}).get("fact_named") or "")
+    if (local.get("directionality") or {}).get("pass") and not _case_impact_bucket(
+        claim, evidence, fact_named
+    ):
+        return "materiality"
     return None
 
 
@@ -960,7 +1126,7 @@ def verify_pair(candidate: dict[str, Any]) -> dict[str, Any]:
     elif (
         PLACE_FACT.search(claim)
         and PLACE_FACT.search(evidence)
-        and _shared_year(claim, evidence)
+        and _shared_calendar_day(claim, evidence)
         and _different_places(claim, evidence)
     ):
         same = {
@@ -1025,13 +1191,16 @@ def verify_pair(candidate: dict[str, Any]) -> dict[str, Any]:
     }
 
     incidental = _incidental(claim, evidence) or _date_format_only(claim, evidence)
-    material_pass = direction_pass and not incidental
+    impact = _case_impact_bucket(claim, evidence, str(same.get("fact_named") or ""))
+    material_pass = bool(direction_pass and not incidental and impact)
     material = {
         "pass": material_pass,
-        "tier": "element" if material_pass else "incidental",
+        "tier": impact or "incidental",
         "reason": (
-            "The contradicted fact appears to bear on an element, procedure, credibility, or damages."
-            if material_pass
+            f"The contradicted fact bears on {impact}."
+            if material_pass and impact
+            else "Cannot name an element, procedure, credibility, or damages impact — suppress."
+            if direction_pass and not incidental
             else "The difference looks incidental, formatting-level, or the same date written two ways."
         ),
     }
@@ -1194,21 +1363,28 @@ def _to_finding(item: dict[str, Any], case_docs: list[dict[str, Any]] | None = N
     )
     ev_label = counter_label(ev_tier)
     if tainted_hit:
-        explanation = attorney_why or "This exhibit appears fraudulently edited. See the report for each flagged item."
+        detail = str(item.get("evidence_quote") or "").strip()
+        explanation = detail or attorney_why or (
+            "This exhibit appears fraudulently edited. See the report for each flagged item."
+        )
         seed = f"gotcha|edited|{item.get('document_id')}|{item.get('evidence_source')}"
         fid = "ctx-gotcha-" + hashlib.sha1(seed.encode("utf-8")).hexdigest()[:10]
+        why_suspicious = attorney_why if attorney_why and attorney_why not in explanation else (
+            "Open the scan report and review each flagged item before treating this exhibit as proof."
+        )
     else:
         explanation = (
             f"CLAIM ({item.get('claim_source') or 'filing'}): “{item.get('claim_quote')}” "
             f"{ev_label.upper()} ({item.get('evidence_source') or 'record'}): “{item.get('evidence_quote')}”"
         )
+        why_suspicious = attorney_why or direction_reason
     return finding(
         fid=fid,
         category="gotcha",
         severity=severity,  # type: ignore[arg-type]
         title=title,
         explanation=explanation,
-        why_suspicious=attorney_why or direction_reason,
+        why_suspicious=why_suspicious,
         confidence=confidence,
         evidence={
             "gotcha": True,
@@ -1391,6 +1567,42 @@ def _shared_year(left: str, right: str) -> bool:
     return bool(years)
 
 
+def _shared_calendar_day(left: str, right: str) -> bool:
+    """Same month-day-year, not merely the same index year on every caption."""
+    return bool(_day_keys(left) & _day_keys(right))
+
+
+def _day_keys(text: str) -> set[str]:
+    keys: set[str] = set()
+    for match in re.finditer(r"\b(\d{1,2})/(\d{1,2})/(\d{2,4})\b", text or ""):
+        month, day, year = int(match.group(1)), int(match.group(2)), int(match.group(3))
+        if year < 100:
+            year += 2000 if year <= 39 else 1900
+        keys.add(f"{year:04d}-{month:02d}-{day:02d}")
+    for match in re.finditer(
+        r"\b(January|February|March|April|May|June|July|August|September|October|November|December)"
+        r"\s+(\d{1,2}),?\s+(\d{4})\b",
+        text or "",
+        re.I,
+    ):
+        month = {
+            "january": 1,
+            "february": 2,
+            "march": 3,
+            "april": 4,
+            "may": 5,
+            "june": 6,
+            "july": 7,
+            "august": 8,
+            "september": 9,
+            "october": 10,
+            "november": 11,
+            "december": 12,
+        }[match.group(1).lower()]
+        keys.add(f"{int(match.group(3)):04d}-{month:02d}-{int(match.group(2)):02d}")
+    return keys
+
+
 def _duty_vs_place(claim: str, evidence: str) -> bool:
     if DUTY_OR_CONDITION.search(claim) and PLACE_FACT.search(evidence) and not DUTY_OR_CONDITION.search(evidence):
         return True
@@ -1445,6 +1657,85 @@ def _has_opposing_polarity(claim: str, evidence: str) -> bool:
     ):
         return True
     return False
+
+
+def _case_impact_bucket(claim: str, evidence: str, fact_named: str = "") -> str | None:
+    """Name element / procedure / credibility / damages, or None to suppress."""
+    blob = f"{claim} {evidence} {fact_named}".lower()
+    fact = (fact_named or "").lower()
+    if fact in {"residence at the stated address", "whereabouts on a shared date"}:
+        return "element"
+    if fact == "authenticity of the offered exhibit":
+        return "procedure"
+    if _denies_residence(claim) or _asserts_residence(claim):
+        if SERVICE_FACT.search(blob) or PLACE_FACT.search(blob):
+            return "element"
+    if SERVICE_FACT.search(claim) and (
+        SERVICE_FACT.search(evidence) or PLACE_FACT.search(evidence) or _denies_residence(evidence)
+    ):
+        return "element"
+    if re.search(
+        r"(?i)\b("
+        r"jurisdiction|standing|default|summons|complaint|"
+        r"personal\s+jurisdiction|suitable\s+age|conspicuous|"
+        r"affidavit\s+of\s+service|process\s+server"
+        r")\b",
+        blob,
+    ):
+        return "element"
+    if re.search(
+        r"(?i)\b("
+        r"discharge|satisfaction\s+of\s+mortgage|crfn|"
+        r"authority|authorized\s+to\s+(?:act|represent)|"
+        r"not\s+represented|foundation|so-?ordered|entered"
+        r")\b",
+        blob,
+    ):
+        return "procedure"
+    if re.search(
+        r"(?i)\b("
+        r"fraud|forged|fabricat|alter(?:ed|ation)|tainted|"
+        r"false\s+(?:statement|exhibit|record)|under\s+oath|"
+        r"perjur|credibility|impeach"
+        r")\b",
+        blob,
+    ):
+        return "credibility"
+    if re.search(
+        r"(?i)\b("
+        r"damages|amount\s+due|fees?|attorney'?s?\s+fees|"
+        r"accrued\s+interest|late\s+charge|balance\s+due"
+        r")\b",
+        blob,
+    ):
+        return "damages"
+    if re.search(
+        r"(?i)\b("
+        r"never|did\s+not|was\s+not|exclusive|sole|disclosed\s+all|"
+        r"no\s+prior|no\s+other|no\s+knowledge|not\s+aware|first\s+learned|"
+        r"under\s+penalty|every\s+weekday|primary\s+caregiver"
+        r")\b",
+        claim,
+    ) and _has_opposing_polarity(claim, evidence):
+        return "credibility"
+    if re.search(
+        r"(?i)\b("
+        r"caregiver|custody|parenting|visitation|net\s+worth|"
+        r"change-?order|no\s+prior\s+complaints?"
+        r")\b",
+        blob,
+    ):
+        return "element" if re.search(r"(?i)\b(caregiver|custody|parenting|visitation)\b", blob) else "credibility"
+    if re.search(
+        r"(?i)\b("
+        r"after\s+agreeing|stipulation\s+of\s+settlement|"
+        r"continued\s+to\s+(?:send|collect|demand)|"
+        r"cancels?\s+collection|discharges?\s+it"
+        r")\b",
+        blob,
+    ):
+        return "procedure"
+    return None
 
 
 def _street_numbers(text: str) -> set[str]:

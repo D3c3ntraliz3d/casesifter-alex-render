@@ -154,6 +154,14 @@ export async function scanDocument(caseId, documentId) {
   return readJson(res);
 }
 
+export async function rescanCase(caseId) {
+  const res = await fetch(`/api/cases/${caseId}/rescan`, {
+    method: "POST",
+    headers: jsonHeaders,
+  });
+  return readJson(res);
+}
+
 export async function getEntitlement() {
   const res = await fetch("/api/entitlement", { headers: jsonHeaders });
   return readJson(res);

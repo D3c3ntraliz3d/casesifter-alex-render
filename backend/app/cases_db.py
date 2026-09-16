@@ -467,10 +467,12 @@ def list_prior_snapshots(case_id: str, exclude_document_id: str) -> list[dict[st
 def list_case_gotchas(case_id: str) -> list[dict[str, Any]]:
     from app.case_consistency import dedupe_gotchas
     from app.evidence_tier import evidence_is_probative
+    from app.gotcha import keep_board_gotcha
 
     docs = list_documents(case_id)
+    snaps = {item["document_id"]: item for item in list_case_snapshots(case_id)}
     out: list[dict[str, Any]] = []
-    for snap in list_case_snapshots(case_id):
+    for snap in snaps.values():
         for item in snap.get("findings_summary") or []:
             if not item.get("gotcha") and item.get("analysis_type") != "gotcha":
                 continue
@@ -483,6 +485,8 @@ def list_case_gotchas(case_id: str) -> list[dict[str, Any]]:
                 "scan_job_id": None,
             }
             if not evidence_is_probative(record, docs):
+                continue
+            if not keep_board_gotcha(record, docs, snaps):
                 continue
             out.append(record)
     out = dedupe_gotchas(out)

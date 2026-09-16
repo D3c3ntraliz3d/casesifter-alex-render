@@ -197,6 +197,10 @@ def drop_noise_findings(findings: list[Finding]) -> list[Finding]:
     for item in findings:
         if is_header_or_arrears_noise(item):
             continue
+        # Exhibit letter/number labels change between initial filing and the
+        # recorded packet — "Referenced Exhibit A is not in this case" is noise.
+        if str((item.evidence or {}).get("field") or "") == "missing_exhibit":
+            continue
         kept.append(item)
     return kept
 
@@ -227,18 +231,24 @@ def is_material_finding(item: Finding) -> bool:
             "critical",
         }
     if item.category == "case_consistency":
-        # Cross-document labeled facts are one case-level alert, not N file scores.
-        if evidence.get("prior_document_id") and str(evidence.get("field") or "") != "missing_exhibit":
+        # Exhibit letter mismatches and cross-doc labeled facts are not file scores.
+        if str(evidence.get("field") or "") == "missing_exhibit":
+            return False
+        if evidence.get("prior_document_id"):
             return False
         return bool(evidence.get("material")) and item.severity in {"medium", "high", "critical"}
     if item.id.startswith("img-ela-"):
-        return item.severity in {"medium", "high"} and not evidence.get("scan_heavy")
+        # Paper scans: whole-page texture is noise. Only print-scan statement review interrupts.
+        return bool(evidence.get("print_scan_review")) and item.severity in {"medium", "high"}
     if item.id.startswith("img-copymove-"):
         return item.severity in {"medium", "high"} and not evidence.get("scan_heavy")
     if item.id == "md-editor-software":
-        return True
+        # Scanner / e-filing producer tags are not proof the paper was forged.
+        return False
     if item.id == "pdf-javascript" and item.severity in {"medium", "high"}:
         return True
+    if analysis in {"text_overlay", "graphic_manipulation"} and evidence.get("scan_heavy"):
+        return False
     return False
 
 

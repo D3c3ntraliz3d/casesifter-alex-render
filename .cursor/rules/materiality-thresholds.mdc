@@ -5,16 +5,76 @@ alwaysApply: true
 
 # Gotchas only
 
-This is systematic pattern detection and contradiction spotting with evidence fraud analysis. It is not argument synthesis. Do not assemble a party's case, pair competing recitals as impeachment, or write advocacy.
+This is systematic pattern detection and contradiction spotting with evidence
+fraud analysis. It is not argument synthesis. Do not assemble a party's case,
+pair competing recitals as impeachment, or write advocacy.
 
-A gotcha is a claim checked against real evidence (sworn, documentary, or an entered court act) that passes all four: same nameable fact, evidence runs AGAINST the claim, material to an element/procedure/credibility/damages, and both quotes are in the pulled text. Two motions or a claim vs a proposed order is advocacy, not a gotcha. A model pass without those four completed steps does not ship. When a pair is ambiguous, suppress it.
+Incoming files are **scans of paper** (flatbed / print-then-scan / NYSCEF), not
+native-born originals. Prefer content that survives OCR. Ordinary scan texture,
+mixed page size, OCR noise, e-filing packaging, file-creation metadata, and
+generic font mismatch are not case interrupts.
 
-Related documents that show a defect about the same subject often SUPPORT a denial. That is not a gotcha. Shared topic, person, or caption is not the same fact. Evidence that restates the claim (not settled / case not settled; I live at X / a record lists X) is FOR, not against.
+A gotcha is a claim checked against real evidence (sworn, documentary, or an
+entered court act) that passes all four: same nameable fact, evidence runs
+AGAINST the claim, material to an element/procedure/credibility/damages, and
+both quotes are in the pulled text. Two motions or a claim vs a proposed order
+is advocacy, not a gotcha. A model pass without those four completed steps does
+not ship. When a pair is ambiguous, suppress it.
 
-He-said-she-said is not a gotcha. A denial versus the other side's competing recital (including a bare service denial versus an affidavit of service, or a service-attempt claim versus a DMV/address printout that lists or supports the same address) is the ordinary dispute. The gotcha is when that party produces evidence and that evidence is fraudulent or false — their exhibit undercuts the claim, or the fraud/forensic check flags the exhibit they offered. Bought bank/utility/invoice templates filled in, printed, and scanned are exhibit fraud to look for. Court filings are out of scope for that check.
+Related documents that show a defect about the same subject often SUPPORT a
+denial. That is not a gotcha. Shared topic, person, or caption is not the same
+fact. Evidence that restates the claim (not settled / case not settled; I live
+at X / a record lists X) is FOR, not against.
 
-Recorded public instruments (mortgages, deeds, assignments) are not bank statements. Do not treat rounding, loan-math, or similar numeric quirks on those records as findings unless there is a genuine alteration or fraud signal. Note rate versus default/penalty rate, remaining principal, and the installment amount that change after missed payments or amortization are expected loan-status movement — ignore them.
+He-said-she-said is not a gotcha. A denial versus the other side's competing
+recital (including a bare service denial versus an affidavit of service, or a
+service-attempt claim versus a DMV/address printout that lists or supports the
+same address) is the ordinary dispute. The gotcha is when that party produces
+evidence and that evidence is fraudulent or false — their exhibit undercuts the
+claim, or the fraud/forensic check flags the exhibit they offered. Bought
+bank/utility/invoice templates filled in, printed, and scanned are exhibit
+fraud to look for. Court filings are out of scope for that check.
 
-Do not hardcode practice-area phrases. Types are only: factual contradiction, chronology inconsistency, material omission, procedural/foundational, admission against interest.
+## Case-impact allowlist (interrupt)
+
+Ship only when the finding hits at least one bucket:
+
+- **Element** — e.g. personal jurisdiction / service, standing, default
+- **Procedure / foundation** — authority to act, entered court act, same-CRFN
+  discharge vs continued reliance
+- **Credibility** — party's own exhibit is false or internally impossible
+- **Damages** — fee/amount that is not ordinary loan-status movement
+
+Primary exhibit-fraud signals (content that survives a scan): impossible
+statement dates, consumer-statement math that does not reconcile, leftover
+template chrome, historical impossibility on the exhibit body. Secondary only
+with statement context: strong localized overlay/ELA on a consumer statement —
+never whole-page scan texture alone, never on pleadings/deeds as a standalone
+interrupt.
+
+Case-level structural interrupts stay sparse: same-CRFN discharge vs continued
+reliance, conflicting first-default/notice/foreclosure dates (not same-month
+noise), fee conflicts that are not amortization.
+
+## Suppress (do not interrupt)
+
+Note rate versus default/penalty rate, remaining principal, and the installment
+amount that change after missed payments or amortization are expected
+loan-status movement — ignore them. Recorded public instruments (mortgages,
+deeds, assignments) are not bank statements; do not treat rounding or loan-math
+quirks as findings unless there is a genuine alteration signal.
+
+Also suppress: caption/party list; NYSCEF header; filing-stamp vs body date;
+arrears demand letters citing older installments; shared index/caption year
+only; jurat-only “edited exhibit” cards; OCR garbage quotes; font/spelling
+nuance; metadata or editor-software alone; scan-heavy ELA without a content
+hook; mixed page size/rotation/AcroForm on court filings; exhibit letter or
+number label mismatches (labels routinely change between initial filing and
+the recorded packet — “Referenced Exhibit A is not in this case” is not an
+interrupt).
+
+Do not hardcode practice-area phrases. Types are only: factual contradiction,
+chronology inconsistency, material omission, procedural/foundational, admission
+against interest.
 
 Risk scores from verified findings only — never document type or title.

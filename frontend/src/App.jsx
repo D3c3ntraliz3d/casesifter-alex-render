@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Archive, FolderOpen, MessageSquare, RotateCcw, Search, ShieldAlert, Trash2, Upload, X } from "lucide-react";
+import { Archive, FolderOpen, MessageSquare, RefreshCw, RotateCcw, Search, ShieldAlert, Trash2, Upload, X } from "lucide-react";
 import {
   archiveCase,
   askCaseChat,
@@ -17,6 +17,7 @@ import {
   loginCloud,
   logoutCloud,
   patchDocument,
+  rescanCase,
   saveLicense,
   scanDocument,
   sendFindingFeedback,
@@ -727,6 +728,30 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
     }
   }
 
+  async function rescanAll() {
+    if (!docs.length) return;
+    const ok = window.confirm(
+      `Rescan all ${docs.length} file${docs.length === 1 ? "" : "s"} in this case? Scans run two at a time and may take a while.`
+    );
+    if (!ok) return;
+    setBusy(true);
+    try {
+      const result = await rescanCase(caseData.id);
+      setUploadNote(
+        result.status === "idle"
+          ? "Nothing to rescan right now."
+          : `Started rescan of ${result.queued} file${result.queued === 1 ? "" : "s"}` +
+            (result.skipped ? ` (${result.skipped} skipped).` : ".") +
+            " Running two at a time."
+      );
+      await onRefresh();
+    } catch (err) {
+      onError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const scanned = docs.filter((d) => d.status === "complete" && d.risk_level);
   const byRisk = {
     red: scanned.filter((d) => d.risk_level === "red"),
@@ -740,6 +765,11 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
         <div className="toolbar tight">
           <button className="text-link" type="button" onClick={() => { setBusy(false); onBack(); }}>← All cases</button>
           <div className="row-actions">
+            {!caseData.archived_at && docs.length > 0 && (
+              <button className="btn secondary" type="button" disabled={busy} onClick={rescanAll}>
+                <RefreshCw size={14} /> Rescan all
+              </button>
+            )}
             {caseData.archived_at ? (
               <button className="btn secondary" type="button" disabled={busy} onClick={onUnarchive}>
                 <RotateCcw size={14} /> Restore
@@ -1007,10 +1037,9 @@ function CaseGotchaBoard({ caseId, documents, onOpenReport }) {
                 <p className="gotcha-quote">
                   {item.evidence_quote || "See the scan report for each flagged item."}
                 </p>
-                <p className="gotcha-why">
-                  This exhibit appears fraudulently edited. Open the report for the detail of
-                  each flagged item.
-                </p>
+                {(item.why_it_may_matter || item.attorney_why) && (
+                  <p className="gotcha-why">{item.why_it_may_matter || item.attorney_why}</p>
+                )}
               </>
             ) : (
               <>
@@ -1532,9 +1561,12 @@ function ReportViewer({
     item.category === "case_consistency"
     && item.evidence?.prior_document_id
     && item.evidence?.field
-    && item.evidence.field !== "missing_exhibit"
   );
-  const visibleFindings = findings.filter((f) => !isCrossDocFact(f));
+  const isExhibitLabelNoise = (item) => Boolean(
+    item.category === "case_consistency"
+    && item.evidence?.field === "missing_exhibit"
+  );
+  const visibleFindings = findings.filter((f) => !isCrossDocFact(f) && !isExhibitLabelNoise(f));
   const material = visibleFindings.filter((f) => f.severity !== "info");
   const caseAlerts = visibleFindings.filter((f) => f.category === "case_consistency");
   const hiddenCrossDoc = findings.length - visibleFindings.length;
@@ -1634,9 +1666,9 @@ function ReportViewer({
             <div className="grid-2">
               <div>
                 <h3 className="serif">Top findings</h3>
-                {(report.top_findings || []).filter((item) => !isCrossDocFact(item)).length === 0 && <p>No material findings.</p>}
-                {(report.top_findings || []).filter((item) => !isCrossDocFact(item)).map((item) => (
-                  <FindingCard key={item.id} item={item} docKind={docKind} />
+                {(report.top_findings || []).filter((item) => !isCrossDocFact(item) && !isExhibitLabelNoise(item)).length === 0 && <p>No material findings.</p>}
+                {(report.top_findings || []).filter((item) => !isCrossDocFact(item) && !isExhibitLabelNoise(item)).map((item) => (
+                  <FindingCard key={item.id} item={item} docKind={docKind} siblings={visibleFindings} />
                 ))}
               </div>
               <div>
@@ -1655,7 +1687,7 @@ function ReportViewer({
             <div>
               <p className="footnote">{material.length} material finding(s), {visibleFindings.length} total including notes.</p>
               {visibleFindings.map((item) => (
-                <FindingCard key={item.id} item={item} docKind={docKind} />
+                <FindingCard key={item.id} item={item} docKind={docKind} siblings={visibleFindings} />
               ))}
               {visibleFindings.length === 0 && <p>The automated modules did not flag this file.</p>}
             </div>
@@ -1832,12 +1864,71 @@ function DocumentPreview({ url, isPdf, isImage, isText, name }) {
   );
 }
 
-function FindingCard({ item, docKind }) {
+function resolveTaintedCopy(item, siblings = []) {
+  const genericRe = /appears fraudulently edited/i;
+  const flaggedRe = /^Flagged on this exhibit:/i;
+  const explanation = String(item.explanation || "").trim();
+  const quote = String(item.evidence?.evidence_quote || "").trim();
+  const needsEnrich = !explanation || genericRe.test(explanation) || flaggedRe.test(quote);
+  const taintedTypes = new Set([
+    "math_error",
+    "historical_impossibility",
+    "date_inconsistency",
+    "template_fabrication",
+    "text_overlay",
+    "graphic_manipulation",
+  ]);
+  if (!needsEnrich) {
+    return {
+      detail: explanation,
+      why: item.why_suspicious,
+    };
+  }
+  const defects = siblings.filter((f) => (
+    f.id !== item.id
+    && taintedTypes.has(f.evidence?.analysis_type)
+    && ["medium", "high", "critical"].includes(f.severity)
+  ));
+  if (defects.length) {
+    const primary = defects[0];
+    let detail = String(primary.explanation || primary.why_suspicious || primary.title || "")
+      .replace(/^Automated document review reported:\s*/i, "")
+      .trim();
+    const quoted = String(primary.evidence?.quoted_evidence || "").trim();
+    if (quoted && !detail.includes(quoted)) {
+      detail = `${detail.replace(/\.$/, "")} Quoted on the page: “${quoted}”.`;
+    }
+    const extras = defects.slice(1, 3)
+      .map((f) => f.title)
+      .filter(Boolean);
+    if (extras.length) {
+      detail = `${detail.replace(/\.$/, "")}. Also flagged: ${extras.join("; ")}.`;
+    }
+    const why = primary.why_suspicious && primary.why_suspicious !== detail
+      ? primary.why_suspicious
+      : (item.why_suspicious && !genericRe.test(item.why_suspicious)
+        ? item.why_suspicious
+        : "A party's own exhibit that looks altered is not reliable proof until each flagged item is reviewed.");
+    return { detail, why };
+  }
+  const detail = (quote && !flaggedRe.test(quote) ? quote : explanation)
+    || "See the scan report for each flagged item.";
+  return {
+    detail,
+    why: item.why_suspicious && !genericRe.test(item.why_suspicious)
+      ? item.why_suspicious
+      : "Open the scan report and review each flagged item before treating this exhibit as proof.",
+  };
+}
+
+function FindingCard({ item, docKind, siblings = [] }) {
   const heat = item.evidence?.heatmap;
   const aiLead = Boolean(item.evidence?.ai_generated);
   const caseHit = Boolean(item.evidence?.case_consistency);
   const gotcha = Boolean(item.evidence?.gotcha) || item.category === "gotcha";
   const [feedback, setFeedback] = useState(null);
+  const tainted = gotcha && item.evidence?.tainted_support;
+  const taintedCopy = tainted ? resolveTaintedCopy(item, siblings) : null;
 
   return (
     <article className={`finding${gotcha ? " gotcha-card" : ""}`}>
@@ -1852,13 +1943,8 @@ function FindingCard({ item, docKind }) {
       {caseHit && item.evidence?.prior_display_name && (
         <p className="footnote">Prior file: {item.evidence.prior_display_name}</p>
       )}
-      {gotcha && item.evidence?.tainted_support ? (
-        <>
-          <p>{item.explanation}</p>
-          {item.evidence?.evidence_quote && (
-            <p className="gotcha-quote">{item.evidence.evidence_quote}</p>
-          )}
-        </>
+      {tainted ? (
+        <p>{taintedCopy.detail}</p>
       ) : gotcha && item.evidence?.claim_quote ? (
         <>
           <p className="gotcha-quote">
@@ -1877,7 +1963,7 @@ function FindingCard({ item, docKind }) {
       ) : (
         <p>{item.explanation}</p>
       )}
-      <p className="why">{item.why_suspicious}</p>
+      <p className="why">{tainted ? taintedCopy.why : item.why_suspicious}</p>
       {aiLead && (
         <p className="ai-lead">
           <strong>AI-Assisted Research Lead:</strong> This finding is based on an automated

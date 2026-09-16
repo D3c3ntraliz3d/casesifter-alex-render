@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import shutil
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -380,6 +381,115 @@ def api_patch_document(case_id: str, document_id: str, body: DocumentUpdate):
     return updated
 
 
+_CASE_RESCAN_LOCK = threading.Lock()
+_ACTIVE_CASE_RESCANS: set[str] = set()
+
+
+@router.post("/cases/{case_id}/rescan")
+def api_rescan_case(
+    case_id: str,
+    submitted_by: str = Query(default="court-staff"),
+):
+    """Start a paced full-case rescan in the background (two scans at a time)."""
+    _ensure_entitled()
+    _validate_id(case_id)
+    case = cases_db.get_case(case_id)
+    if case is None:
+        raise HTTPException(404, "Unknown case.")
+    # Full rescan: clear any queued/scanning flags (including orphans from a prior crash)
+    # so every stored file can be started again.
+    _reap_stale_scans(case_id, stale_seconds=0)
+
+    pending: list[str] = []
+    skipped: list[dict[str, str]] = []
+    for doc in cases_db.list_documents(case_id):
+        name = doc.get("display_name") or doc.get("original_filename") or doc["id"]
+        source = Path(doc.get("stored_path") or "")
+        if not source.exists():
+            skipped.append({"document_id": doc["id"], "name": name, "reason": "missing_file"})
+            continue
+        pending.append(doc["id"])
+
+    if not pending:
+        return {
+            "case_id": case_id,
+            "queued": 0,
+            "skipped": len(skipped),
+            "skipped_documents": skipped,
+            "status": "idle",
+        }
+
+    with _CASE_RESCAN_LOCK:
+        if case_id in _ACTIVE_CASE_RESCANS:
+            raise HTTPException(409, "A full-case rescan is already running for this matter.")
+        _ACTIVE_CASE_RESCANS.add(case_id)
+
+    thread = threading.Thread(
+        target=_pace_case_rescan,
+        args=(case_id, pending, submitted_by),
+        daemon=True,
+        name=f"case-rescan-{case_id[:8]}",
+    )
+    thread.start()
+    return {
+        "case_id": case_id,
+        "queued": len(pending),
+        "skipped": len(skipped),
+        "skipped_documents": skipped,
+        "status": "started",
+    }
+
+
+def _busy_scan_count(case_id: str) -> int:
+    return sum(
+        1
+        for doc in cases_db.list_documents(case_id)
+        if doc.get("status") in {"queued", "scanning"}
+    )
+
+
+def _wait_for_scan_capacity() -> None:
+    """Block until a scan slot is free (without holding it — _run_job acquires for real)."""
+    waited = 0
+    while True:
+        if _SCAN_SLOTS.acquire(timeout=1):
+            _SCAN_SLOTS.release()
+            return
+        time.sleep(1)
+        waited += 1
+        if waited >= 48:
+            return
+
+
+def _pace_case_rescan(case_id: str, document_ids: list[str], submitted_by: str) -> None:
+    """Start scans two-at-a-time so the request path never copies/spawns everything at once."""
+    try:
+        for document_id in document_ids:
+            _wait_for_scan_capacity()
+            waited = 0
+            while _busy_scan_count(case_id) >= 2:
+                time.sleep(2)
+                waited += 2
+                if waited >= 48:
+                    break
+            doc = cases_db.get_document(document_id)
+            if doc is None or doc.get("case_id") != case_id:
+                continue
+            if doc.get("status") in {"queued", "scanning"}:
+                continue
+            source = Path(doc.get("stored_path") or "")
+            if not source.exists():
+                continue
+            try:
+                _queue_document_scan(doc, submitted_by=submitted_by)
+            except Exception:
+                continue
+            time.sleep(1)
+    finally:
+        with _CASE_RESCAN_LOCK:
+            _ACTIVE_CASE_RESCANS.discard(case_id)
+
+
 @router.post("/cases/{case_id}/documents/{document_id}/scan", response_model=UploadResponse)
 def api_scan_document(
     case_id: str,
@@ -399,21 +509,28 @@ def api_scan_document(
     if not source.exists():
         raise HTTPException(404, "Stored file is missing on disk.")
 
+    job = _queue_document_scan(doc, submitted_by=submitted_by)
+    return UploadResponse(job_id=job["job_id"], filename=job["filename"], status="queued")
+
+
+def _queue_document_scan(doc: dict, *, submitted_by: str) -> dict[str, str]:
+    source = Path(doc["stored_path"])
     job_id = uuid.uuid4().hex
-    job_path = job_dir(job_id) / Path(doc["original_filename"]).name
+    filename = Path(doc["original_filename"]).name
+    job_path = job_dir(job_id) / filename
     shutil.copy2(source, job_path)
     create_job(job_id, job_path.name)
-    cases_db.update_document(document_id, scan_job_id=job_id, status="queued")
+    cases_db.update_document(doc["id"], scan_job_id=job_id, status="queued")
     _start_analysis(
         job_id,
         job_path,
         submitted_by,
-        case_id=case_id,
-        document_id=document_id,
+        case_id=doc["case_id"],
+        document_id=doc["id"],
         display_name=doc.get("display_name"),
         doc_kind=doc.get("doc_kind"),
     )
-    return UploadResponse(job_id=job_id, filename=job_path.name, status="queued")
+    return {"job_id": job_id, "filename": job_path.name}
 
 
 @router.get("/cases/{case_id}/documents/{document_id}")
