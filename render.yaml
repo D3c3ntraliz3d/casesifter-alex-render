@@ -54,4 +54,3 @@ services:
     name: casesifter-marketing
     runtime: static
     staticPublishPath: ./marketing
-    plan: starter
