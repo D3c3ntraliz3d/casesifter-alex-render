@@ -5,6 +5,7 @@ import {
   askCaseChat,
   createCase,
   deleteCase,
+  deleteDocument,
   documentFileUrl,
   exportUrl,
   getCase,
@@ -16,7 +17,13 @@ import {
   listCases,
   loginCloud,
   logoutCloud,
+  signupCloud,
+  reportProblem,
+  startCheckout,
   patchDocument,
+  pickDesktopDocuments,
+  getDesktopReport,
+  isDesktopApp,
   rescanCase,
   saveLicense,
   scanDocument,
@@ -93,8 +100,8 @@ const COURT_FILING_KINDS = new Set([
 ]);
 
 function profileForKind(kind) {
-  if (!kind) return "needs review — kind not set (not a risk score)";
-  return COURT_FILING_KINDS.has((kind || "").toLowerCase()) ? "court filing" : "exhibit forensic";
+  if (!kind) return "Set a kind";
+  return COURT_FILING_KINDS.has((kind || "").toLowerCase()) ? "Court filing" : "Exhibit forensic";
 }
 
 const ACCEPTED = new Set([".pdf", ".docx", ".xlsx", ".txt", ".jpg", ".jpeg", ".png", ".gif"]);
@@ -102,6 +109,45 @@ const ACCEPTED = new Set([".pdf", ".docx", ".xlsx", ".txt", ".jpg", ".jpeg", ".p
 function extensionOf(name) {
   const i = name.lastIndexOf(".");
   return i >= 0 ? name.slice(i).toLowerCase() : "";
+}
+
+/** Readable label for long NYSCEF-style export names. */
+function shortDocLabel(name) {
+  const raw = String(name || "").trim();
+  if (!raw) return "Untitled";
+  const base = raw.replace(/\.[A-Za-z0-9]+$/, "");
+
+  // Prefer the filing-type segment after parties (…_v_Party_TYPE_…_N).
+  const typeTail = base.match(
+    /_(SUMMONS(?:_WITH_NOTICE)?|STIPULATION(?:_{1,3}[A-Z]+)?|AFFIDAVIT(?:_OR_AFFIRM)?|AFFIRMATION(?:_AFFIDAV)?|COMPLAINT|ANSWER|NOTICE_OF_[A-Z0-9_]+|NOTICE_TO_[A-Z0-9_]+|ORDER(?:_{1,3}[A-Z0-9_]+)?|MOTION|LETTER(?:_{1,3}[A-Z0-9_]+)?|EXHIBIT(?:_[A-Z0-9_]+)?|RJI(?:_{1,3}[A-Z0-9_]+)?|CERTIFICATE(?:_OF_[A-Z0-9_]+)?|DECISION(?:_{1,3}[A-Z0-9_]+)?|STATEMENT_OF_[A-Z0-9_]+|NOTIFICATION(?:_FROM_[A-Z0-9_]+)?|ADDENDUM(?:_{1,3}[A-Z0-9_]+)?|REQUEST(?:_[A-Z0-9_]+)?|PROOF_OF_SERVICE)_(\d{1,4})$/i
+  );
+  if (typeTail) {
+    const type = typeTail[1]
+      .replace(/_+/g, " ")
+      .toLowerCase()
+      .replace(/\b\w/g, (c) => c.toUpperCase())
+      .replace(/\bAdjou\b/i, "Adjournment")
+      .replace(/\bAffidav\b/i, "Affidavit")
+      .replace(/\bCorrespond\b/i, "Correspondence")
+      .replace(/\bForeclos\b/i, "Foreclosure")
+      .replace(/\bAuthor(?:ity)?\b/i, "Authority")
+      .replace(/\bAppearanc\b/i, "Appearance")
+      .replace(/\bResidentia\b/i, "Residential")
+      .replace(/\bPendency\b/i, "Pendency")
+      .replace(/\bRe\b/, "—");
+    return `${type} · #${typeTail[2]}`;
+  }
+
+  if (raw.length <= 48) return raw;
+  return `${raw.slice(0, 28)}…${raw.slice(-16)}`;
+}
+
+function docListTitle(doc) {
+  const display = (doc.display_name || "").trim();
+  const original = (doc.original_filename || "").trim();
+  // Prefer a human rename; otherwise shorten the export name.
+  if (display && display !== original) return display;
+  return shortDocLabel(display || original);
 }
 
 function partiesFromCaption(caption = "") {
@@ -134,6 +180,22 @@ function formatUpdatedAt(value) {
     month: "short",
     day: "numeric",
     year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+/** Compact last-scan stamp for the document list. */
+function formatScanAt(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const now = new Date();
+  const sameYear = date.getFullYear() === now.getFullYear();
+  return date.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    ...(sameYear ? {} : { year: "numeric" }),
     hour: "numeric",
     minute: "2-digit",
   });
@@ -205,7 +267,30 @@ export default function App() {
     refreshEntitlement();
   }, []);
 
+  // Desktop: refresh while any doc is queued/scanning so status flips show up.
   useEffect(() => {
+    if (!isDesktopApp()) return;
+    if (!caseData?.id) return;
+    const active = (caseData.documents || []).some(
+      (d) => d.status === "queued" || d.status === "scanning"
+    );
+    if (!active) return;
+    const timer = setInterval(() => {
+      refreshCase(caseData.id).catch(() => {});
+    }, 5000);
+    return () => clearInterval(timer);
+    // Intentionally depend on a cheap signature, not the documents array identity,
+    // so each refresh does not tear down and recreate the interval.
+  }, [
+    caseData?.id,
+    (caseData?.documents || [])
+      .filter((d) => d.status === "queued" || d.status === "scanning")
+      .map((d) => d.id)
+      .join(","),
+  ]);
+
+  useEffect(() => {
+    if (isDesktopApp()) return;
     if (!caseData?.documents?.length) return;
     const pending = caseData.documents.filter(
       (d) => d.scan_job_id && d.status !== "complete" && d.status !== "failed" && d.status !== "uploaded"
@@ -246,6 +331,26 @@ export default function App() {
   async function openDocumentReport(doc) {
     setSelectedDocId(doc.id);
     setTab("summary");
+    if (isDesktopApp()) {
+      const report = await getDesktopReport(caseId || caseData?.id, doc.id);
+      if (!report) {
+        setJob(null);
+        setError("This document has not been scanned yet. Use Scan on the filing list.");
+        return;
+      }
+      setJob({
+        job_id: doc.scan_job_id || doc.id,
+        status: "complete",
+        stage: "complete",
+        percent: 100,
+        message: "Report cached on this PC.",
+        filename: doc.display_name || doc.original_filename,
+        report,
+        ephemeral: true,
+      });
+      setView("report");
+      return;
+    }
     if (!doc.scan_job_id) {
       setJob(null);
       setError("This document has not been scanned yet.");
@@ -325,14 +430,74 @@ export default function App() {
     }
   }
 
+  async function handleBulkArchive(ids) {
+    if (!ids.length) return;
+    if (!window.confirm(`Archive ${ids.length} case${ids.length === 1 ? "" : "s"}? They can be restored later.`)) return;
+    setBusy(true);
+    setError("");
+    try {
+      for (const id of ids) {
+        await archiveCase(id);
+        if (caseId === id) {
+          setView("cases");
+          setCaseId(null);
+          setCaseData(null);
+        }
+      }
+      await refreshCases();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleBulkUnarchive(ids) {
+    if (!ids.length) return;
+    setBusy(true);
+    setError("");
+    try {
+      for (const id of ids) await unarchiveCase(id);
+      await refreshCases();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleBulkDeleteCases(ids) {
+    if (!ids.length) return;
+    const n = ids.length;
+    if (!window.confirm(`Permanently delete ${n} case${n === 1 ? "" : "s"}? This cannot be undone.`)) return;
+    setBusy(true);
+    setError("");
+    try {
+      for (const id of ids) {
+        await deleteCase(id);
+        if (caseId === id) {
+          setView("cases");
+          setCaseId(null);
+          setCaseData(null);
+          setJob(null);
+        }
+      }
+      await refreshCases();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="app">
       <header className="masthead">
         <button type="button" className="brand" onClick={() => { setBusy(false); setView("cases"); setQuery(""); }}>
-          <div className="seal">LS</div>
+          <div className="seal">CS</div>
           <div>
-            <h1>LawSifter</h1>
-            <p>Sift the record. Flag what matters.</p>
+            <h1>CaseSifter</h1>
+            <p>Find what matters in the record.</p>
           </div>
         </button>
         <div className="mast-search">
@@ -375,7 +540,7 @@ export default function App() {
             Account
           </button>
           <span className={`status-dot ${entitlement?.active ? "live" : ""}`}>
-            {entitlement?.active ? (entitlement.plan || "Active") : "Offline"}
+            {entitlement?.active ? (entitlement.plan || "Active") : "No active plan"}
           </span>
         </nav>
       </header>
@@ -407,6 +572,9 @@ export default function App() {
           onArchive={handleArchive}
           onUnarchive={handleUnarchive}
           onDelete={handleDelete}
+          onBulkArchive={handleBulkArchive}
+          onBulkUnarchive={handleBulkUnarchive}
+          onBulkDelete={handleBulkDeleteCases}
         />
       )}
 
@@ -414,6 +582,7 @@ export default function App() {
         <CaseWorkspace
           caseData={caseData}
           busy={busy}
+          entitlement={entitlement}
           onBack={() => setView("cases")}
           onRefresh={() => refreshCase(caseData.id)}
           onError={setError}
@@ -474,34 +643,88 @@ export default function App() {
   );
 }
 
-function CasesPage({ cases, archived, totalCount, archivedCount, query, busy, onCreate, onOpen, onArchive, onUnarchive, onDelete }) {
+function CasesPage({
+  cases,
+  archived,
+  totalCount,
+  archivedCount,
+  query,
+  busy,
+  onCreate,
+  onOpen,
+  onArchive,
+  onUnarchive,
+  onDelete,
+  onBulkArchive,
+  onBulkUnarchive,
+  onBulkDelete,
+}) {
   const [caption, setCaption] = useState("");
   const [court, setCourt] = useState("");
   const [indexNumber, setIndexNumber] = useState("");
   const [showNew, setShowNew] = useState(false);
+  const [selectedOpen, setSelectedOpen] = useState(() => new Set());
+  const [selectedArchived, setSelectedArchived] = useState(() => new Set());
+
+  useEffect(() => {
+    setSelectedOpen((prev) => {
+      const ids = new Set(cases.map((c) => c.id));
+      return new Set([...prev].filter((id) => ids.has(id)));
+    });
+  }, [cases]);
+
+  useEffect(() => {
+    setSelectedArchived((prev) => {
+      const ids = new Set(archived.map((c) => c.id));
+      return new Set([...prev].filter((id) => ids.has(id)));
+    });
+  }, [archived]);
+
+  function toggleOpen(id) {
+    setSelectedOpen((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleArchived(id) {
+    setSelectedArchived((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  const allOpenSelected = cases.length > 0 && cases.every((c) => selectedOpen.has(c.id));
+  const allArchivedSelected = archived.length > 0 && archived.every((c) => selectedArchived.has(c.id));
 
   return (
     <>
       <div className="page-head">
         <div>
-          <p className="kicker">Matters</p>
+          <p className="kicker">Your matters</p>
           <h2 className="serif">Cases</h2>
           <p className="footnote">
             {query.trim()
-              ? `${cases.length} match${cases.length === 1 ? "" : "es"} of ${totalCount} active`
-              : `${totalCount} active matter${totalCount === 1 ? "" : "s"}`}
+              ? `${cases.length} match${cases.length === 1 ? "" : "es"}`
+              : totalCount === 0
+                ? "Open a case, drop in files, see what stands out."
+                : `${totalCount} open · tap one to continue`}
             {archivedCount ? ` · ${archivedCount} archived` : ""}
           </p>
         </div>
-        <button className="btn" type="button" onClick={() => setShowNew((v) => !v)}>
+        <button className="btn gold" type="button" onClick={() => setShowNew((v) => !v)}>
           {showNew ? "Cancel" : "New case"}
         </button>
       </div>
 
       {showNew && (
         <div className="card quiet">
-          <p className="kicker">New matter</p>
-          <h3 className="serif" style={{ margin: "4px 0 8px" }}>Open a case</h3>
+          <p className="kicker">About a minute</p>
+          <h3 className="serif" style={{ margin: "4px 0 8px" }}>Name the case</h3>
           <form
             className="case-form inline"
             onSubmit={(e) => {
@@ -520,18 +743,18 @@ function CasesPage({ cases, archived, totalCount, archivedCount, query, busy, on
           >
             <label>
               Caption
-              <input value={caption} onChange={(e) => setCaption(e.target.value)} placeholder="Bank v. Defendant" required />
+              <input value={caption} onChange={(e) => setCaption(e.target.value)} placeholder="Bank v. Defendant" required autoFocus />
             </label>
             <label>
               Court
-              <input value={court} onChange={(e) => setCourt(e.target.value)} placeholder="Supreme Court, Kings County" />
+              <input value={court} onChange={(e) => setCourt(e.target.value)} placeholder="Optional" />
             </label>
             <label>
               Index
-              <input value={indexNumber} onChange={(e) => setIndexNumber(e.target.value)} placeholder="11467/2007" />
+              <input value={indexNumber} onChange={(e) => setIndexNumber(e.target.value)} placeholder="Optional" />
             </label>
             <button className="btn gold" type="submit" disabled={busy || !caption.trim()}>
-              Create
+              Open
             </button>
           </form>
         </div>
@@ -540,32 +763,79 @@ function CasesPage({ cases, archived, totalCount, archivedCount, query, busy, on
       <div className="card flush">
         {cases.length === 0 ? (
           <div className="empty">
-            <FolderOpen size={22} />
+            <FolderOpen size={28} strokeWidth={1.5} />
             <p>
               {totalCount === 0
-                ? "No cases yet. Open a matter to keep filings together."
-                : "No cases match that search."}
+                ? "No cases yet"
+                : "Nothing matches that search"}
             </p>
+            {totalCount === 0 && (
+              <>
+                <p className="footnote">Create a case, add filings, and CaseSifter flags what needs a look.</p>
+                <button className="btn gold" type="button" onClick={() => setShowNew(true)}>
+                  New case
+                </button>
+              </>
+            )}
           </div>
         ) : (
-          <table className="data cases">
-            <thead>
-              <tr>
-                <th>Caption</th>
-                <th>Parties</th>
-                <th>Index</th>
-                <th>Court</th>
-                <th>Last update</th>
-                <th>Files</th>
-                <th className="actions-col"> </th>
-              </tr>
-            </thead>
-            <tbody>
+          <>
+            <div className="bulk-bar">
+              <label className="bulk-select-all">
+                <input
+                  type="checkbox"
+                  checked={allOpenSelected}
+                  disabled={busy}
+                  onChange={() => {
+                    if (allOpenSelected) setSelectedOpen(new Set());
+                    else setSelectedOpen(new Set(cases.map((c) => c.id)));
+                  }}
+                />
+                Select all
+              </label>
+              {selectedOpen.size > 0 && (
+                <div className="bulk-actions">
+                  <span className="footnote">{selectedOpen.size} selected</span>
+                  <button
+                    className="btn secondary"
+                    type="button"
+                    disabled={busy}
+                    onClick={async () => {
+                      await onBulkArchive([...selectedOpen]);
+                      setSelectedOpen(new Set());
+                    }}
+                  >
+                    <Archive size={14} /> Archive
+                  </button>
+                  <button
+                    className="btn secondary danger"
+                    type="button"
+                    disabled={busy}
+                    onClick={async () => {
+                      await onBulkDelete([...selectedOpen]);
+                      setSelectedOpen(new Set());
+                    }}
+                  >
+                    <Trash2 size={14} /> Delete
+                  </button>
+                </div>
+              )}
+            </div>
+            <div className="case-list">
               {cases.map((item) => (
-                <CaseRow key={item.id} item={item} busy={busy} onOpen={onOpen} onArchive={onArchive} onDelete={onDelete} />
+                <CaseTile
+                  key={item.id}
+                  item={item}
+                  busy={busy}
+                  selected={selectedOpen.has(item.id)}
+                  onToggleSelect={() => toggleOpen(item.id)}
+                  onOpen={onOpen}
+                  onArchive={onArchive}
+                  onDelete={onDelete}
+                />
               ))}
-            </tbody>
-          </table>
+            </div>
+          </>
         )}
       </div>
 
@@ -578,41 +848,64 @@ function CasesPage({ cases, archived, totalCount, archivedCount, query, busy, on
           {archived.length === 0 ? (
             <p className="empty-copy">No archived cases match that search.</p>
           ) : (
-            <table className="data cases">
-              <thead>
-                <tr>
-                  <th>Caption</th>
-                  <th>Index</th>
-                  <th>Last update</th>
-                  <th>Files</th>
-                  <th className="actions-col"> </th>
-                </tr>
-              </thead>
-              <tbody>
+            <>
+              <div className="bulk-bar" style={{ padding: "8px 12px 0" }}>
+                <label className="bulk-select-all">
+                  <input
+                    type="checkbox"
+                    checked={allArchivedSelected}
+                    disabled={busy}
+                    onChange={() => {
+                      if (allArchivedSelected) setSelectedArchived(new Set());
+                      else setSelectedArchived(new Set(archived.map((c) => c.id)));
+                    }}
+                  />
+                  Select all
+                </label>
+                {selectedArchived.size > 0 && (
+                  <div className="bulk-actions">
+                    <span className="footnote">{selectedArchived.size} selected</span>
+                    <button
+                      className="btn secondary"
+                      type="button"
+                      disabled={busy}
+                      onClick={async () => {
+                        await onBulkUnarchive([...selectedArchived]);
+                        setSelectedArchived(new Set());
+                      }}
+                    >
+                      <RotateCcw size={14} /> Restore
+                    </button>
+                    <button
+                      className="btn secondary danger"
+                      type="button"
+                      disabled={busy}
+                      onClick={async () => {
+                        await onBulkDelete([...selectedArchived]);
+                        setSelectedArchived(new Set());
+                      }}
+                    >
+                      <Trash2 size={14} /> Delete
+                    </button>
+                  </div>
+                )}
+              </div>
+              <div className="case-list" style={{ padding: "8px 12px 12px" }}>
                 {archived.map((item) => (
-                  <tr key={item.id}>
-                    <td>
-                      <button type="button" className="linkish" onClick={() => onOpen(item.id)}>
-                        {item.caption}
-                      </button>
-                    </td>
-                    <td className="mono">{item.index_number || "—"}</td>
-                    <td className="muted nowrap">{formatUpdatedAt(item.updated_at)}</td>
-                    <td className="num">{item.document_count || 0}</td>
-                    <td className="row-actions" onClick={(e) => e.stopPropagation()}>
-                      <button type="button" className="icon-btn" disabled={busy} title="Restore" onClick={() => onUnarchive(item)}>
-                        <RotateCcw size={15} />
-                        <span>Restore</span>
-                      </button>
-                      <button type="button" className="icon-btn danger" disabled={busy} title="Delete permanently" onClick={() => onDelete(item)}>
-                        <Trash2 size={15} />
-                        <span>Delete</span>
-                      </button>
-                    </td>
-                  </tr>
+                  <CaseTile
+                    key={item.id}
+                    item={item}
+                    busy={busy}
+                    selected={selectedArchived.has(item.id)}
+                    onToggleSelect={() => toggleArchived(item.id)}
+                    onOpen={onOpen}
+                    onArchive={onUnarchive}
+                    onDelete={onDelete}
+                    archiveMode
+                  />
                 ))}
-              </tbody>
-            </table>
+              </div>
+            </>
           )}
         </details>
       )}
@@ -620,40 +913,76 @@ function CasesPage({ cases, archived, totalCount, archivedCount, query, busy, on
   );
 }
 
-function CaseRow({ item, busy, onOpen, onArchive, onDelete }) {
+function CaseTile({ item, busy, selected, onToggleSelect, onOpen, onArchive, onDelete, archiveMode = false }) {
   const parties = partiesFromCaption(item.caption);
+  const subtitle = archiveMode
+    ? [item.index_number, formatUpdatedAt(item.updated_at)].filter(Boolean).join(" · ")
+    : [
+        item.index_number,
+        item.court,
+        parties.length > 1 ? parties.join(" · ") : null,
+      ].filter(Boolean).join(" · ");
   return (
-    <tr className="click-row" onClick={() => onOpen(item.id)}>
-      <td>
-        <strong className="matter-name">{item.caption}</strong>
-      </td>
-      <td className="muted">
-        {parties.length > 1 ? parties.join(" · ") : parties[0] || "—"}
-      </td>
-      <td className="mono">{item.index_number || "—"}</td>
-      <td className="muted">{item.court || "—"}</td>
-      <td className="muted nowrap">{formatUpdatedAt(item.updated_at)}</td>
-      <td className="num">{item.document_count || 0}</td>
-      <td className="row-actions" onClick={(e) => e.stopPropagation()}>
-        <button type="button" className="icon-btn" disabled={busy} title="Archive" onClick={() => onArchive(item)}>
-          <Archive size={15} />
-        </button>
-        <button type="button" className="icon-btn danger" disabled={busy} title="Delete permanently" onClick={() => onDelete(item)}>
-          <Trash2 size={15} />
-        </button>
-      </td>
-    </tr>
+    <div
+      className={`case-tile${selected ? " selected" : ""}`}
+      role="button"
+      tabIndex={0}
+      onClick={() => onOpen(item.id)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onOpen(item.id);
+        }
+      }}
+    >
+      <label className="case-tile-check" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+        <input
+          type="checkbox"
+          checked={Boolean(selected)}
+          disabled={busy}
+          onChange={onToggleSelect}
+          aria-label={`Select ${item.caption}`}
+        />
+      </label>
+      <div className="case-tile-main">
+        <strong>{item.caption}</strong>
+        <span>{subtitle || "Tap to open"}</span>
+      </div>
+      <div className="case-tile-meta">
+        <span className="files" title="Files">{item.document_count || 0}</span>
+        <div className="case-tile-actions" onClick={(e) => e.stopPropagation()}>
+          <button
+            type="button"
+            className="icon-btn"
+            disabled={busy}
+            title={archiveMode ? "Restore" : "Archive"}
+            onClick={() => onArchive(item)}
+          >
+            {archiveMode ? <RotateCcw size={15} /> : <Archive size={15} />}
+          </button>
+          <button type="button" className="icon-btn danger" disabled={busy} title="Delete" onClick={() => onDelete(item)}>
+            <Trash2 size={15} />
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
-function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenReport, setBusy, onArchive, onUnarchive, onDelete }) {
+function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError, onOpenReport, setBusy, onArchive, onUnarchive, onDelete }) {
   const [drag, setDrag] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [editName, setEditName] = useState("");
   const [docQuery, setDocQuery] = useState("");
   const [uploadNote, setUploadNote] = useState("");
+  const [scanBacklogError, setScanBacklogError] = useState("");
+  const [selectedDocs, setSelectedDocs] = useState(() => new Set());
+  const [stampById, setStampById] = useState({});
   const inputRef = useRef(null);
+  const backfillKeyRef = useRef("");
+  const scanningRef = useRef(false);
   const docs = caseData.documents || [];
+  const waitingDocs = docs.filter((d) => d.status === "uploaded" || d.status === "failed");
   const visibleDocs = docs.filter((doc) =>
     matchesQuery(
       [doc.display_name, doc.original_filename, doc.doc_kind, doc.status, doc.risk_level].filter(Boolean).join(" "),
@@ -661,7 +990,221 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
     )
   );
 
+  // Desktop: older complete docs may lack last_scanned_at — pull from cached reports.
+  useEffect(() => {
+    if (!isDesktopApp()) return;
+    const need = docs.filter(
+      (d) => d.status === "complete" && !d.last_scanned_at && !stampById[d.id]
+    );
+    if (!need.length) return;
+    let cancelled = false;
+    (async () => {
+      const found = {};
+      await Promise.all(
+        need.map(async (doc) => {
+          try {
+            const report = await getDesktopReport(caseData.id, doc.id);
+            const at = report?.audit?.scanned_at;
+            if (at) found[doc.id] = at;
+          } catch {
+            /* ignore */
+          }
+        })
+      );
+      if (!cancelled && Object.keys(found).length) {
+        setStampById((prev) => ({ ...prev, ...found }));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // stampById omitted on purpose — only fill missing ids
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [caseData.id, docs]);
+
+  useEffect(() => {
+    setSelectedDocs((prev) => {
+      const ids = new Set(docs.map((d) => d.id));
+      return new Set([...prev].filter((id) => ids.has(id)));
+    });
+  }, [docs]);
+
+  function toggleDocSelect(id) {
+    setSelectedDocs((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  async function deleteSelectedDocuments() {
+    const ids = [...selectedDocs];
+    if (!ids.length) return;
+    if (!window.confirm(`Remove ${ids.length} filing${ids.length === 1 ? "" : "s"} from this case? This cannot be undone.`)) {
+      return;
+    }
+    setBusy(true);
+    onError("");
+    try {
+      for (const id of ids) {
+        await deleteDocument(caseData.id, id);
+      }
+      setSelectedDocs(new Set());
+      await onRefresh();
+    } catch (err) {
+      onError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function paceScanDocs(targetDocs, { notePrefix = "Analyzing" } = {}) {
+    if (!targetDocs.length) return { queued: 0, failed: [] };
+    const scanFailed = [];
+    let queued = 0;
+    const concurrency = 2;
+    let next = 0;
+
+    async function worker() {
+      while (next < targetDocs.length) {
+        const i = next;
+        next += 1;
+        const doc = targetDocs[i];
+        setUploadNote(
+          `${notePrefix} ${Math.min(i + 1, targetDocs.length)}/${targetDocs.length}: ${doc.display_name || doc.original_filename}`
+        );
+        try {
+          await scanDocument(caseData.id, doc.id);
+          queued += 1;
+        } catch (err) {
+          scanFailed.push(`${doc.display_name || doc.original_filename}: ${err.message || "scan failed"}`);
+        }
+        try {
+          await onRefresh();
+        } catch {
+          /* keep going */
+        }
+        // Yield so the UI can paint between heavy desktop analyzes.
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    }
+
+    await Promise.all(
+      Array.from({ length: Math.min(concurrency, targetDocs.length) }, () => worker())
+    );
+    return { queued, failed: scanFailed };
+  }
+
+  // Once per case visit: auto-queue uploaded/failed files.
+  useEffect(() => {
+    if (caseData.archived_at) return;
+    const key = caseData.id;
+    if (backfillKeyRef.current === key) return;
+    if (!waitingDocs.length) {
+      backfillKeyRef.current = key;
+      return;
+    }
+    if (scanningRef.current) return;
+    backfillKeyRef.current = key;
+    scanningRef.current = true;
+    setScanBacklogError("");
+    setUploadNote(
+      `Starting analysis for ${waitingDocs.length} waiting file${waitingDocs.length === 1 ? "" : "s"} (2 at a time)…`
+    );
+    const snapshot = [...waitingDocs];
+    (async () => {
+      try {
+        const { queued, failed } = await paceScanDocs(snapshot);
+        if (failed.length) {
+          const msg = failed[0].includes(": ")
+            ? failed[0].slice(failed[0].indexOf(": ") + 2)
+            : failed[0];
+          setScanBacklogError(msg);
+          onError(
+            queued
+              ? `Analyzed ${queued} of ${snapshot.length}. Failed: ${failed.join(" · ")}`
+              : `Analysis did not start. ${failed.join(" · ")}`
+          );
+          setUploadNote(
+            queued
+              ? `${queued} analyzed; ${failed.length} still need Scan.`
+              : "Files are saved. Fix sign-in / analysis API, then use Scan now."
+          );
+        } else {
+          setUploadNote(`Analyzed ${queued} waiting file${queued === 1 ? "" : "s"}.`);
+        }
+      } catch (err) {
+        setScanBacklogError(err.message || "Scan backfill failed");
+        onError(err.message);
+      } finally {
+        scanningRef.current = false;
+        try {
+          await onRefresh();
+        } catch {
+          /* ignore */
+        }
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [caseData.id]);
+
   async function onUpload(fileList) {
+    if (isDesktopApp()) {
+      setBusy(true);
+      try {
+        onError("");
+        setScanBacklogError("");
+        const added = await pickDesktopDocuments(caseData.id);
+        const picked = Array.isArray(added) ? added : [];
+        if (!picked.length) {
+          setUploadNote("");
+          setBusy(false);
+          return;
+        }
+        setUploadNote(
+          `Saved ${picked.length} file${picked.length === 1 ? "" : "s"} on this PC. Analysis started (2 at a time)…`
+        );
+        await onRefresh();
+        setBusy(false);
+
+        // Do not await full analysis here — that made "add files" feel stuck for minutes.
+        scanningRef.current = true;
+        paceScanDocs(picked)
+          .then(({ queued, failed: scanFailed }) => {
+            scanningRef.current = false;
+            if (scanFailed.length) {
+              const msg = scanFailed[0].includes(": ")
+                ? scanFailed[0].slice(scanFailed[0].indexOf(": ") + 2)
+                : scanFailed[0];
+              setScanBacklogError(msg);
+              onError(
+                queued
+                  ? `Analyzed ${queued} of ${picked.length}. Failed: ${scanFailed.join(" · ")}`
+                  : `Files saved but analysis did not start. ${scanFailed.join(" · ")}`
+              );
+              setUploadNote(
+                queued
+                  ? `Saved ${picked.length}. ${queued} analyzed; use Scan on the rest.`
+                  : `Saved ${picked.length}. Sign in / Start trial if scans are locked, then use Scan.`
+              );
+            } else {
+              setUploadNote(
+                `Saved and analyzed ${queued} file${queued === 1 ? "" : "s"}. Reports are cached on this PC.`
+              );
+            }
+          })
+          .catch((err) => {
+            scanningRef.current = false;
+            onError(err.message);
+          });
+      } catch (err) {
+        scanningRef.current = false;
+        onError(err.message);
+        setBusy(false);
+      }
+      return;
+    }
     const files = Array.from(fileList || []);
     const valid = files.filter((f) => ACCEPTED.has(extensionOf(f.name)));
     const rejected = files.filter((f) => !ACCEPTED.has(extensionOf(f.name))).map((f) => f.name);
@@ -669,33 +1212,45 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
     if (!valid.length) return;
     onError("");
     const failed = [];
+    const scanIssues = [];
     let added = 0;
+    let queued = 0;
     for (let i = 0; i < valid.length; i += 1) {
       setUploadNote(`Adding ${i + 1} of ${valid.length}: ${valid[i].name}`);
       try {
-        await uploadCaseDocument(caseData.id, valid[i], { autoScan: true });
+        const result = await uploadCaseDocument(caseData.id, valid[i], { autoScan: true });
         added += 1;
+        if (result?.status === "queued" || result?.job_id) {
+          queued += 1;
+        } else if (result?.scan_error) {
+          scanIssues.push(`${valid[i].name}: ${result.scan_error}`);
+        } else if (result?.status === "uploaded") {
+          scanIssues.push(`${valid[i].name}: Scan did not start — use Scan`);
+        }
       } catch (err) {
         failed.push(`${valid[i].name}: ${err.message || "upload failed"}`);
       }
-      try {
-        await onRefresh();
-      } catch {
-        // Keep adding remaining files even if the case refresh drops.
-      }
     }
-    if (failed.length) {
+    try {
+      await onRefresh();
+    } catch {
+      // Keep going even if the case refresh drops.
+    }
+    const problems = [...failed, ...scanIssues];
+    if (problems.length) {
       onError(
         added
-          ? `Added ${added} of ${valid.length}. Failed: ${failed.join(" · ")}`
-          : `None of ${valid.length} files were added. ${failed.join(" · ")}`
+          ? `Added ${added} of ${valid.length}. Issues: ${problems.join(" · ")}`
+          : `None of ${valid.length} files were added. ${problems.join(" · ")}`
       );
     } else {
       onError("");
     }
     setUploadNote(
       added
-        ? `Added ${added} file${added === 1 ? "" : "s"}. Scans will finish in the background.`
+        ? queued
+          ? `Added ${added} file${added === 1 ? "" : "s"}. ${queued} scan${queued === 1 ? "" : "s"} running in the background.`
+          : `Added ${added} file${added === 1 ? "" : "s"}. Use Scan if a file stayed on uploaded.`
         : ""
     );
     if (inputRef.current) inputRef.current.value = "";
@@ -723,20 +1278,66 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
       await onRefresh();
     } catch (err) {
       onError(err.message);
+      setScanBacklogError(err.message);
     } finally {
+      setBusy(false);
+    }
+  }
+
+  async function scanWaitingNow() {
+    if (!waitingDocs.length || scanningRef.current) return;
+    setBusy(true);
+    scanningRef.current = true;
+    setScanBacklogError("");
+    onError("");
+    try {
+      setUploadNote(
+        `Scanning ${waitingDocs.length} waiting file${waitingDocs.length === 1 ? "" : "s"} (2 at a time)…`
+      );
+      const snapshot = [...waitingDocs];
+      const { queued, failed } = await paceScanDocs(snapshot, { notePrefix: "Scanning" });
+      if (failed.length) {
+        const msg = failed[0].includes(": ")
+          ? failed[0].slice(failed[0].indexOf(": ") + 2)
+          : failed[0];
+        setScanBacklogError(msg);
+        onError(
+          queued
+            ? `Scanned ${queued} of ${snapshot.length}. Failed: ${failed.join(" · ")}`
+            : `Scan did not start. ${failed.join(" · ")}`
+        );
+      } else {
+        setUploadNote(
+          isDesktopApp()
+            ? `Scanned ${queued} file${queued === 1 ? "" : "s"}.`
+            : `Queued ${queued} file${queued === 1 ? "" : "s"} for scan.`
+        );
+      }
+      await onRefresh();
+    } catch (err) {
+      onError(err.message);
+      setScanBacklogError(err.message);
+    } finally {
+      scanningRef.current = false;
       setBusy(false);
     }
   }
 
   async function rescanAll() {
     if (!docs.length) return;
-    const ok = window.confirm(
-      `Rescan all ${docs.length} file${docs.length === 1 ? "" : "s"} in this case? Scans run two at a time and may take a while.`
-    );
+    const waitingOnly = waitingDocs.length > 0 && waitingDocs.length === docs.length;
+    const label = waitingOnly
+      ? `Scan all ${docs.length} waiting file${docs.length === 1 ? "" : "s"}? Scans run two at a time.`
+      : waitingDocs.length
+        ? `Rescan all ${docs.length} file${docs.length === 1 ? "" : "s"} (${waitingDocs.length} still waiting)? Scans run two at a time.`
+        : `Rescan all ${docs.length} file${docs.length === 1 ? "" : "s"} in this case? Scans run two at a time and may take a while.`;
+    const ok = window.confirm(label);
     if (!ok) return;
     setBusy(true);
+    scanningRef.current = true;
+    setScanBacklogError("");
     try {
-      const result = await rescanCase(caseData.id);
+      const result = await rescanCase(caseData.id, { waitingOnly: false });
       setUploadNote(
         result.status === "idle"
           ? "Nothing to rescan right now."
@@ -744,10 +1345,16 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
             (result.skipped ? ` (${result.skipped} skipped).` : ".") +
             " Running two at a time."
       );
+      if (result.error) {
+        setScanBacklogError(result.error);
+        onError(result.error);
+      }
       await onRefresh();
     } catch (err) {
       onError(err.message);
+      setScanBacklogError(err.message);
     } finally {
+      scanningRef.current = false;
       setBusy(false);
     }
   }
@@ -758,6 +1365,12 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
     yellow: scanned.filter((d) => d.risk_level === "yellow"),
     green: scanned.filter((d) => d.risk_level === "green"),
   };
+  const entitlementLocked = entitlement && entitlement.active === false;
+  const backlogHint =
+    scanBacklogError ||
+    (entitlementLocked
+      ? entitlement.message || "Scans locked — sign in or start a trial."
+      : "");
 
   return (
     <>
@@ -767,7 +1380,10 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
           <div className="row-actions">
             {!caseData.archived_at && docs.length > 0 && (
               <button className="btn secondary" type="button" disabled={busy} onClick={rescanAll}>
-                <RefreshCw size={14} /> Rescan all
+                <RefreshCw size={14} />{" "}
+                {waitingDocs.length > 0 && waitingDocs.length === docs.length
+                  ? "Scan all waiting"
+                  : "Rescan all"}
               </button>
             )}
             {caseData.archived_at ? (
@@ -784,7 +1400,7 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
             </button>
           </div>
         </div>
-        <p className="kicker">{caseData.archived_at ? "Archived case" : "Case"}</p>
+        <p className="kicker">{caseData.archived_at ? "Archived" : "Case"}</p>
         <h2 className="serif">{caseData.caption}</h2>
         <p className="meta-line">
           {partiesFromCaption(caseData.caption).join(" · ") || "Parties from caption"}
@@ -794,33 +1410,55 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
           {caseData.court || "Court not set"}
         </p>
         {uploadNote && <p className="footnote">{uploadNote}</p>}
+        {!caseData.archived_at && waitingDocs.length > 0 && (
+          <div className={`banner scan-backlog${backlogHint ? " warn" : ""}`}>
+            <div>
+              <strong>
+                {waitingDocs.length} file{waitingDocs.length === 1 ? "" : "s"} saved but not analyzed
+              </strong>
+              {backlogHint ? <p className="footnote" style={{ margin: "4px 0 0" }}>{backlogHint}</p> : null}
+            </div>
+            <button className="btn gold" type="button" disabled={busy} onClick={scanWaitingNow}>
+              Scan now
+            </button>
+          </div>
+        )}
         {caseData.archived_at ? (
           <p className="footnote">This matter is archived. Restore it to add filings.</p>
         ) : (
         <div
           className={`dropzone compact ${drag ? "active" : ""}`}
-          onDragOver={(e) => { e.preventDefault(); setDrag(true); }}
+          onDragOver={(e) => { e.preventDefault(); if (!isDesktopApp()) setDrag(true); }}
           onDragLeave={() => setDrag(false)}
           onDrop={(e) => {
             e.preventDefault();
             setDrag(false);
-            onUpload(e.dataTransfer.files);
+            if (!isDesktopApp()) onUpload(e.dataTransfer.files);
           }}
-          onClick={() => inputRef.current?.click()}
+          onClick={() => {
+            if (isDesktopApp()) onUpload(null);
+            else inputRef.current?.click();
+          }}
         >
           <Upload size={18} />
           <div>
             <strong>Add filings</strong>
-            <p>Drop files here or click to upload. Pleadings get content review; exhibits get forensic review.</p>
+            <p>
+              {isDesktopApp()
+                ? "Files stay on this PC. Click to pick filings — analysis starts automatically."
+                : "Drop files here or click to upload. Pleadings get content review; exhibits get forensic review."}
+            </p>
           </div>
-          <input
-            ref={inputRef}
-            type="file"
-            hidden
-            multiple
-            accept=".pdf,.txt,.docx,.xlsx,.jpg,.jpeg,.png,.gif"
-            onChange={(e) => onUpload(e.target.files)}
-          />
+          {!isDesktopApp() && (
+            <input
+              ref={inputRef}
+              type="file"
+              hidden
+              multiple
+              accept=".pdf,.txt,.docx,.xlsx,.jpg,.jpeg,.png,.gif"
+              onChange={(e) => onUpload(e.target.files)}
+            />
+          )}
         </div>
         )}
       </div>
@@ -838,6 +1476,13 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
         documents={docs}
         onOpenReport={onOpenReport}
         onError={onError}
+        onScanDocument={async (doc) => {
+          await scanDocument(caseData.id, doc.id);
+        }}
+        onRescanWaiting={async () => {
+          await scanWaitingNow();
+        }}
+        onRefresh={onRefresh}
       />
 
       <div className="card">
@@ -864,20 +1509,77 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
           <p className="empty-copy">No documents match that filter.</p>
         )}
         {visibleDocs.length > 0 && (
-        <table className="data">
+        <>
+        {!caseData.archived_at && (
+          <div className="bulk-bar" style={{ borderBottom: "1px solid var(--line)", marginBottom: 8 }}>
+            <label className="bulk-select-all">
+              <input
+                type="checkbox"
+                checked={visibleDocs.length > 0 && visibleDocs.every((d) => selectedDocs.has(d.id))}
+                disabled={busy}
+                onChange={() => {
+                  const all = visibleDocs.every((d) => selectedDocs.has(d.id));
+                  if (all) {
+                    setSelectedDocs((prev) => {
+                      const next = new Set(prev);
+                      visibleDocs.forEach((d) => next.delete(d.id));
+                      return next;
+                    });
+                  } else {
+                    setSelectedDocs((prev) => {
+                      const next = new Set(prev);
+                      visibleDocs.forEach((d) => next.add(d.id));
+                      return next;
+                    });
+                  }
+                }}
+              />
+              Select all
+            </label>
+            {selectedDocs.size > 0 && (
+              <div className="bulk-actions">
+                <span className="footnote">{selectedDocs.size} selected</span>
+                <button className="btn secondary danger" type="button" disabled={busy} onClick={deleteSelectedDocuments}>
+                  <Trash2 size={14} /> Delete
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+        <table className="data docs">
+          <colgroup>
+            <col className="col-check" />
+            <col className="col-name" />
+            <col className="col-kind" />
+            <col className="col-meta" />
+            <col className="col-actions" />
+          </colgroup>
           <thead>
             <tr>
+              <th className="check-col" aria-label="Select" />
               <th>Name</th>
-              <th>Kind / scan</th>
+              <th>Kind</th>
               <th>Status</th>
-              <th>Risk</th>
-              <th />
+              <th>Actions</th>
             </tr>
           </thead>
           <tbody>
-            {visibleDocs.map((doc) => (
-              <tr key={doc.id}>
-                <td>
+            {visibleDocs.map((doc) => {
+              const title = docListTitle(doc);
+              const fullName = doc.original_filename || doc.display_name || "";
+              const scannedAt = doc.last_scanned_at || stampById[doc.id] || null;
+              return (
+              <tr key={doc.id} className={selectedDocs.has(doc.id) ? "selected" : undefined}>
+                <td className="check-col">
+                  <input
+                    type="checkbox"
+                    checked={selectedDocs.has(doc.id)}
+                    disabled={busy || Boolean(caseData.archived_at)}
+                    onChange={() => toggleDocSelect(doc.id)}
+                    aria-label={`Select ${title}`}
+                  />
+                </td>
+                <td className="doc-name-cell">
                   {editingId === doc.id ? (
                     <input
                       value={editName}
@@ -893,21 +1595,29 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
                   ) : (
                     <button
                       type="button"
-                      className="linkish"
+                      className="linkish doc-title"
+                      title={fullName || title}
                       onClick={() => {
                         setEditingId(doc.id);
                         setEditName(doc.display_name || doc.original_filename);
                       }}
                     >
-                      {doc.display_name || doc.original_filename}
+                      {title}
                     </button>
                   )}
-                  <div className="footnote">{doc.original_filename}</div>
+                  {scannedAt ? (
+                    <div className="doc-scanned" title={new Date(scannedAt).toLocaleString()}>
+                      Scanned {formatScanAt(scannedAt)}
+                    </div>
+                  ) : doc.status === "complete" ? (
+                    <div className="doc-scanned">Scanned</div>
+                  ) : null}
                 </td>
-                <td>
+                <td className="doc-kind-cell">
                   <select
                     value={doc.doc_kind || ""}
                     disabled={busy}
+                    aria-label="Document kind"
                     onChange={async (e) => {
                       const next = e.target.value || null;
                       try {
@@ -918,17 +1628,24 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
                       }
                     }}
                   >
-                    <option value="">Unknown — needs review</option>
+                    <option value="">Needs review</option>
                     {DOC_KIND_OPTIONS.map(([value, label]) => (
                       <option key={value} value={value}>{label}</option>
                     ))}
                   </select>
                   <div className="footnote">{profileForKind(doc.doc_kind)}</div>
                 </td>
-                <td>{doc.status}</td>
-                <td>{doc.risk_level ? `${RISK[doc.risk_level] || doc.risk_level}` : "—"}</td>
-                <td>
-                  <div className="actions">
+                <td className="meta-cell">
+                  <div className="doc-status">{doc.status}</div>
+                  <div className="doc-risk">
+                    {doc.risk_level ? (RISK[doc.risk_level] || doc.risk_level) : "—"}
+                  </div>
+                  {doc.last_error ? (
+                    <div className="footnote" style={{ color: "var(--red)" }}>{doc.last_error}</div>
+                  ) : null}
+                </td>
+                <td className="row-actions">
+                  <div className="doc-actions">
                     {doc.status === "complete" && (
                       <button className="btn gold" type="button" onClick={() => onOpenReport(doc)}>
                         Report
@@ -942,9 +1659,11 @@ function CaseWorkspace({ caseData, busy, onBack, onRefresh, onError, onOpenRepor
                   </div>
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
+        </>
         )}
       </div>
     </>
@@ -965,6 +1684,8 @@ function relatedDocs(item, documents) {
 function CaseGotchaBoard({ caseId, documents, onOpenReport }) {
   const [gotchas, setGotchas] = useState([]);
   const [factConflicts, setFactConflicts] = useState([]);
+  const [caseImpact, setCaseImpact] = useState(null);
+  const [showNoise, setShowNoise] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -973,30 +1694,62 @@ function CaseGotchaBoard({ caseId, documents, onOpenReport }) {
         if (cancelled) return;
         setGotchas(data.gotchas || []);
         setFactConflicts(data.factConflicts || []);
+        setCaseImpact(data.caseImpact || null);
       })
       .catch(() => {
         if (cancelled) return;
         setGotchas([]);
         setFactConflicts([]);
+        setCaseImpact(null);
       });
     return () => {
       cancelled = true;
     };
   }, [caseId, documents]);
 
-  const total = gotchas.length + factConflicts.length;
-  if (total === 0) return null;
+  const materialGotchas = gotchas.filter(
+    (item) => item.case_impact !== "noise" && item.severity !== "info",
+  );
+  const total = materialGotchas.length + factConflicts.length;
+  const impact = caseImpact || {};
+  const materialCount = impact.material_count ?? total;
+  const noiseCount = impact.noise_collapsed ?? impact.noise_count ?? 0;
+  const fraudCount = impact.fraud_count ?? 0;
+
+  if (total === 0 && !materialCount && !noiseCount) return null;
 
   return (
     <div className="card gotcha-board">
-      <p className="kicker">Gotcha finder</p>
+      <p className="kicker">Case impact</p>
       <h2 className="serif" style={{ margin: "4px 0 8px" }}>
-        {total} apparent contradiction{total === 1 ? "" : "s"} worth verifying
+        {materialCount} material interrupt{materialCount === 1 ? "" : "s"}
+        {fraudCount ? ` · ${fraudCount} fraud exhibit${fraudCount === 1 ? "" : "s"}` : ""}
       </h2>
+      <div className="case-impact-strip">
+        <span className="case-impact-pill material">{materialCount} material</span>
+        {fraudCount > 0 && (
+          <span className="case-impact-pill fraud">{fraudCount} altered exhibit</span>
+        )}
+        {noiseCount > 0 && (
+          <button
+            type="button"
+            className="case-impact-pill noise"
+            onClick={() => setShowNoise((v) => !v)}
+          >
+            {noiseCount} noise collapsed
+          </button>
+        )}
+      </div>
       <p className="footnote" style={{ marginBottom: 8 }}>
-        Each conflict is listed once, with every file that states it. Candidates for review,
-        not findings of fact. Confirm the quoted language before relying on any of them.
+        Fraud exhibits and verified AGAINST pairs first. Ordinary disputes and token
+        collisions stay collapsed. Confirm quoted language before relying on any card.
       </p>
+      {showNoise && noiseCount > 0 && (
+        <p className="footnote case-impact-noise-note">
+          {noiseCount} finding{noiseCount === 1 ? "" : "s"} demoted as noise (boilerplate
+          overlap, he-said-she-said, or no case-impact bucket).
+        </p>
+      )}
       {factConflicts.map((item) => (
         <div key={item.id || item.field} className="gotcha-item">
           <h3>{item.title}</h3>
@@ -1024,16 +1777,30 @@ function CaseGotchaBoard({ caseId, documents, onOpenReport }) {
           </div>
         </div>
       ))}
-      {gotchas.map((item) => {
+      {materialGotchas.map((item) => {
         const sources = relatedDocs(item, documents);
+        const tainted = item.tainted_support || item.evidence?.tainted_support;
         return (
-          <div key={`${item.id || item.title}-${item.document_id}`} className="gotcha-item">
+          <div
+            key={`${item.id || item.title}-${item.document_id}`}
+            className={`gotcha-item${tainted ? " gotcha-fraud" : ""}`}
+          >
             <h3>{item.title}</h3>
-            {(item.contradiction_type || item.gotcha_level) && (
-              <p className="footnote">{item.gotcha_level || item.contradiction_type}</p>
+            {(item.case_impact_bucket || item.contradiction_type || item.gotcha_level) && (
+              <p className="footnote">
+                {item.case_impact_bucket
+                  ? `Case impact · ${item.case_impact_bucket}`
+                  : item.gotcha_level || item.contradiction_type}
+              </p>
             )}
-            {item.tainted_support ? (
+            {tainted ? (
               <>
+                {item.claim_quote && (
+                  <p className="gotcha-quote">
+                    <strong>Claim:</strong> “{item.claim_quote}”
+                    {item.claim_source ? ` — ${item.claim_source}` : ""}
+                  </p>
+                )}
                 <p className="gotcha-quote">
                   {item.evidence_quote || "See the scan report for each flagged item."}
                 </p>
@@ -1089,22 +1856,36 @@ function CaseGotchaBoard({ caseId, documents, onOpenReport }) {
 }
 
 const CHAT_HINTS = [
+  "Which affidavit mentions a carnival?",
+  "Where does defendant explain where he was at service?",
   "What was the Wells Fargo statement used for?",
-  "Which motion cites this exhibit?",
-  "Where do the amounts conflict across filings?",
 ];
 
 const REPORT_CHAT_HINTS = [
   "What was this document used for?",
   "Which motions cite this exhibit?",
-  "Do the amounts here match other filings?",
+  "Does this filing mention where defendant was at service?",
 ];
 
-function CaseChat({ caseId, documents, onOpenReport, onError, focusDocument }) {
+function CaseChat({
+  caseId,
+  documents,
+  onOpenReport,
+  onError,
+  focusDocument,
+  onScanDocument,
+  onRescanWaiting,
+  onRefresh,
+}) {
   const [messages, setMessages] = useState([]);
   const [draft, setDraft] = useState("");
   const [asking, setAsking] = useState(false);
+  const [rescanning, setRescanning] = useState("");
   const threadRef = useRef(null);
+
+  const waitingCount = (documents || []).filter((d) =>
+    ["uploaded", "queued", "failed", "waiting"].includes(d.status)
+  ).length;
 
   useEffect(() => {
     let cancelled = false;
@@ -1130,6 +1911,40 @@ function CaseChat({ caseId, documents, onOpenReport, onError, focusDocument }) {
     if (doc) onOpenReport(doc);
   }
 
+  function needsRescan(doc) {
+    if (!doc) return false;
+    return ["uploaded", "queued", "failed", "waiting"].includes(doc.status) || !doc.last_scanned_at;
+  }
+
+  async function rescanCited(cite) {
+    const doc = findCitedDocument(documents, cite);
+    if (!doc || !onScanDocument) return;
+    setRescanning(doc.id);
+    onError("");
+    try {
+      await onScanDocument(doc);
+      if (onRefresh) await onRefresh();
+    } catch (err) {
+      onError(err.message);
+    } finally {
+      setRescanning("");
+    }
+  }
+
+  async function rescanWaiting() {
+    if (!onRescanWaiting) return;
+    setRescanning("waiting");
+    onError("");
+    try {
+      await onRescanWaiting();
+      if (onRefresh) await onRefresh();
+    } catch (err) {
+      onError(err.message);
+    } finally {
+      setRescanning("");
+    }
+  }
+
   async function send(question) {
     const text = (question || draft).trim();
     if (!text || asking) return;
@@ -1141,6 +1956,7 @@ function CaseChat({ caseId, documents, onOpenReport, onError, focusDocument }) {
     try {
       const result = await askCaseChat(caseId, text, {
         focusDocumentId: focusDocument?.id,
+        documents,
       });
       setMessages((prev) => [
         ...prev.filter((item) => item.id !== pending.id),
@@ -1160,17 +1976,45 @@ function CaseChat({ caseId, documents, onOpenReport, onError, focusDocument }) {
     }
   }
 
+  const thinText =
+    messages.some(
+      (m) =>
+        m.role === "assistant" &&
+        /scan the filings|not scanned|no extracted text|rescann/i.test(m.content || "")
+    );
+
   return (
     <div className={`card case-chat${focusDocument ? " on-report" : ""}`}>
-      <p className="kicker">Case clerk</p>
-      <h2 className="serif" style={{ margin: "4px 0 8px" }}>
-        {focusDocument ? "Ask about this document" : "Ask about these documents"}
-      </h2>
+      <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+        <div>
+          <p className="kicker">Case clerk</p>
+          <h2 className="serif" style={{ margin: "4px 0 8px" }}>
+            {focusDocument ? "Ask about this document" : "Find things in this case"}
+          </h2>
+        </div>
+        {onRescanWaiting && waitingCount > 0 && (
+          <button
+            className="btn secondary"
+            type="button"
+            disabled={Boolean(rescanning) || asking}
+            onClick={rescanWaiting}
+            title="Scan files that are still uploaded, failed, or waiting so chat can search their text"
+          >
+            <RefreshCw size={14} />
+            {rescanning === "waiting" ? "Rescanning…" : `Rescan waiting (${waitingCount})`}
+          </button>
+        )}
+      </div>
       <p className="footnote" style={{ marginBottom: 14 }}>
         {focusDocument
-          ? `Questions treat “this” as ${focusDocument.display_name || focusDocument.original_filename}, then search the rest of the case for citations and conflicts.`
-          : "Answers come from the filings and exhibits in this case — for example, where a motion cites a Wells Fargo statement. Click a source to open its report."}
+          ? `Questions treat “this” as ${focusDocument.display_name || focusDocument.original_filename}, then search the rest of the case.`
+          : "Ask which filing mentions a fact (e.g. a carnival, an address, a fee). Open the source, or rescan if text is missing."}
       </p>
+      {thinText && onRescanWaiting && (
+        <p className="footnote" style={{ marginTop: -6, marginBottom: 12 }}>
+          If the clerk could not find it, try Rescan waiting so unscanned exhibits get text, then ask again.
+        </p>
+      )}
       <div className="chat-thread" ref={threadRef}>
         {messages.length === 0 && !asking && (
           <div className="chat-empty">
@@ -1178,7 +2022,7 @@ function CaseChat({ caseId, documents, onOpenReport, onError, focusDocument }) {
             <p>
               {focusDocument
                 ? "Ask what this filing was used for, or whether another document in the case contradicts it."
-                : "Ask what an exhibit was used for, or where a party or amount appears in the motions."}
+                : "Ask which document mentions a person, place, or event — for example where the defendant said he was at service."}
             </p>
             <div className="chat-hints">
               {(focusDocument ? REPORT_CHAT_HINTS : CHAT_HINTS).map((hint) => (
@@ -1202,17 +2046,32 @@ function CaseChat({ caseId, documents, onOpenReport, onError, focusDocument }) {
             )}
             {cites.length > 0 && (
               <div className="chat-cites">
-                {cites.map((cite, idx) => (
-                  <button
-                    key={`${msg.id}-${idx}`}
-                    type="button"
-                    className="chat-cite"
-                    onClick={() => openCite(cite)}
-                    title={cite.note || "Open this document’s report"}
-                  >
-                    Open {cite.display_name}
-                  </button>
-                ))}
+                {cites.map((cite, idx) => {
+                  const doc = findCitedDocument(documents, cite);
+                  return (
+                    <span key={`${msg.id}-${idx}`} className="chat-cite-group">
+                      <button
+                        type="button"
+                        className="chat-cite"
+                        onClick={() => openCite(cite)}
+                        title={cite.note || "Open this document’s report"}
+                      >
+                        Open {cite.display_name}
+                      </button>
+                      {onScanDocument && doc && needsRescan(doc) && (
+                        <button
+                          type="button"
+                          className="chat-cite chat-cite-rescan"
+                          disabled={Boolean(rescanning)}
+                          onClick={() => rescanCited(cite)}
+                          title="Rescan this file to refresh searchable text"
+                        >
+                          {rescanning === doc.id ? "Rescanning…" : "Rescan this file"}
+                        </button>
+                      )}
+                    </span>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -1233,7 +2092,7 @@ function CaseChat({ caseId, documents, onOpenReport, onError, focusDocument }) {
           placeholder={
             focusDocument
               ? "e.g. What was this exhibit used for?"
-              : "e.g. What was the Wells Fargo mortgage statement used for?"
+              : "e.g. Which affidavit mentions a carnival?"
           }
           disabled={asking}
           onChange={(e) => setDraft(e.target.value)}
@@ -1406,13 +2265,46 @@ function CaseRiskSummary({ byRisk, pendingCount, onOpenReport }) {
   );
 }
 
+const PLAN_SUMMARY = (
+  <>
+    <strong>Solo</strong> $149/attorney/mo · <strong>Firm</strong> $119/attorney/mo (2+ seats). Month-to-month, cancel anytime.
+  </>
+);
+
 function AccountPanel({ entitlement, onRefresh, onError }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [name, setName] = useState("");
   const [license, setLicense] = useState("");
+  const [acceptedTerms, setAcceptedTerms] = useState(false);
+  const [inviteCode, setInviteCode] = useState("");
+  const [problemNote, setProblemNote] = useState("");
+  const [showTerms, setShowTerms] = useState(false);
+  const [working, setWorking] = useState("");
 
   if (!entitlement) {
     return <div className="card"><p>Loading account status…</p></div>;
+  }
+
+  const signedIn = Boolean(entitlement.hasSession || entitlement.email);
+  const busy = Boolean(working);
+
+  async function guard(action, fn) {
+    setWorking(action);
+    onError("");
+    try {
+      await fn();
+    } catch (err) {
+      onError(err.message);
+    } finally {
+      setWorking("");
+    }
+  }
+
+  async function openCheckout(trial) {
+    const session = await startCheckout(trial);
+    if (session.url) window.open(session.url, "_blank");
+    await onRefresh();
   }
 
   return (
@@ -1423,8 +2315,54 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
         Mode: <strong>{entitlement.mode}</strong>
         {" · "}
         {entitlement.active ? "Scans unlocked" : "Scans locked"}
+        {signedIn ? ` · ${entitlement.email}` : ""}
       </p>
       <p className="footnote">{entitlement.message}</p>
+
+      <div className="priority-support">
+        <p className="priority-support-label">Priority support</p>
+        {entitlement.support_code ? (
+          <p className="footnote" style={{ margin: "4px 0 0" }}>
+            Support code: <strong>{entitlement.support_code}</strong> — quote this in email so we can find your account without case files.
+          </p>
+        ) : null}
+        <p className="footnote" style={{ margin: "4px 0 0" }}>
+          Email:{" "}
+          <a href="mailto:support@casesifter.com">support@casesifter.com</a>
+        </p>
+        <p className="footnote" style={{ margin: "4px 0 0" }}>
+          For product help and billing. Do not paste document content or privileged filings into email.
+        </p>
+      </div>
+
+      {isDesktopApp() && signedIn && (
+        <form
+          className="case-form"
+          style={{ marginTop: 12 }}
+          onSubmit={(e) => {
+            e.preventDefault();
+            guard("report", async () => {
+              await reportProblem(problemNote);
+              setProblemNote("");
+              onError("");
+              alert("Diagnostics sent. We will follow up at your account email.");
+            });
+          }}
+        >
+          <label>
+            Report a problem (optional note — no PDFs)
+            <textarea
+              rows={3}
+              value={problemNote}
+              onChange={(e) => setProblemNote(e.target.value)}
+              placeholder="What happened? Include roughly when it occurred."
+            />
+          </label>
+          <button className="btn secondary" type="submit" disabled={busy}>
+            {working === "report" ? "Sending…" : "Send diagnostics"}
+          </button>
+        </form>
+      )}
 
       <label className="share-row">
         <input
@@ -1445,67 +2383,208 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
       {entitlement.mode === "license" && (
         <form
           className="case-form"
-          onSubmit={async (e) => {
+          onSubmit={(e) => {
             e.preventDefault();
-            try {
+            guard("license", async () => {
               await saveLicense(license);
               await onRefresh();
-            } catch (err) {
-              onError(err.message);
-            }
+            });
           }}
         >
           <label>
             License key
             <input value={license} onChange={(e) => setLicense(e.target.value)} placeholder="XXXX-XXXX-XXXX" />
           </label>
-          <button className="btn" type="submit">Save license</button>
+          <button className="btn" type="submit" disabled={busy}>Save license</button>
         </form>
       )}
 
-      {entitlement.mode === "cloud" && (
+      {entitlement.mode === "cloud" && signedIn && (
+        <div className="case-form">
+          <p className="plan-summary">{PLAN_SUMMARY}</p>
+          <div className="actions">
+            {!entitlement.active && (
+              <button
+                className="btn gold"
+                type="button"
+                disabled={busy}
+                onClick={() => guard("trial", () => openCheckout(true))}
+              >
+                {working === "trial" ? "Opening checkout…" : "Start 14-day trial"}
+              </button>
+            )}
+            <button
+              className="btn secondary"
+              type="button"
+              disabled={busy}
+              onClick={() => guard("subscribe", () => openCheckout(false))}
+            >
+              {working === "subscribe" ? "Opening checkout…" : entitlement.active ? "Manage billing" : "Subscribe now"}
+            </button>
+            <button
+              className="btn secondary"
+              type="button"
+              disabled={busy}
+              onClick={() => guard("signout", async () => {
+                await logoutCloud();
+                await onRefresh();
+              })}
+            >
+              Sign out
+            </button>
+          </div>
+          <p className="footnote">
+            Trials and subscriptions run through Stripe’s hosted checkout — CaseSifter never sees or stores your
+            card number. Files stay on this PC; analysis runs remotely and is deleted after the report is saved.
+          </p>
+        </div>
+      )}
+
+      {entitlement.mode === "cloud" && !signedIn && (
         <form
           className="case-form"
-          onSubmit={async (e) => {
+          onSubmit={(e) => {
             e.preventDefault();
-            try {
+            guard("login", async () => {
               await loginCloud(email, password);
               await onRefresh();
-            } catch (err) {
-              onError(err.message);
-            }
+            });
           }}
         >
+          <label>
+            Full name
+            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="For your account and receipts" />
+          </label>
           <label>
             Email
             <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
           </label>
           <label>
             Password
-            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} required />
+            <input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+              minLength={6}
+            />
           </label>
+          <label>
+            Invite code (beta)
+            <input
+              value={inviteCode}
+              onChange={(e) => setInviteCode(e.target.value)}
+              placeholder="Required when beta invites are enabled"
+              autoComplete="off"
+            />
+          </label>
+
+          <p className="plan-summary">
+            {PLAN_SUMMARY} A 14-day trial requires a card up front but you won’t be charged unless it converts —
+            cancel any time before the trial ends.
+          </p>
+
+          <label className="terms-row">
+            <input
+              type="checkbox"
+              checked={acceptedTerms}
+              onChange={(e) => setAcceptedTerms(e.target.checked)}
+            />
+            <span>
+              I agree to the{" "}
+              <button type="button" className="linkish" onClick={() => setShowTerms(true)}>
+                Terms of Service and Privacy Policy
+              </button>
+              .
+            </span>
+          </label>
+
           <div className="actions">
-            <button className="btn" type="submit">Sign in</button>
+            <button className="btn" type="submit" disabled={busy}>
+              {working === "login" ? "Signing in…" : "Sign in"}
+            </button>
             <button
-              className="btn secondary"
+              className="btn gold"
               type="button"
-              onClick={async () => {
-                await logoutCloud();
-                await onRefresh();
-              }}
+              disabled={busy || !acceptedTerms || !email || password.length < 6}
+              title={!acceptedTerms ? "Agree to the Terms of Service first" : undefined}
+              onClick={() => guard("trial", async () => {
+                await signupCloud(email, password, name, acceptedTerms, inviteCode);
+                await openCheckout(true);
+              })}
             >
-              Sign out
+              {working === "trial" ? "Opening checkout…" : "Start 14-day trial"}
             </button>
           </div>
+          <p className="footnote">
+            Files stay on this PC. Analysis runs remotely and is deleted after the report is saved.
+          </p>
         </form>
       )}
 
       {entitlement.mode === "open" && (
         <p className="footnote" style={{ marginTop: 12 }}>
-          Running in open/local-dev mode. Set <code>ENTITLEMENT_MODE=license</code> or
-          <code> cloud</code> in <code>.env</code> when you are ready to gate monthly access.
+          {isDesktopApp()
+            ? "Desktop open mode: point CASESIFTER_CONTROL_URL at the control plane and sign in for monthly gating."
+            : <>Running in open/local-dev mode. Set <code>ENTITLEMENT_MODE=license</code> or <code>cloud</code> in <code>.env</code> when you are ready to gate monthly access.</>}
         </p>
       )}
+
+      {showTerms && <TermsModal onClose={() => setShowTerms(false)} />}
+    </div>
+  );
+}
+
+function TermsModal({ onClose }) {
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <h3 className="serif">Terms of Service & Privacy Policy</h3>
+          <button type="button" className="icon-btn" onClick={onClose} aria-label="Close">
+            <X size={16} />
+          </button>
+        </div>
+        <div className="modal-body">
+          <p className="footnote" style={{ color: "var(--red)" }}>
+            Draft placeholder text — have counsel review and replace this before relying on it commercially.
+          </p>
+          <h4>1. The service</h4>
+          <p>
+            CaseSifter is decision-support software for reviewing case filings and exhibits. It does not provide
+            legal advice and does not determine authenticity, fraud, or admissibility. You remain responsible for
+            independently verifying any finding before relying on it.
+          </p>
+          <h4>2. Files and data</h4>
+          <p>
+            Your case files stay on your PC. When you scan a document, its content is sent to CaseSifter’s analysis
+            service for processing, then deleted once your report is generated. CaseSifter does not retain a
+            document library.
+          </p>
+          <h4>3. Billing and trials</h4>
+          <p>
+            Paid plans are billed monthly per seat and processed by Stripe; CaseSifter never receives or stores
+            your card number. A free trial period requires a valid card on file — unless you cancel before the
+            trial ends, it converts automatically into a paid subscription at the then-current plan price.
+          </p>
+          <h4>4. Cancellation</h4>
+          <p>
+            You may cancel at any time from the Account tab or by emailing{" "}
+            <a href="mailto:support@casesifter.com">support@casesifter.com</a>; cancellation takes effect at
+            the end of the current billing period.
+          </p>
+          <h4>5. Acceptable use</h4>
+          <p>
+            You agree not to upload material you are not authorized to review, and not to use the service to
+            circumvent a court’s rules or another party’s legal rights.
+          </p>
+          <h4>6. Privacy</h4>
+          <p>
+            Anonymized finding outcomes (types, severity, confidence) are shared with CaseSifter only if you opt in
+            in the Account tab, and never include document content.
+          </p>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1639,6 +2718,12 @@ function ReportViewer({
           }}
           onOpenReport={onOpenReport}
           onError={onError || (() => {})}
+          onScanDocument={async (doc) => {
+            await scanDocument(caseId, doc.id);
+          }}
+          onRescanWaiting={async () => {
+            await rescanCase(caseId, { waitingOnly: true });
+          }}
         />
       )}
 

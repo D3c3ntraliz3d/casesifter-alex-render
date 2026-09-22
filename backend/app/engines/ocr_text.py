@@ -9,6 +9,7 @@ from typing import Any
 from app.engines import finding, timed_module
 from app.ingestion import load_image, open_pdf_reader, render_pdf_pages
 from app.models import Finding, FontUsage, ModuleResult
+from app.config import settings
 
 DATE_PATTERNS = [
     re.compile(r"\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b"),
@@ -70,6 +71,13 @@ def _run(
         extracted_pages = _plain_text(path)
 
     full_text = "\n".join(p.get("text") or "" for p in extracted_pages)
+    ocr_used = False
+    if suffix == ".pdf" and not court_filing:
+        extracted_pages, full_text, ocr_used, ocr_findings = _prefer_ocr_for_scans(
+            path, extracted_pages, full_text
+        )
+        findings.extend(ocr_findings)
+
     extras: dict[str, Any] = {
         "pages": [
             {
@@ -84,12 +92,13 @@ def _run(
         "char_count": len(full_text),
         "full_text": full_text,
         "scan_profile": scan_profile,
+        "ocr_as_text_of_record": ocr_used,
     }
 
     if COURT_EFILING_HEADER_RE.search(full_text) and not court_filing:
         findings = [_soften_micro_text_for_efiling(item) for item in findings]
 
-    if suffix == ".pdf" and not court_filing:
+    if suffix == ".pdf" and not court_filing and not ocr_used:
         findings.extend(_compare_ocr_vs_pdf_text(path, extracted_pages))
 
     doc_meta = (metadata_extras.get("metadata") or {}).get("document") or {}
@@ -98,6 +107,65 @@ def _run(
         findings.extend(_date_mismatch(full_text, doc_meta))
     extras["font_models"] = fonts
     return findings, extras
+
+
+def _text_looks_untrustworthy(text: str) -> bool:
+    body = text or ""
+    if len(body.strip()) < settings.ocr_sparse_char_threshold:
+        return True
+    # High ratio of replacement/garble characters or camelCase flips → bad scan layer.
+    bad = len(re.findall(r"[�]|[a-z][A-Z]{2,}|[A-Z]{4,}[a-z]{1,2}[A-Z]", body))
+    if bad >= 8 and bad / max(len(body), 1) > 0.002:
+        return True
+    words = re.findall(r"[A-Za-z]{3,}", body)
+    if len(words) >= 30:
+        weird = sum(1 for w in words if re.search(r"(.)\1{3,}", w) or len(set(w.lower())) <= 2)
+        if weird / len(words) > 0.2:
+            return True
+    return False
+
+
+def _prefer_ocr_for_scans(
+    path: Path,
+    pdf_pages: list[dict[str, Any]],
+    full_text: str,
+) -> tuple[list[dict[str, Any]], str, bool, list[Finding]]:
+    """When embedded PDF text is sparse/garbled, OCR becomes the text of record."""
+    if not _text_looks_untrustworthy(full_text):
+        return pdf_pages, full_text, False, []
+    findings: list[Finding] = []
+    max_pages = max(1, int(settings.ocr_max_pages))
+    try:
+        images = render_pdf_pages(path, max_pages=max_pages)
+    except Exception:
+        return pdf_pages, full_text, False, []
+    if not images:
+        return pdf_pages, full_text, False, []
+
+    ocr_pages: list[dict[str, Any]] = []
+    for i, img in enumerate(images, start=1):
+        text, extra = _ocr_image(img, page=i)
+        findings.extend([f for f in extra if f.id != "txt-ocr-unavailable"])
+        ocr_pages.append({"page": i, "text": text or "", "source": "ocr"})
+    ocr_full = "\n".join(p["text"] for p in ocr_pages)
+    if len(ocr_full.strip()) < max(40, len(full_text.strip()) // 2):
+        # OCR did not improve — keep embedded text.
+        return pdf_pages, full_text, False, findings
+    findings.append(
+        finding(
+            fid="txt-ocr-text-of-record",
+            category="text",
+            severity="info",
+            title="Scan text used as the text of record",
+            explanation=(
+                f"Embedded PDF text looked sparse or unreliable ({len(full_text)} chars). "
+                f"OCR from {len(ocr_pages)} page(s) replaced it for claims and gotcha quotes."
+            ),
+            why_suspicious="Not a fraud finding — it improves quote reliability on paper scans.",
+            confidence=20,
+        )
+    )
+    return ocr_pages, ocr_full, True, findings
 
 
 def _soften_micro_text_for_efiling(item: Finding) -> Finding:

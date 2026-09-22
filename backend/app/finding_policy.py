@@ -73,6 +73,7 @@ MAJOR_AI_TYPES = frozenset(
         # Body-vs-body chronology only. Header/filing comparisons are dropped first.
         "date_inconsistency",
         "template_fabrication",
+        "logo_chrome_mismatch",
     }
 )
 
@@ -209,19 +210,38 @@ def is_material_finding(item: Finding) -> bool:
     """True when an attorney should be interrupted."""
     if item.severity == "info":
         return False
+    evidence = item.evidence or {}
+    if evidence.get("case_impact") == "noise":
+        return False
     if is_header_or_arrears_noise(item):
         return False
     if item.id in PACKAGING_IDS or any(item.id.startswith(prefix) for prefix in PACKAGING_IDS):
         return False
 
-    evidence = item.evidence or {}
     analysis = str(evidence.get("analysis_type") or "")
-    if analysis == "template_fabrication" and item.severity in {"medium", "high", "critical"}:
-        return True
+    if analysis in {"text_overlay", "graphic_manipulation"} and evidence.get("scan_heavy"):
+        return False
+    if analysis == "logo_chrome_mismatch":
+        # Ambiguous chrome opinions without a content hook stay non-material.
+        if not (
+            evidence.get("content_hook")
+            or evidence.get("quoted_evidence")
+            or evidence.get("issuer")
+        ):
+            return False
+        return item.severity in {"medium", "high", "critical"}
     if analysis == "date_inconsistency" and item.severity in {"medium", "high", "critical"}:
         return True
     if evidence.get("ai_generated"):
         return analysis in MAJOR_AI_TYPES
+    if analysis == "template_fabrication" and item.severity in {"medium", "high", "critical"}:
+        return True
+    if analysis in {"math_error", "historical_impossibility", "template_fabrication"} and item.severity in {
+        "medium",
+        "high",
+        "critical",
+    }:
+        return True
     if item.category == "gotcha":
         if evidence.get("evidence_tier") == 2:
             return False
@@ -247,8 +267,6 @@ def is_material_finding(item: Finding) -> bool:
         return False
     if item.id == "pdf-javascript" and item.severity in {"medium", "high"}:
         return True
-    if analysis in {"text_overlay", "graphic_manipulation"} and evidence.get("scan_heavy"):
-        return False
     return False
 
 

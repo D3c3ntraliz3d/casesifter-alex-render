@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 import threading
@@ -36,18 +37,23 @@ from app.models import (
     UploadResponse,
 )
 from app.pipeline import run_pipeline
+from app.product_events import emit_scan_failed
+from app.scan_slots import acquire as acquire_scan_slot
+from app.scan_slots import active_job_ids
+from app.scan_slots import release as release_scan_slot
+from app.scan_watchdog import ensure_watchdog
 from app.storage import artifact_dir, create_job, job_dir, load_progress, load_report, update_job
 from app.telemetry import flush_to_cloud, record_finding_feedback
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 SAFE_ARTIFACT = re.compile(r"^[A-Za-z0-9._\-]+$")
 SAFE_ID = re.compile(r"^[a-f0-9]{16,64}$")
-# Bulk exhibit dumps used to start every scan at once and lock SQLite / the API.
-_SCAN_SLOTS = threading.Semaphore(2)
 
 
 @router.get("/health")
 def health():
+    ensure_watchdog()
     return {"status": "ok", "name": settings.app_name, "version": settings.app_version}
 
 
@@ -178,7 +184,8 @@ def api_get_case(case_id: str):
     case = cases_db.get_case(case_id)
     if case is None:
         raise HTTPException(404, "Unknown case.")
-    _reap_stale_scans(case_id)
+    # Stale-scan reaping runs in the background watchdog — keep get_case fast
+    # so adding/refreshing files with 100+ docs stays snappy.
     docs = cases_db.list_documents(case_id)
     return {**case, "documents": docs}
 
@@ -243,6 +250,7 @@ def api_list_case_gotchas(case_id: str):
     return {
         "gotchas": items,
         "fact_conflicts": cases_db.list_case_fact_conflicts(case_id),
+        "case_impact": cases_db.list_case_impact(case_id),
     }
 
 
@@ -334,6 +342,7 @@ async def api_upload_document(
 
     job_id = None
     status = doc["status"]
+    scan_error = None
     if should_scan:
         try:
             job_id = uuid.uuid4().hex
@@ -353,9 +362,11 @@ async def api_upload_document(
             )
             status = "queued"
             doc = cases_db.get_document(doc["id"]) or doc
-        except Exception:
+        except Exception as exc:
+            logger.exception("Auto-scan queue failed for document %s", doc.get("id"))
             job_id = None
             status = "uploaded"
+            scan_error = str(exc) or "Scan did not start — use Scan on this file."
 
     return {
         "document": doc,
@@ -363,6 +374,7 @@ async def api_upload_document(
         "status": status,
         "proposed_display_name": proposed_name,
         "proposed_doc_kind": proposed_kind,
+        "scan_error": scan_error,
     }
 
 
@@ -379,6 +391,18 @@ def api_patch_document(case_id: str, document_id: str, body: DocumentUpdate):
         doc_kind=body.doc_kind,
     )
     return updated
+
+
+@router.delete("/cases/{case_id}/documents/{document_id}")
+def api_delete_document(case_id: str, document_id: str):
+    _validate_id(case_id)
+    _validate_id(document_id)
+    doc = cases_db.get_document(document_id)
+    if doc is None or doc["case_id"] != case_id:
+        raise HTTPException(404, "Unknown document.")
+    if not cases_db.delete_document(document_id):
+        raise HTTPException(404, "Unknown document.")
+    return {"deleted": document_id, "case_id": case_id}
 
 
 _CASE_RESCAN_LOCK = threading.Lock()
@@ -451,10 +475,7 @@ def _busy_scan_count(case_id: str) -> int:
 def _wait_for_scan_capacity() -> None:
     """Block until a scan slot is free (without holding it — _run_job acquires for real)."""
     waited = 0
-    while True:
-        if _SCAN_SLOTS.acquire(timeout=1):
-            _SCAN_SLOTS.release()
-            return
+    while len(active_job_ids()) >= 2:
         time.sleep(1)
         waited += 1
         if waited >= 48:
@@ -614,9 +635,14 @@ def _validate_id(value: str) -> None:
         raise HTTPException(400, "Invalid id.")
 
 
-def _reap_stale_scans(case_id: str, stale_seconds: int = 720) -> None:
-    """Mark scans that stopped writing progress (crash / OOM / reload) as failed."""
+def _reap_stale_scans(case_id: str, stale_seconds: int | None = None) -> None:
+    """Sync doc status from job progress; optionally fail stalled running jobs."""
+    from app.scan_watchdog import _maybe_reap_job
+
+    ensure_watchdog()
     now = datetime.now(timezone.utc)
+    # stale_seconds=0 means sync-only (used by rescan kickoff). None uses settings.
+    do_reap = stale_seconds is None or stale_seconds > 0
     for doc in cases_db.list_documents(case_id):
         if doc.get("status") not in {"scanning", "queued"}:
             continue
@@ -631,20 +657,8 @@ def _reap_stale_scans(case_id: str, stale_seconds: int = 720) -> None:
         if progress.status in {"complete", "failed"}:
             cases_db.update_document(doc["id"], status=progress.status)
             continue
-        updated = progress.updated_at
-        if updated.tzinfo is None:
-            updated = updated.replace(tzinfo=timezone.utc)
-        if (now - updated).total_seconds() < stale_seconds:
-            continue
-        update_job(
-            job_id,
-            status="failed",
-            stage="failed",
-            percent=100,
-            message="Scan stalled. Re-scan this file.",
-            error="No progress for more than 12 minutes. Large exhibits can stall image review; try Re-scan.",
-        )
-        cases_db.update_document(doc["id"], status="failed")
+        if do_reap and _maybe_reap_job(job_id, now):
+            cases_db.update_document(doc["id"], status="failed")
 
 
 def _start_analysis(
@@ -682,7 +696,13 @@ def _run_job(
     display_name: str | None,
     doc_kind: str | None,
 ) -> None:
-    if not _SCAN_SLOTS.acquire(timeout=600):
+    if not acquire_scan_slot(job_id, timeout=600):
+        emit_scan_failed(
+            job_id=job_id,
+            stage="queue",
+            error_class="timeout",
+            error_message="Scan queue timed out.",
+        )
         update_job(
             job_id,
             status="failed",
@@ -705,6 +725,7 @@ def _run_job(
             doc_kind=doc_kind,
         )
     except Exception as exc:
+        emit_scan_failed(job_id=job_id, stage="failed", error_message=str(exc))
         update_job(
             job_id,
             status="failed",
@@ -716,7 +737,7 @@ def _run_job(
         if document_id:
             cases_db.update_document(document_id, status="failed")
     finally:
-        _SCAN_SLOTS.release()
+        release_scan_slot(job_id)
 
 
 async def _write_upload(file: UploadFile, dest: Path) -> None:

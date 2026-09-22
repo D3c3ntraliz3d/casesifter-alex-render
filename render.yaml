@@ -1,0 +1,53 @@
+# CaseSifter hybrid — ephemeral analysis + control plane (no document vault)
+services:
+  - type: web
+    name: casesifter-analysis
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: starter
+    healthCheckPath: /api/health
+    envVars:
+      - key: EPHEMERAL_JOBS
+        value: "true"
+      - key: EPHEMERAL_TTL_HOURS
+        value: "6"
+      - key: ENTITLEMENT_MODE
+        value: open
+      - key: ANALYSIS_API_KEYS
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        sync: false
+      - key: CONTEXTUAL_MULTIMODAL
+        value: "true"
+      - key: OCR_MAX_PAGES
+        value: "40"
+
+  - type: web
+    name: casesifter-control
+    runtime: docker
+    dockerfilePath: ./control_plane/Dockerfile
+    dockerContext: ./control_plane
+    plan: starter
+    healthCheckPath: /health
+    envVars:
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: STRIPE_PRICE_ID
+        sync: false
+      - key: CONTROL_ADMIN_TOKEN
+        sync: false
+      - key: CASESIFTER_PUBLIC_URL
+        sync: false
+      - key: CASESIFTER_TRIAL_DAYS
+        value: "14"
+
+  - type: web
+    name: casesifter-marketing
+    runtime: static
+    staticPublishPath: ./marketing
+    plan: starter

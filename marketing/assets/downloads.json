@@ -1,0 +1,9 @@
+{
+  "windows": {
+    "version": "1.0.0",
+    "label": "Download for Windows",
+    "url": "https://github.com/johnnyg123456/court-exhibit-scanner/releases/latest/download/CaseSifter-Setup-1.0.0.exe",
+    "filename": "CaseSifter-Setup-1.0.0.exe",
+    "notes": "Unsigned builds may show a SmartScreen warning until code signing is enabled."
+  }
+}

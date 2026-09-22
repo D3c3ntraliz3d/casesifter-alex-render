@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Product — CaseSifter</title>
+  <meta name="description" content="Six forensic engines built to catch AI-generated and AI-edited exhibits, a Gotcha Finder for cross-filing contradictions, and confidence-capped AI findings — how CaseSifter reads a case file and what it does and doesn't decide." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600&family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="assets/style.css" />
+</head>
+<body>
+  <nav class="site-nav">
+    <div class="nav-inner">
+      <a class="brand-link" href="index.html">
+        <div class="mark">CS</div>
+        <span class="brand-name">CaseSifter</span>
+      </a>
+      <ul class="nav-links">
+        <li><a class="on" href="product.html">Product</a></li>
+        <li><a href="pricing.html">Pricing</a></li>
+        <li><a href="download.html">Download</a></li>
+        <li><a href="security.html">Security &amp; Privacy</a></li>
+        <li><a href="contact.html">Contact</a></li>
+      </ul>
+      <div class="nav-cta">
+        <a class="btn ghost small" href="download.html">Start trial</a>
+        <button class="nav-toggle" aria-label="Toggle menu"><span></span><span></span><span></span></button>
+      </div>
+    </div>
+  </nav>
+
+  <main class="wrap">
+    <div class="page-hero">
+      <p class="kicker">How it works</p>
+      <h1>Six engines. One read of the whole case.</h1>
+      <p class="lead">
+        CaseSifter runs every filing and exhibit through six independent forensic checks, then cross-references
+        the results against everything else in the matter. Here's what each engine catches, how accuracy is
+        controlled, and what stays a human decision.
+      </p>
+    </div>
+
+    <section class="block">
+      <div class="section-head">
+        <h2>The pipeline</h2>
+        <p>Each engine is narrow and explainable on purpose — no single black box decides a document's fate.</p>
+      </div>
+      <table class="compare">
+        <thead>
+          <tr><th>Engine</th><th>What it looks for</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="module">Metadata</td><td>Timestamp anomalies, authorship, editing-software fingerprints that don't match the document's claimed origin.</td></tr>
+          <tr><td class="module">PDF integrity</td><td>Embedded JavaScript, hidden attachments, layered content, and unapplied or improperly flattened redactions.</td></tr>
+          <tr><td class="module">Structural</td><td>Page size, orientation, and resolution consistency across a scanned or reprinted exhibit.</td></tr>
+          <tr><td class="module">Image forensics</td><td>Error Level Analysis and copy-move/clone detection to flag uneven recompression or splicing — with heatmaps.</td></tr>
+          <tr><td class="module">Text / OCR</td><td>Invisible text, micro text, and mismatches between the embedded PDF text layer and what OCR actually reads off the page.</td></tr>
+          <tr><td class="module">Contextual logic</td><td>Entities, dates, and amounts checked for internal consistency and, where enabled, cross-checked against public record.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="block">
+      <div class="section-head">
+        <h2>Catching AI-generated and AI-edited exhibits</h2>
+        <p>
+          Generative tools have changed what a fabricated document looks like. It no longer has to be a
+          clumsy cut-and-paste job — a convincing bank statement, utility bill, or affidavit can be produced
+          from scratch, or a real one edited without leaving an obvious visual seam. CaseSifter doesn't run a
+          single "is this AI" classifier; it maps specific engines to the traces that kind of fabrication
+          actually leaves behind.
+        </p>
+      </div>
+      <table class="compare">
+        <thead>
+          <tr><th>AI-fabrication pattern</th><th>Engine that catches it</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="module">Inpainted or generatively edited image regions</td><td>Image forensics — Error Level Analysis and copy-move detection surface localized recompression and cloning artifacts.</td></tr>
+          <tr><td class="module">Text inserted or overlaid on a scanned template</td><td>Text / OCR — mismatches between the embedded text layer and what OCR reads off the visible page, plus invisible/micro-text checks.</td></tr>
+          <tr><td class="module">Metadata inconsistent with the claimed origin</td><td>Metadata — editing-software fingerprints and timestamp sequencing that don't match a document's supposed history.</td></tr>
+          <tr><td class="module">A fluent but fabricated narrative or figure</td><td>Contextual logic — entities, dates, and amounts checked against the rest of the case file and, where enabled, public record.</td></tr>
+        </tbody>
+      </table>
+      <p style="margin-top: 1rem; color: var(--muted); font-size: 0.9rem; max-width: 68ch;">
+        These are indicators, not a verdict. CaseSifter cannot certify that a document was or wasn't produced
+        with AI — it surfaces the forensic and contextual signals worth an attorney's attention, with the
+        source language quoted so you can verify it yourself.
+      </p>
+    </section>
+
+    <section class="block">
+      <div class="section-head">
+        <h2>Gotcha Finder: the case-wide pass</h2>
+        <p>Most contradictions don't live inside one document — they live between two. Gotcha Finder reads across every filing in the matter and surfaces the same fact stated two different ways.</p>
+      </div>
+      <div class="grid cols-2">
+        <div class="card">
+          <h3>What it flags</h3>
+          <p>Element, procedure, credibility, and damages conflicts that would actually move a motion — a default date that shifts between an affidavit and an exhibit, a stamp year that conflicts with the body text, an amount that doesn't reconcile across two filings.</p>
+        </div>
+        <div class="card">
+          <h3>What it ignores on purpose</h3>
+          <p>Exhibit-lettering drift between filing and recording, caption or NYSCEF header noise, and loan-status number drift that's expected after default. Signal, not noise — so the list of what needs a look stays short.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="block">
+      <div class="section-head">
+        <h2>Accuracy: how confidence is controlled</h2>
+        <p>Litigators need to know what a finding actually means before they rely on it. Here's the honest version.</p>
+      </div>
+      <div class="grid cols-3">
+        <div class="card">
+          <h3>Risk bands, not verdicts</h3>
+          <p>Every scanned document gets a <strong>green / yellow / red</strong> risk level. Red requires at least 70% confidence in the underlying findings — no single low-confidence flag can turn a report red on its own.</p>
+        </div>
+        <div class="card">
+          <h3>AI findings are capped</h3>
+          <p>Findings sourced from contextual AI analysis are capped at medium severity, have their confidence discounted, and are hard-capped at 60% — and are always labeled as AI-generated in the report.</p>
+        </div>
+        <div class="card">
+          <h3>Nothing auto-escalates</h3>
+          <p>CaseSifter does not file anything, notify a court, or contact opposing counsel. A flagged finding is a prompt for attorney review, with the source language quoted so you can verify it yourself.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="block">
+      <div class="section-head">
+        <h2>What this adds to your practice</h2>
+        <p>The value isn't the scan — it's what the scan lets your team stop doing by hand.</p>
+      </div>
+      <div class="grid cols-2">
+        <div class="card">
+          <h3>For the attorney</h3>
+          <p>Walk into a hearing already knowing where the record contradicts itself. Catch a fabricated or altered exhibit before it's relied on in a motion, not after opposing counsel raises it.</p>
+        </div>
+        <div class="card">
+          <h3>For the client</h3>
+          <p>Fewer surprises mid-litigation, faster turnaround on document-heavy motions, and a firm that can show its diligence — all without a single case file leaving the building.</p>
+        </div>
+      </div>
+    </section>
+
+    <div class="strip">
+      <h2>Bring a real file to the demo.</h2>
+      <p>We'll run it through all six engines live, on your machine, so you can see exactly what surfaces before deciding anything.</p>
+      <a class="btn primary" href="contact.html">Book a demo</a>
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap">
+      <div class="footer-grid">
+        <div>
+          <div class="footer-brand"><div class="mark">CS</div><strong>CaseSifter</strong></div>
+          <p style="max-width: 30ch; color: var(--muted); font-size: 0.88rem; line-height: 1.55;">Find what matters in the record. Your files stay on your PC.</p>
+        </div>
+        <div class="footer-cols">
+          <div class="footer-col">
+            <h5>Product</h5>
+            <a href="product.html">How it works</a>
+            <a href="pricing.html">Pricing</a>
+            <a href="download.html">Download</a>
+            <a href="security.html">Security &amp; privacy</a>
+          </div>
+          <div class="footer-col">
+            <h5>Company</h5>
+            <a href="contact.html">Contact</a>
+            <a href="contact.html">Book a demo</a>
+          </div>
+        </div>
+      </div>
+      <p class="footer-disclaimer">
+        CaseSifter — decision support only. Not a determination of authenticity, fraud, or admissibility.
+        © <span id="year"></span> CaseSifter.
+      </p>
+    </div>
+  </footer>
+  <script>document.getElementById("year").textContent = new Date().getFullYear();</script>
+  <script src="assets/app.js"></script>
+</body>
+</html>

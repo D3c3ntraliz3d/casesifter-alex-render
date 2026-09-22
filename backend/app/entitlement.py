@@ -21,6 +21,9 @@ def entitlement_status() -> dict[str, Any]:
         "mode": mode,
         "share_anonymized_outcomes": share == "true",
         "cloud_control_url": settings.cloud_control_url,
+        "support_code": cases_db.get_setting("cloud_support_code") or None,
+        "cohort": cases_db.get_setting("cloud_cohort") or None,
+        "hasSession": bool(cases_db.get_setting("cloud_session_token")),
     }
 
     if mode == "open":
@@ -58,6 +61,7 @@ def entitlement_status() -> dict[str, Any]:
             "plan": "cloud-cached",
             "message": "Using cached session; cloud control plane unreachable.",
             "cached": True,
+            "email": cases_db.get_setting("cloud_email"),
         }
     return {**base, **remote}
 
@@ -96,6 +100,8 @@ def cloud_login(email: str, password: str) -> dict[str, Any]:
                 raise RuntimeError("Cloud login returned no token.")
             cases_db.set_setting("cloud_session_token", str(token))
             cases_db.set_setting("cloud_email", email)
+            ent = data.get("entitlement") or data
+            _persist_cloud_identity(ent, email)
             return entitlement_status()
         except urllib.error.URLError as exc:
             raise RuntimeError(f"Could not reach cloud control plane: {exc.reason}") from exc
@@ -131,11 +137,29 @@ def _probe_cloud_entitlement(token: str) -> dict[str, Any] | None:
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode("utf-8"))
+        _persist_cloud_identity(data, data.get("email") or cases_db.get_setting("cloud_email") or "")
         return {
             "active": bool(data.get("active")),
             "plan": data.get("plan"),
             "message": data.get("message") or "",
             "email": data.get("email") or cases_db.get_setting("cloud_email"),
+            "support_code": data.get("support_code") or cases_db.get_setting("cloud_support_code"),
+            "cohort": data.get("cohort") or cases_db.get_setting("cloud_cohort"),
+            "hasSession": bool(token),
         }
     except Exception:
         return None
+
+
+def _persist_cloud_identity(data: dict[str, Any], email: str) -> None:
+    if email:
+        cases_db.set_setting("cloud_email", str(email).lower())
+    code = data.get("support_code")
+    if code:
+        cases_db.set_setting("cloud_support_code", str(code))
+    uid = data.get("user_id")
+    if uid:
+        cases_db.set_setting("cloud_user_id", str(uid))
+    cohort = data.get("cohort")
+    if cohort:
+        cases_db.set_setting("cloud_cohort", str(cohort))

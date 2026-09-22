@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Contact — CaseSifter</title>
+  <meta name="description" content="Book a CaseSifter demo or ask a question about pricing, security, or fit for your firm." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600&family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="assets/style.css" />
+</head>
+<body>
+  <nav class="site-nav">
+    <div class="nav-inner">
+      <a class="brand-link" href="index.html">
+        <div class="mark">CS</div>
+        <span class="brand-name">CaseSifter</span>
+      </a>
+      <ul class="nav-links">
+        <li><a href="product.html">Product</a></li>
+        <li><a href="pricing.html">Pricing</a></li>
+        <li><a href="download.html">Download</a></li>
+        <li><a href="security.html">Security &amp; Privacy</a></li>
+        <li><a class="on" href="contact.html">Contact</a></li>
+      </ul>
+      <div class="nav-cta">
+        <a class="btn ghost small" href="download.html">Start trial</a>
+        <button class="nav-toggle" aria-label="Toggle menu"><span></span><span></span><span></span></button>
+      </div>
+    </div>
+  </nav>
+
+  <main class="wrap">
+    <div class="page-hero">
+      <p class="kicker">Contact</p>
+      <h1>Let's look at a real file together.</h1>
+      <p class="lead">
+        Tell us a bit about your firm and what you're working on. We'll follow up to schedule a demo —
+        bring an active matter and we'll run it through CaseSifter live.
+      </p>
+    </div>
+
+    <section class="block" style="padding-top: 0;">
+      <div class="contact-grid">
+        <div class="form-card">
+          <form id="contact-form">
+            <div class="field">
+              <label for="name">Name</label>
+              <input id="name" name="name" type="text" required autocomplete="name" />
+            </div>
+            <div class="field">
+              <label for="firm">Firm</label>
+              <input id="firm" name="firm" type="text" required autocomplete="organization" />
+            </div>
+            <div class="field">
+              <label for="email">Work email</label>
+              <input id="email" name="email" type="email" required autocomplete="email" />
+            </div>
+            <div class="field">
+              <label for="phone">Phone (optional)</label>
+              <input id="phone" name="phone" type="tel" autocomplete="tel" />
+            </div>
+            <div class="field">
+              <label for="reason">What are you looking for?</label>
+              <select id="reason" name="reason">
+                <option value="demo">Book a demo</option>
+                <option value="pricing">Pricing question</option>
+                <option value="security">Security / compliance question</option>
+                <option value="other">Something else</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="message">Message</label>
+              <textarea id="message" name="message" placeholder="What kind of matters do you handle, and how many attorneys would use CaseSifter?"></textarea>
+            </div>
+            <button class="btn primary block" type="submit">Send</button>
+            <p class="form-status" id="form-status"></p>
+          </form>
+        </div>
+
+        <div>
+          <div class="card" style="margin-bottom: 1rem;">
+            <h3>What happens next</h3>
+            <p>We'll reply within one business day to schedule a 20-minute walkthrough. No file upload is required before the call.</p>
+          </div>
+          <div class="card" style="margin-bottom: 1rem;">
+            <h3>Prefer email?</h3>
+            <p>Reach us directly at <strong>hello@casesifter.com</strong> and mention your firm size and practice area.</p>
+          </div>
+          <div class="card">
+            <h3>Priority support</h3>
+            <p>Product help and billing: <strong><a href="mailto:support@casesifter.com">support@casesifter.com</a></strong>. Please do not paste document content into support mail.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap">
+      <div class="footer-grid">
+        <div>
+          <div class="footer-brand"><div class="mark">CS</div><strong>CaseSifter</strong></div>
+          <p style="max-width: 30ch; color: var(--muted); font-size: 0.88rem; line-height: 1.55;">Find what matters in the record. Your files stay on your PC.</p>
+        </div>
+        <div class="footer-cols">
+          <div class="footer-col">
+            <h5>Product</h5>
+            <a href="product.html">How it works</a>
+            <a href="pricing.html">Pricing</a>
+            <a href="download.html">Download</a>
+            <a href="security.html">Security &amp; privacy</a>
+          </div>
+          <div class="footer-col">
+            <h5>Company</h5>
+            <a href="contact.html">Contact</a>
+            <a href="contact.html">Book a demo</a>
+          </div>
+        </div>
+      </div>
+      <p class="footer-disclaimer">
+        CaseSifter — decision support only. Not a determination of authenticity, fraud, or admissibility.
+        © <span id="year"></span> CaseSifter.
+      </p>
+    </div>
+  </footer>
+  <script>document.getElementById("year").textContent = new Date().getFullYear();</script>
+  <script src="assets/app.js"></script>
+</body>
+</html>

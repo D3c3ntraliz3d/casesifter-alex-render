@@ -72,6 +72,8 @@ def update_job(
     if progress is None:
         raise FileNotFoundError(f"Unknown job {job_id}")
     if status is not None:
+        if status == "running" and progress.started_at is None:
+            progress.started_at = utcnow()
         progress.status = status
     if stage is not None:
         progress.stage = stage

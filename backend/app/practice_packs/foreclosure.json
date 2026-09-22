@@ -1,0 +1,33 @@
+{
+  "label": "Foreclosure / mortgage",
+  "element_cues": [
+    "personal jurisdiction",
+    "service",
+    "standing",
+    "default",
+    "RPAPL",
+    "notice of default",
+    "acceleration",
+    "assignment",
+    "CRFN",
+    "discharge",
+    "satisfaction of mortgage",
+    "amount due",
+    "attorney fees"
+  ],
+  "ordinary_dispute_examples": [
+    "Bare residence denial versus affidavit of service alone (ordinary traverse).",
+    "Service-attempt claim versus DMV/address printout that lists the same address.",
+    "Two competing attorney characterizations of whether the case settled.",
+    "Note rate versus default rate movement after missed payments (loan-status noise)."
+  ],
+  "high_value_exhibit_kinds": [
+    "utility_statement",
+    "bank_statement",
+    "affidavit_of_service",
+    "note",
+    "mortgage",
+    "assignment",
+    "payment_history"
+  ]
+}

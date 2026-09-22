@@ -1,0 +1,19 @@
+{
+  "id": "too_crisp_fields_aged_form",
+  "practice": "foreclosure",
+  "lane": "logo_chrome_mismatch",
+  "must_ship": true,
+  "title": "Typed amounts too crisp for claimed statement age",
+  "exhibit_text": "CITIBANK\nMonthly Statement\nStatement Date: March 3, 2009\nAccount Holder: JANE DOE\nPrevious Balance: $1,200.00\nPayments: $200.00\nNew Balance: $1,000.00\n[Header chrome appears soft / aged; amount fields read as modern generative type]",
+  "facts": {
+    "issuer": "Citibank",
+    "statement_date": "2009-03-03",
+    "crispness_problem": "Amount lines look modern and too clean relative to aged form chrome"
+  },
+  "expected_finding": {
+    "analysis_type": "logo_chrome_mismatch",
+    "or_types": ["logo_chrome_mismatch", "template_fabrication", "font_mismatch"],
+    "signals": ["crispness", "field_vs_chrome", "ai_print_scan"]
+  },
+  "notes": "AI fill or generative type on an aged template, then printed and scanned."
+}

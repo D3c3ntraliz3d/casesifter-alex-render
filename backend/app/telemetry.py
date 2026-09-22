@@ -78,8 +78,12 @@ def flush_to_cloud(limit: int = 50) -> dict[str, Any]:
         return {"flushed": len(events), "destination": "local"}
 
     token = cases_db.get_setting("cloud_session_token") or ""
+    support_code = cases_db.get_setting("cloud_support_code") or ""
+    user_id = cases_db.get_setting("cloud_user_id") or ""
     body = json.dumps(
         {
+            "support_code": support_code or None,
+            "user_id": user_id or None,
             "events": [
                 {
                     "id": e["id"],
@@ -88,7 +92,7 @@ def flush_to_cloud(limit: int = 50) -> dict[str, Any]:
                     "created_at": e["created_at"],
                 }
                 for e in events
-            ]
+            ],
         }
     ).encode("utf-8")
     req = urllib.request.Request(
@@ -101,7 +105,7 @@ def flush_to_cloud(limit: int = 50) -> dict[str, Any]:
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=3) as resp:
             _ = resp.read()
         cases_db.mark_telemetry_synced([e["id"] for e in events])
         return {"flushed": len(events), "destination": "cloud"}

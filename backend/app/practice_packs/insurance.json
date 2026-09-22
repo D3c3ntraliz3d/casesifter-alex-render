@@ -1,0 +1,29 @@
+{
+  "label": "Insurance",
+  "element_cues": [
+    "coverage",
+    "policy period",
+    "exclusion",
+    "notice of claim",
+    "bad faith",
+    "duty to defend",
+    "indemnity",
+    "reservation of rights",
+    "EOB",
+    "UCR",
+    "causation",
+    "damages"
+  ],
+  "ordinary_dispute_examples": [
+    "Insurer denial letter versus insured demand letter with no produced policy schedule conflict.",
+    "Competing medical opinions without a false exhibit or timeline impossibility."
+  ],
+  "high_value_exhibit_kinds": [
+    "eob",
+    "medical_bill",
+    "policy",
+    "declarations_page",
+    "claim_notes",
+    "IME"
+  ]
+}

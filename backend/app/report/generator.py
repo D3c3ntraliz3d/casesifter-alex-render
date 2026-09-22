@@ -128,7 +128,7 @@ def render_pdf(report: Report) -> Path:
     }[report.risk_level]
 
     story = []
-    story.append(Paragraph("LawSifter — Authenticity Report", styles["CoverTitle"]))
+    story.append(Paragraph("CaseSifter — Authenticity Report", styles["CoverTitle"]))
     story.append(Paragraph(report.audit.filename, styles["Body"]))
     story.append(Spacer(1, 8))
     badge = Table(

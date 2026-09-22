@@ -1,0 +1,41 @@
+{
+  "name": "casesifter-desktop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "CaseSifter thin desktop client — local case files, remote ephemeral analysis",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "prepare-ui": "node scripts/prepare-ui.cjs",
+    "pack": "npm run prepare-ui && electron-builder --dir",
+    "dist": "npm run prepare-ui && electron-builder --win nsis",
+    "dist:win": "npm run dist"
+  },
+  "build": {
+    "appId": "com.casesifter.app",
+    "productName": "CaseSifter",
+    "directories": { "output": "dist" },
+    "files": [
+      "main.cjs",
+      "preload.cjs",
+      "local_store.cjs",
+      "product_telemetry.cjs",
+      "package.json",
+      "packaged-defaults.json",
+      "renderer/**/*"
+    ],
+    "artifactName": "CaseSifter-Setup-${version}.${ext}",
+    "win": { "target": ["nsis"] },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  },
+  "dependencies": {
+    "@sentry/electron": "^5.7.0"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  }
+}

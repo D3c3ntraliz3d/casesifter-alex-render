@@ -9,7 +9,7 @@ class Settings(BaseSettings):
         extra="ignore"
     )
 
-    app_name: str = "LawSifter"
+    app_name: str = "CaseSifter"
     app_version: str = "1.0.0"
     max_file_mb: int = 100
     data_dir: Path = Path(__file__).resolve().parent.parent / "data"
@@ -59,6 +59,33 @@ class Settings(BaseSettings):
     cloud_control_url: str | None = None
     share_anonymized_outcomes: bool = True
 
+    # Optional crash reporting (scrubbed — no document bytes or paths).
+    sentry_dsn: str | None = None
+    sentry_environment: str | None = None
+
+    # Ephemeral analysis API (hybrid desktop): process then delete job files.
+    ephemeral_jobs: bool = True
+    ephemeral_ttl_hours: int = 6
+    analysis_api_keys: str = ""  # comma-separated bearer tokens; empty = rely on entitlement only
+    ocr_max_pages: int = 40
+    ocr_sparse_char_threshold: int = 80
+
+    # Scan watchdog: fail + release slot when a running job goes silent or runs too long.
+    scan_stall_seconds: int = 420  # 7 minutes with no progress update
+    scan_max_seconds: int = 1080  # 18 minutes wall-clock once running
+
+    # Gotcha logic verifier (Track B). Historical impossibilities stay on Gemini (Track C).
+    # auto = Claude if ANTHROPIC_API_KEY set, else Gemini.
+    gotcha_verify_provider: str = "auto"
+    anthropic_api_key: str | None = None
+    claude_model: str = "claude-sonnet-4-5-20250929"
+    openai_api_key: str | None = None
+    openai_verify_model: str = "gpt-4.1"
+    practice_pack: str = "foreclosure"
+    # Separate Gemini vision pass for logo/chrome. On by default — strongest
+    # upperhand lane for wrong-era / template chrome on consumer statements.
+    logo_chrome_pass: bool = True
+
     @property
     def jobs_dir(self) -> Path:
         return self.data_dir / "jobs"
@@ -66,6 +93,9 @@ class Settings(BaseSettings):
     @property
     def cases_dir(self) -> Path:
         return self.data_dir / "cases"
+
+    def analysis_api_key_set(self) -> set[str]:
+        return {part.strip() for part in (self.analysis_api_keys or "").split(",") if part.strip()}
 
 
 settings = Settings()

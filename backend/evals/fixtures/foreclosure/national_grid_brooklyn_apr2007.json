@@ -1,0 +1,24 @@
+{
+  "id": "national_grid_brooklyn_apr2007",
+  "practice": "foreclosure",
+  "lane": "historical_impossibility",
+  "must_ship": true,
+  "provider": "gemini",
+  "title": "National Grid statement dated before Brooklyn market entry",
+  "exhibit_text": "NATIONAL GRID\nAccount Statement\nStatement Date: April 12, 2007\nService Address: 5616 14th Avenue, Brooklyn, NY 11219\nAmount Due: $184.22",
+  "facts_on_page": {
+    "issuer": "National Grid",
+    "place": "Brooklyn",
+    "statement_date": "2007-04-12"
+  },
+  "public_timeline": {
+    "fact": "National Grid began serving Brooklyn (former KeySpan territory) in August 2007",
+    "earliest_brooklyn_service": "2007-08"
+  },
+  "expected_finding": {
+    "analysis_type": "historical_impossibility",
+    "category": "contextual",
+    "must_mention": ["National Grid", "Brooklyn", "2007"]
+  },
+  "notes": "Claude-only logic missed this; Gemini web-grounded historical check is the required lane. Do not route this through gotcha verify."
+}

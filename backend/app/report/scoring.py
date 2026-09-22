@@ -57,10 +57,19 @@ def score_risk(findings: list[Finding]) -> tuple[RiskLevel, int]:
 def pick_top_findings(findings: list[Finding], limit: int = 3) -> list[Finding]:
     material = [f for f in findings if is_material_finding(f)]
     pool = material or [f for f in findings if f.severity != "info"]
+    fraud_types = {
+        "math_error",
+        "historical_impossibility",
+        "template_fabrication",
+        "logo_chrome_mismatch",
+        "date_inconsistency",
+    }
     ranked = sorted(
         pool,
         key=lambda f: (
             1 if (f.evidence or {}).get("tainted_support") else 0,
+            1 if (f.evidence or {}).get("case_impact") == "case_winning" else 0,
+            1 if (f.evidence or {}).get("analysis_type") in fraud_types else 0,
             1 if (f.evidence or {}).get("analysis_type") == "date_inconsistency" else 0,
             SEVERITY_RANK[f.severity],
             f.confidence,

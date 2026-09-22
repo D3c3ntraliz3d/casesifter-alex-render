@@ -217,6 +217,7 @@ ANALYSIS_TYPES = (
     "spelling_anomaly",
     "historical_impossibility",
     "template_fabrication",
+    "logo_chrome_mismatch",
 )
 
 FRAUD_SCHEMA = {
@@ -309,6 +310,18 @@ Examine:
    is the concealment step — still report leftover template language and field/chrome mismatch.
    Do not treat an ordinary flatbed scan of a real issuer statement as this. Court filings
    and recorded mortgages/deeds are out of scope.
+10. logo_chrome_mismatch — AI-print-scan / fabricated consumer statements often survive
+   flattening. Explicitly check (cite page + region or quoted text):
+   (a) Header logo / brand mark does not match the named issuer on the statement;
+   (b) Logo or letterhead chrome is the wrong *era* for the statement date (e.g. a 2020s mark
+       on a 2007 bill, or a successor brand before it operated in that market);
+   (c) Typed amounts, names, or addresses look too crisp / modern / generative relative to
+       the claimed age of the statement and the surrounding form chrome (“too clean for 2007”);
+   (d) Layout looks like a modern stock template back-dated years earlier;
+   (e) Field baselines, weights, or alignment do not match the printed grid while the page
+       still looks like a flatbed scan (print-then-scan concealment).
+   Do NOT flag ordinary scan noise, JPEG softness, skew, or whole-page texture alone.
+   Do NOT flag court filings. Prefer omit when unsure.
 
 Rules you must follow:
 - Report nothing unless you can cite the specific page and the specific text or region.
@@ -344,8 +357,9 @@ Rules you must follow:
 - "confidence" is 0-100 for that specific observation. Use under 50 when you are unsure.
 - You are briefing a busy attorney. Report ONLY stop-the-desk problems: arithmetic that
   does not reconcile, pasted overlays, graphic splicing, leftover form-template language
-  or a filled-in bought template that was printed and scanned, or a well-established
-  historical impossibility on the exhibit itself. Do not report font mix, spelling, caption
+  or a filled-in bought template that was printed and scanned, logo/chrome era or
+  crispness mismatches on consumer statements, or a well-established historical
+  impossibility on the exhibit itself. Do not report font mix, spelling, caption
   wording, or other pleading nuances. Do not report the e-filing stamp date (or index year)
   versus any date printed in the exhibit body — that mismatch is how courts file old records.
 - "severity" reflects how much the observation would matter if confirmed by a human.
@@ -466,9 +480,33 @@ def _run(
     try:
         # Tier 3 multimodal fraud review is for exhibits only.
         if settings.contextual_multimodal and not court_filing:
+            import time as _time
+
+            t_mm = _time.perf_counter()
             document_findings, status = _run_document_analysis(text, source_file, extras)
+            extras["multimodal_ms"] = int((_time.perf_counter() - t_mm) * 1000)
             findings.extend(document_findings)
             extras["document_analysis"] = status
+            extras["logo_chrome_ms"] = 0
+            if settings.logo_chrome_pass:
+                try:
+                    from app.engines.logo_chrome import run_logo_chrome_check
+
+                    t_ch = _time.perf_counter()
+                    chrome = run_logo_chrome_check(
+                        text,
+                        source_file,
+                        scan_profile=scan_profile,
+                        source=str((doc_meta or {}).get("filename") or ""),
+                        doc_kind=str((doc_meta or {}).get("doc_kind") or "") or None,
+                        extras=extras,
+                    )
+                    extras["logo_chrome_ms"] = int((_time.perf_counter() - t_ch) * 1000)
+                    findings.extend(chrome)
+                except Exception as exc:
+                    extras["logo_chrome_error"] = str(exc)[:300]
+            else:
+                extras["logo_chrome"] = "skipped"
         elif court_filing:
             extras["document_analysis"] = "skipped_court_filing"
             extras["external_verification"] = "skipped_court_filing"
@@ -1056,6 +1094,7 @@ ANALYSIS_TITLES = {
     "spelling_anomaly": "Spelling or name anomaly",
     "historical_impossibility": "Historical / market timeline conflict",
     "template_fabrication": "Possible bought-template exhibit",
+    "logo_chrome_mismatch": "Logo / chrome mismatch on statement",
 }
 
 # The model may propose any severity; nothing it reports is allowed above medium.

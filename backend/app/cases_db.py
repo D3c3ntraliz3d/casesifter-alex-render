@@ -149,6 +149,9 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     cols = {row[1] for row in conn.execute("PRAGMA table_info(cases)")}
     if "archived_at" not in cols:
         conn.execute("ALTER TABLE cases ADD COLUMN archived_at TEXT")
+    doc_cols = {row[1] for row in conn.execute("PRAGMA table_info(documents)")}
+    if "last_scanned_at" not in doc_cols:
+        conn.execute("ALTER TABLE documents ADD COLUMN last_scanned_at TEXT")
     snap_cols = {row[1] for row in conn.execute("PRAGMA table_info(scan_snapshots)")}
     if "text_excerpt" not in snap_cols:
         conn.execute("ALTER TABLE scan_snapshots ADD COLUMN text_excerpt TEXT")
@@ -327,7 +330,24 @@ def list_documents(case_id: str) -> list[dict[str, Any]]:
             """,
             (case_id,),
         ).fetchall()
-    return [dict(r) for r in rows]
+        docs = [dict(r) for r in rows]
+        # Cap backfill work so opening a large case does not stall uploads.
+        missing = [
+            d for d in docs if d.get("status") == "complete" and not d.get("last_scanned_at")
+        ][:25]
+        if missing:
+            for doc in missing:
+                snap = conn.execute(
+                    "SELECT created_at FROM scan_snapshots WHERE document_id = ?",
+                    (doc["id"],),
+                ).fetchone()
+                if snap and snap["created_at"]:
+                    doc["last_scanned_at"] = snap["created_at"]
+                    conn.execute(
+                        "UPDATE documents SET last_scanned_at = ? WHERE id = ?",
+                        (snap["created_at"], doc["id"]),
+                    )
+        return docs
 
 
 def get_document(document_id: str) -> dict[str, Any] | None:
@@ -336,6 +356,40 @@ def get_document(document_id: str) -> dict[str, Any] | None:
             "SELECT * FROM documents WHERE id = ?", (document_id,)
         ).fetchone()
     return _row_to_dict(row)
+
+
+def delete_document(document_id: str) -> bool:
+    """Remove a document row, snapshot, and on-disk filing bytes."""
+    doc = get_document(document_id)
+    if doc is None:
+        return False
+    case_id = doc["case_id"]
+    stored = Path(doc.get("stored_path") or "")
+    with connect() as conn:
+        conn.execute("DELETE FROM scan_snapshots WHERE document_id = ?", (document_id,))
+        cur = conn.execute("DELETE FROM documents WHERE id = ?", (document_id,))
+        deleted = cur.rowcount > 0
+        if deleted:
+            conn.execute(
+                "UPDATE cases SET updated_at = ? WHERE id = ?",
+                (utcnow_iso(), case_id),
+            )
+    if stored.exists():
+        import shutil
+
+        # Stored as …/documents/<file> or under a per-doc folder.
+        if stored.is_file():
+            parent = stored.parent
+            try:
+                stored.unlink()
+            except OSError:
+                pass
+            # Remove empty UUID-style doc folders; keep shared documents/ dir.
+            if parent.name != "documents" and parent.is_dir() and not any(parent.iterdir()):
+                shutil.rmtree(parent, ignore_errors=True)
+        elif stored.is_dir():
+            shutil.rmtree(stored, ignore_errors=True)
+    return deleted
 
 
 def update_document(document_id: str, **fields: Any) -> dict[str, Any] | None:
@@ -347,6 +401,7 @@ def update_document(document_id: str, **fields: Any) -> dict[str, Any] | None:
         "status",
         "risk_level",
         "risk_score",
+        "last_scanned_at",
     }
     updates = {k: v for k, v in fields.items() if k in allowed}
     current = get_document(document_id)
@@ -478,6 +533,8 @@ def list_case_gotchas(case_id: str) -> list[dict[str, Any]]:
                 continue
             if not item.get("verified"):
                 continue
+            if item.get("case_impact") == "noise" or str(item.get("severity") or "") == "info":
+                continue
             record = {
                 **item,
                 "document_id": item.get("document_id") or snap.get("document_id"),
@@ -490,8 +547,32 @@ def list_case_gotchas(case_id: str) -> list[dict[str, Any]]:
                 continue
             out.append(record)
     out = dedupe_gotchas(out)
-    out.sort(key=lambda item: (0 if item.get("tainted_support") else 1))
+    out.sort(
+        key=lambda item: (
+            0 if item.get("tainted_support") else 1,
+            0 if item.get("case_impact") == "case_winning" else 1,
+        )
+    )
     return out
+
+
+def list_case_impact(case_id: str) -> dict[str, Any]:
+    """Case-level material interrupts vs collapsed noise for the board strip."""
+    from app.impact_judge import case_impact_summary
+
+    rows: list[dict[str, Any]] = []
+    for snap in list_case_snapshots(case_id):
+        for item in snap.get("findings_summary") or []:
+            if not isinstance(item, dict):
+                continue
+            rows.append(
+                {
+                    **item,
+                    "document_id": item.get("document_id") or snap.get("document_id"),
+                    "display_name": snap.get("display_name") or snap.get("original_filename"),
+                }
+            )
+    return case_impact_summary(rows)
 
 
 def list_case_fact_conflicts(case_id: str) -> list[dict[str, Any]]:

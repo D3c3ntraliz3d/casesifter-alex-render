@@ -1,0 +1,73 @@
+"""Optional Sentry with path/text scrubbing."""
+
+from __future__ import annotations
+
+import re
+from typing import Any
+
+from app.config import settings
+
+_PATH_RE = re.compile(r"(?:[A-Za-z]:\\|/)[^\s\"']{3,}")
+_EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
+
+
+def init_sentry(*, service: str) -> None:
+    dsn = (settings.sentry_dsn or "").strip()
+    if not dsn:
+        return
+    try:
+        import sentry_sdk
+        from sentry_sdk.integrations.fastapi import FastApiIntegration
+        from sentry_sdk.integrations.starlette import StarletteIntegration
+    except ImportError:
+        return
+
+    def _before_send(event: dict[str, Any], _hint: dict[str, Any]) -> dict[str, Any] | None:
+        return _scrub_event(event)
+
+    sentry_sdk.init(
+        dsn=dsn,
+        environment=settings.sentry_environment or "development",
+        release=f"{settings.app_name}@{settings.app_version}",
+        traces_sample_rate=0.05,
+        send_default_pii=False,
+        before_send=_before_send,
+        integrations=[StarletteIntegration(), FastApiIntegration()],
+    )
+    sentry_sdk.set_tag("service", service)
+    support = cases_db_support_code()
+    if support:
+        sentry_sdk.set_user({"id": support})
+
+
+def cases_db_support_code() -> str | None:
+    try:
+        from app import cases_db
+
+        code = cases_db.get_setting("cloud_support_code")
+        return code or None
+    except Exception:
+        return None
+
+
+def _scrub_value(value: Any) -> Any:
+    if isinstance(value, str):
+        value = _PATH_RE.sub("[path]", value)
+        value = _EMAIL_RE.sub("[email]", value)
+        if len(value) > 500:
+            return value[:500] + "…"
+        return value
+    if isinstance(value, dict):
+        return {k: _scrub_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_scrub_value(v) for v in value[:30]]
+    return value
+
+
+def _scrub_event(event: dict[str, Any]) -> dict[str, Any]:
+    for key in ("breadcrumbs", "request", "extra", "contexts"):
+        if key in event:
+            event[key] = _scrub_value(event[key])
+    if "exception" in event:
+        event["exception"] = _scrub_value(event["exception"])
+    return event

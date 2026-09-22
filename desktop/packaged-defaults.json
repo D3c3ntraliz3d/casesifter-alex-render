@@ -1,0 +1,4 @@
+{
+  "analysisApiUrl": "https://casesifter-analysis.onrender.com",
+  "controlPlaneUrl": "https://casesifter-control.onrender.com"
+}

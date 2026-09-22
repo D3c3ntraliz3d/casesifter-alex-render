@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -27,9 +28,11 @@ from app.models import AuditTrail, Finding, FontUsage, ModuleResult, PageDimensi
 from app.engines.statement_dates import find_statement_date_conflicts
 from app.engines.template_fabrication import find_template_leftovers, review_print_scan_ela
 from app.finding_policy import triage_findings
+from app.impact_judge import apply_case_impact_judge
 from app.report import executive_summary, pick_top_findings, recommended_actions, render_html, render_pdf, score_risk
 from app.scan_profile import PROFILE_COURT_FILING, peek_pdf_text, resolve_scan_profile
 from app.storage import job_dir, update_job
+from app.product_events import emit_scan_completed, emit_scan_started, finding_count_summary
 from app.telemetry import emit_scan_outcomes
 
 
@@ -68,10 +71,21 @@ def run_pipeline(
     display_name: str | None = None,
     doc_kind: str | None = None,
 ) -> Report:
+    started = time.monotonic()
+    size_bytes = None
+    try:
+        size_bytes = source.stat().st_size
+    except OSError:
+        pass
     peek_text = peek_pdf_text(source) if not (doc_kind or "").strip() else ""
     profile = resolve_scan_profile(doc_kind, peek_text)
     court_filing = profile == PROFILE_COURT_FILING
 
+    emit_scan_started(
+        job_id=job_id,
+        doc_kind=doc_kind,
+        size_bytes=size_bytes,
+    )
     update_job(job_id, status="running", stage="ingesting", percent=5, message="Reading file and hashing contents…")
     if document_id:
         cases_db.update_document(document_id, status="scanning", scan_job_id=job_id)
@@ -223,6 +237,28 @@ def run_pipeline(
             current_findings=findings,
         )
         findings.extend(gotchas)
+        timing_bits = []
+        mm = (contextual.extras or {}).get("multimodal_ms")
+        ch = (contextual.extras or {}).get("logo_chrome_ms")
+        gv = (gotcha_log or {}).get("gotcha_verify_ms")
+        if mm is not None:
+            timing_bits.append(f"multimodal {mm}ms")
+        if ch is not None:
+            timing_bits.append(f"chrome {ch}ms")
+        if gv is not None:
+            timing_bits.append(
+                f"gotcha-verify {gv}ms"
+                f" ({(gotcha_log or {}).get('verify_provider', '?')}"
+                f" amb={(gotcha_log or {}).get('verify_ambiguous_count', '?')}"
+                f"/{(gotcha_log or {}).get('verify_candidate_count', '?')})"
+            )
+        if timing_bits:
+            update_job(
+                job_id,
+                stage="case_consistency",
+                percent=93,
+                message="Timing: " + "; ".join(timing_bits),
+            )
         contextual.extras["case_consistency"] = {
             "prior_documents": len(priors),
             "alerts": len(consistency),
@@ -230,9 +266,18 @@ def run_pipeline(
             "gotcha_log": gotcha_log,
             "facts": facts,
             "fact_matrix": fact_matrix,
+            "multimodal_ms": mm,
+            "logo_chrome_ms": ch,
+            "gotcha_verify_ms": gv,
+            "verify_provider": (gotcha_log or {}).get("verify_provider"),
+            "verify_candidate_count": (gotcha_log or {}).get("verify_candidate_count"),
+            "verify_ambiguous_count": (gotcha_log or {}).get("verify_ambiguous_count"),
         }
 
     findings = triage_findings(findings, profile)
+    findings, impact_log = apply_case_impact_judge(findings)
+    if isinstance(contextual.extras.get("case_consistency"), dict):
+        contextual.extras["case_consistency"]["case_impact"] = impact_log
 
     timeline = [TimelineEvent.model_validate(item) for item in (metadata.extras.get("timeline") or [])]
     dims: list[PageDimension] = []
@@ -259,6 +304,8 @@ def run_pipeline(
         "fact_matrix": fact_matrix,
         "scan_profile": profile,
         "doc_kind": doc_kind,
+        "case_impact": impact_log,
+        "text_excerpt": (full_text or "")[:24000],
     }
 
     risk_level, risk_score = score_risk(findings)
@@ -321,6 +368,7 @@ def run_pipeline(
             risk_level=risk_level,
             risk_score=risk_score,
             scan_job_id=job_id,
+            last_scanned_at=datetime.now(timezone.utc).isoformat(),
         )
         cases_db.save_scan_snapshot(
             document_id=document_id,
@@ -335,4 +383,11 @@ def run_pipeline(
         )
         emit_scan_outcomes(doc_kind=doc_kind, findings=findings, risk_level=risk_level)
 
+    duration_ms = int((time.monotonic() - started) * 1000)
+    emit_scan_completed(
+        job_id=job_id,
+        duration_ms=duration_ms,
+        risk_level=risk_level,
+        finding_counts=finding_count_summary(findings),
+    )
     return report

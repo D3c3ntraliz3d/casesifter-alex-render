@@ -1,6 +1,8 @@
 # Project Status (Handoff)
 
-Court Exhibit Scanner — automated indicators of document alteration for court exhibit review. Decision-support only; it does not determine authenticity, fraud, or admissibility.
+> **For n8n / automation wiring, use [`N8N_HANDOFF.md`](./N8N_HANDOFF.md)** (API map, poll patterns, alert filters, workflow recipes). This file is an older product overview and is partly stale (cases now live in SQLite; LawSifter case UI + gotchas are primary).
+
+Court Exhibit Scanner / **LawSifter** — automated indicators of document alteration for court exhibit review. Decision-support only; it does not determine authenticity, fraud, or admissibility.
 
 ---
 

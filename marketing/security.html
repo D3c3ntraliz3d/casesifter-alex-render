@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Security &amp; Privacy — CaseSifter</title>
+  <meta name="description" content="CaseSifter keeps no document vault: case files live on your machine, cloud analysis is ephemeral and deleted after processing. How data actually moves, tier by tier." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600&family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="assets/style.css" />
+</head>
+<body>
+  <nav class="site-nav">
+    <div class="nav-inner">
+      <a class="brand-link" href="index.html">
+        <div class="mark">CS</div>
+        <span class="brand-name">CaseSifter</span>
+      </a>
+      <ul class="nav-links">
+        <li><a href="product.html">Product</a></li>
+        <li><a href="pricing.html">Pricing</a></li>
+        <li><a href="download.html">Download</a></li>
+        <li><a class="on" href="security.html">Security &amp; Privacy</a></li>
+        <li><a href="contact.html">Contact</a></li>
+      </ul>
+      <div class="nav-cta">
+        <a class="btn ghost small" href="download.html">Start trial</a>
+        <button class="nav-toggle" aria-label="Toggle menu"><span></span><span></span><span></span></button>
+      </div>
+    </div>
+  </nav>
+
+  <main class="wrap">
+    <div class="page-hero">
+      <p class="kicker">Security &amp; privacy</p>
+      <h1>No document vault. That's the whole pitch.</h1>
+      <p class="lead">
+        CaseSifter does not keep a copy of your case files. The lasting record stays on your firm's machine;
+        anything sent for analysis is processed and then deleted. Here's exactly how data moves, tier by tier.
+      </p>
+    </div>
+
+    <section class="block" style="padding-top: 0;">
+      <div class="grid cols-3">
+        <div class="card">
+          <h3>Where files live</h3>
+          <p>Case PDFs, the case index, and generated reports are stored in a CaseSifter folder on your desktop. There is no central document library on our servers.</p>
+        </div>
+        <div class="card">
+          <h3>What "ephemeral" means</h3>
+          <p>A scan uploads the file bytes to an analysis job, processes them through the pipeline, and deletes the job directory on completion or after a time-to-live sweep — whichever comes first.</p>
+        </div>
+        <div class="card">
+          <h3>What we never do</h3>
+          <p>We don't build a searchable archive of client documents, sell or share file content, or auto-file, auto-notify, or auto-escalate any finding to a third party.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="block">
+      <div class="section-head">
+        <h2>Analysis tiers and what they send</h2>
+        <p>Not every check needs your document to leave the building. Deeper contextual analysis is opt-in, per file.</p>
+      </div>
+      <table class="compare">
+        <thead>
+          <tr><th>Tier</th><th>What runs</th><th>What leaves your machine</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="module">Tier 1 — Local forensics</td>
+            <td>Metadata, PDF integrity, structural, image forensics, OCR/text, and local entity/timeline checks.</td>
+            <td><strong>Nothing.</strong> Runs against the file directly.</td>
+          </tr>
+          <tr>
+            <td class="module">Tier 2 — Entity verification</td>
+            <td>Generated yes/no claim questions checked against public record (e.g. "did this entity operate in that market on that date?").</td>
+            <td>A short generated question — never the document itself.</td>
+          </tr>
+          <tr>
+            <td class="module">Tier 3 — Contextual document analysis</td>
+            <td>Comprehensive cross-document reasoning over the full exhibit text and layout.</td>
+            <td>The exhibit file itself, for that one analysis call, then deleted.</td>
+          </tr>
+        </tbody>
+      </table>
+      <p style="margin-top: 1rem; color: var(--muted); font-size: 0.9rem; max-width: 68ch;">
+        Tier 3 is opt-in and off by default. For sealed, privileged, or otherwise restricted evidence,
+        confirm your court's rules before enabling it on that file.
+      </p>
+    </section>
+
+    <section class="block">
+      <div class="section-head">
+        <h2>How findings are kept honest</h2>
+        <p>The same controls that protect accuracy also limit what a model-sourced finding can do to a report.</p>
+      </div>
+      <div class="grid cols-2">
+        <div class="card">
+          <h3>Confidence discounting</h3>
+          <p>AI-sourced findings are capped at medium severity, have confidence discounted roughly 30%, and are hard-capped at 60% confidence — never enough, alone, to turn a report red.</p>
+        </div>
+        <div class="card">
+          <h3>Labeled, not hidden</h3>
+          <p>Every AI-generated finding is explicitly marked as such in the report. You always know whether a flag came from deterministic forensics or a contextual model call.</p>
+        </div>
+      </div>
+    </section>
+
+    <div class="strip">
+      <h2>Have a specific compliance question?</h2>
+      <p>Court rules on evidence handling vary. Tell us about your matter and we'll walk through exactly what would and wouldn't leave your machine.</p>
+      <a class="btn primary" href="contact.html">Talk to us</a>
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap">
+      <div class="footer-grid">
+        <div>
+          <div class="footer-brand"><div class="mark">CS</div><strong>CaseSifter</strong></div>
+          <p style="max-width: 30ch; color: var(--muted); font-size: 0.88rem; line-height: 1.55;">Find what matters in the record. Your files stay on your PC.</p>
+        </div>
+        <div class="footer-cols">
+          <div class="footer-col">
+            <h5>Product</h5>
+            <a href="product.html">How it works</a>
+            <a href="pricing.html">Pricing</a>
+            <a href="download.html">Download</a>
+            <a href="security.html">Security &amp; privacy</a>
+          </div>
+          <div class="footer-col">
+            <h5>Company</h5>
+            <a href="contact.html">Contact</a>
+            <a href="contact.html">Book a demo</a>
+          </div>
+        </div>
+      </div>
+      <p class="footer-disclaimer">
+        CaseSifter — decision support only. Not a determination of authenticity, fraud, or admissibility.
+        © <span id="year"></span> CaseSifter.
+      </p>
+    </div>
+  </footer>
+  <script>document.getElementById("year").textContent = new Date().getFullYear();</script>
+  <script src="assets/app.js"></script>
+</body>
+</html>

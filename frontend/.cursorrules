@@ -1,0 +1,92 @@
+# CaseSifter frontend — styling rules for Cursor
+
+This is a Vite + React 18 app with a single global stylesheet at `src/index.css`.
+There is no Tailwind, no CSS-in-JS, and no component library. All visual language
+lives in the `:root` custom properties at the top of `src/index.css` and in the
+class rules below them. `src/App.jsx` only references class names — it has no
+inline styles worth keeping that way.
+
+## Absolute constraints (never violate these)
+
+1. NEVER edit `src/api.js`. It is the only file that talks to the backend.
+2. NEVER add, remove, or change a `fetch`/`axios` call, a React state hook, a
+   prop, an event handler (`onClick`, `onSubmit`, `onChange`, etc.), or any
+   function that isn't purely about markup/class names.
+3. NEVER rename an existing `className` in `App.jsx`. If a new wrapper or class
+   is genuinely needed for the new look, ADD it — don't rename or remove ones
+   already read by `src/index.css` or referenced elsewhere.
+4. NEVER touch anything outside `frontend/` — no backend, no `Dockerfile`, no
+   `nginx.conf`, no `vite.config.js`, no `package.json` dependencies unless the
+   task explicitly says to add a frontend-only package (e.g. a font).
+5. When asked for a UI/styling change, only these files are in scope by default:
+   `src/index.css`, and the JSX *markup* (not logic) inside `src/App.jsx`.
+   Don't pull in `@codebase` — tag the specific file.
+6. If a requested visual change seems to require new data, a new field from the
+   API, or a new state value, stop and say so instead of inventing one.
+
+## Design direction: modern, Apple-HIG-influenced, not generic SaaS
+
+Goal: sleek, minimal, iOS-native-feeling — generous whitespace, quiet surfaces,
+soft depth, confident typography — while keeping this app's own identity
+(navy/teal/gold palette, `Fraunces` serif for headings). Don't flatten it into
+a generic Tailwind/shadcn look; adapt HIG principles to the existing tokens.
+
+### 1. Typography
+- Keep `--font` (Outfit) for body/UI text and `--display` (Fraunces) for
+  headings/`.serif` — do not swap in a system font stack, that would erase the
+  app's identity. Instead apply HIG *hierarchy* discipline:
+  - Exactly one dominant heading per view section; everything else steps down.
+  - Secondary/meta text (`.footnote`, `.kicker`) should read as clearly
+    de-emphasized: smaller size + `var(--faint)` or `var(--muted)`, never the
+    same weight as primary text.
+  - Increase line-height on body copy slightly (1.5–1.6) before tightening
+    tracking on headings further.
+
+### 2. Layout & spacing
+- Prefer more internal padding on `.card` and `.case-tile` over cramming more
+  in — target 20–28px card padding, 12–16px gaps between stacked elements.
+- Group related controls with visible gap (12–16px), separate unrelated groups
+  with more (24–32px), rather than uniform small gaps everywhere.
+- Don't change `.app` max-width or grid structure of `.masthead` /
+  `.report-layout` without being asked — those are layout decisions, not
+  styling polish.
+
+### 3. Depth & surfaces
+- Reuse `--shadow` for elevation — don't invent a second harsher shadow. If a
+  new element needs elevation, apply the existing `--shadow` var, or propose a
+  new `--shadow-soft` token in `:root` (ambient, low-opacity, large blur —
+  e.g. `0 8px 30px rgba(15, 23, 32, 0.04)`) rather than a one-off inline value.
+- `--surface` (translucent white) + `backdrop-filter: blur(...)` is already the
+  pattern for floating chrome (`.masthead`). Extend that pattern to other
+  floating/sticky elements instead of inventing a new glass treatment.
+- Borders should stay hairline and low-contrast: reuse `--line` /
+  `--line-strong`, not pure black/gray borders.
+
+### 4. Corners & controls
+- `--radius` (18px) and `--radius-sm` (12px) are the two allowed corner
+  radii — use them, don't hardcode new radius values.
+- Buttons (`.btn`, `.btn.gold`, `.btn.secondary`) should get a subtle pressed
+  state: `active:scale-[0.98]`-equivalent via
+  `transform: scale(0.98); transition: transform 120ms ease;` on `:active`.
+  Don't add heavy borders or drop shadows to buttons.
+- Icons come from `lucide-react` already (1.5–2px stroke) — don't swap icon
+  sets or add icon backgrounds/containers unless asked.
+
+### 5. Color
+- Stay inside the existing palette (`--ink`, `--muted`, `--faint`, `--accent`,
+  `--navy`, `--gold`, the risk colors `--green`/`--yellow`/`--red` and their
+  `-bg` variants). Don't introduce new hex colors inline — if a new shade is
+  truly needed, add it as a new `:root` variable next to the related ones.
+- Background stays the soft radial-gradient wash already defined on `body` —
+  refine it, don't replace it with a flat/plain color.
+
+## Workflow
+
+- For a single-file styling pass: tag `@src/index.css` only.
+- For a pass that also needs new markup (e.g. wrapping something in a new
+  `<div>` for a card treatment): tag `@src/index.css` and `@src/App.jsx`, and
+  explicitly say "markup and class names only, no logic changes" in the
+  prompt.
+- After any change, mentally diff against the constraints above before
+  accepting — if the diff touches `api.js`, a hook, a handler, or anything
+  outside `frontend/`, reject that part of the change.

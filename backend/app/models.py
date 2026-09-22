@@ -111,6 +111,8 @@ class JobProgress(BaseModel):
     error: str | None = None
     created_at: datetime
     updated_at: datetime
+    # Set when status first becomes "running" — used for absolute wall-clock timeout.
+    started_at: datetime | None = None
     report: Report | None = None
 
 

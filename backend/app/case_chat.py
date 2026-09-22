@@ -55,7 +55,13 @@ CHAT_SCHEMA = {
 CHAT_PROMPT = """You are a case clerk helping a busy attorney. Answer the question using ONLY
 the case excerpts below. Quote short phrases when you rely on them. Name the source
 document in the answer. If the excerpts do not contain the answer, say so clearly —
-do not guess from outside knowledge.
+do not guess from outside knowledge. If text may be missing because a file was not
+scanned yet, say so and suggest rescanning that file.
+
+FIND / LOCATE questions (which document, where does it say, who mentioned X, carnival,
+alibi, where was the defendant, etc.): lead with the document name, then a short
+quoted phrase from that excerpt. Prefer the affidavit, answer, or exhibit that
+actually contains the fact — not a caption or index alone.
 
 When asked what an exhibit was used for, look in motions, affidavits, complaints, and
 other pleadings for where that exhibit or issuer is cited (e.g. "Exhibit S", "Wells Fargo
@@ -179,6 +185,289 @@ def ask_case(
         "citations": finalize_citations(case_id, answer, model_cites, hits),
         "used_model": True,
     }
+
+
+def ask_case_from_packet(
+    question: str,
+    documents: list[dict[str, Any]],
+    *,
+    history: list[dict[str, str]] | None = None,
+    focus_document_id: str | None = None,
+) -> dict[str, Any]:
+    """Ephemeral chat: answer from a client-supplied excerpt packet (no case DB / no vault)."""
+    question = (question or "").strip()
+    if not question:
+        raise ValueError("Ask a question about the documents in this case.")
+    packet_docs = []
+    for row in documents or []:
+        if not isinstance(row, dict):
+            continue
+        doc_id = str(row.get("document_id") or row.get("id") or "").strip()
+        if not doc_id:
+            continue
+        packet_docs.append(
+            {
+                "id": doc_id,
+                "display_name": row.get("display_name") or row.get("original_filename") or doc_id,
+                "original_filename": row.get("original_filename") or "",
+                "doc_kind": row.get("doc_kind") or "",
+                "text_excerpt": str(row.get("text_excerpt") or "")[:24000],
+                "findings_summary": row.get("findings_summary") or [],
+                "status": row.get("status") or "complete",
+            }
+        )
+    if not packet_docs:
+        return {
+            "answer": "No document excerpts were provided. Scan filings on this PC, then ask again.",
+            "citations": [],
+            "used_model": False,
+        }
+
+    focus_name = ""
+    focus_kind = ""
+    if focus_document_id:
+        focus_row = next((d for d in packet_docs if d["id"] == focus_document_id), None)
+        if focus_row:
+            focus_name = focus_row["display_name"]
+            focus_kind = focus_row.get("doc_kind") or ""
+
+    extra_tokens: list[str] = []
+    for turn in history or []:
+        if turn.get("role") == "user":
+            extra_tokens.extend(_tokens(turn.get("content") or ""))
+    if focus_name:
+        extra_tokens.extend(_tokens(focus_name))
+
+    hits = retrieve_from_packet(
+        packet_docs,
+        question,
+        extra_tokens=extra_tokens,
+        focus_document_id=focus_document_id,
+    )
+    if not hits:
+        return {
+            "answer": (
+                "No extracted text in the packet matches that question yet. "
+                "Rescan waiting files so excerpts are available, then ask again."
+            ),
+            "citations": [],
+            "used_model": False,
+        }
+
+    packet = _format_packet(hits)
+    catalog = [
+        {
+            "document_id": d["id"],
+            "id": d["id"],
+            "display_name": d["display_name"],
+            "nyscef_no": None,
+        }
+        for d in packet_docs
+    ]
+
+    if not settings.gemini_api_key:
+        answer = _fallback_answer(question, hits)
+        return {
+            "answer": answer,
+            "citations": finalize_citations_packet(answer, [], hits, catalog),
+            "used_model": False,
+        }
+
+    prior = ""
+    if history:
+        bits = []
+        for turn in history[-4:]:
+            role = "Attorney" if turn.get("role") == "user" else "Clerk"
+            bits.append(f"{role}: {turn.get('content', '')[:400]}")
+        prior = "Recent thread:\n" + "\n".join(bits) + "\n\n"
+
+    focus_block = (
+        FOCUS_BLOCK.format(name=focus_name, kind=focus_kind or "unknown") if focus_name else ""
+    )
+    try:
+        body = _post_gemini(
+            {
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [
+                            {
+                                "text": prior
+                                + CHAT_PROMPT.format(
+                                    question=question,
+                                    packet=packet,
+                                    focus_block=focus_block,
+                                )
+                            }
+                        ],
+                    }
+                ],
+                "generationConfig": _generation_config(CHAT_SCHEMA, settings.gemini_thinking_level),
+            },
+            timeout=max(settings.gemini_timeout_s, 45),
+        )
+        parsed = _parse_json_payload(body)
+    except Exception:
+        answer = _fallback_answer(question, hits)
+        return {
+            "answer": answer,
+            "citations": finalize_citations_packet(answer, [], hits, catalog),
+            "used_model": False,
+        }
+    answer = str(parsed.get("answer") or "").strip() or _fallback_answer(question, hits)
+    model_cites = parsed.get("citations") if isinstance(parsed.get("citations"), list) else []
+    return {
+        "answer": answer,
+        "citations": finalize_citations_packet(answer, model_cites, hits, catalog),
+        "used_model": True,
+    }
+
+
+def retrieve_from_packet(
+    docs: list[dict[str, Any]],
+    question: str,
+    limit: int = 6,
+    extra_tokens: list[str] | None = None,
+    focus_document_id: str | None = None,
+) -> list[dict[str, Any]]:
+    tokens = list(dict.fromkeys(_tokens(question) + list(extra_tokens or [])))
+    purpose = bool(PURPOSE_RE.search(question) or (focus_document_id and THIS_DOC_RE.search(question)))
+    scored: list[tuple[float, dict[str, Any]]] = []
+    for doc in docs:
+        text = str(doc.get("text_excerpt") or "")
+        findings = doc.get("findings_summary") or []
+        finding_text = " ".join(
+            f"{f.get('title', '')} {f.get('analysis_type', '')}"
+            for f in findings
+            if isinstance(f, dict)
+        )
+        blob = " ".join(
+            [
+                doc.get("display_name") or "",
+                doc.get("original_filename") or "",
+                doc.get("doc_kind") or "",
+                finding_text,
+                text,
+            ]
+        )
+        score = _score(blob, tokens, doc.get("doc_kind"), purpose)
+        if purpose and (doc.get("doc_kind") or "").lower() in COURT_FILING_KINDS:
+            score += 2
+        focused = bool(focus_document_id and doc["id"] == focus_document_id)
+        if focused:
+            score += 8
+        if score <= 0 and not focused:
+            continue
+        snippets = _snippets(text, tokens) or ([text[:500]] if text else [])
+        if focused and text:
+            lead = re.sub(r"\s+", " ", text[:900]).strip()
+            if lead and lead not in snippets:
+                snippets = [lead, *snippets][:4]
+        scored.append(
+            (
+                1000 + score if focused else score,
+                {
+                    "document_id": doc["id"],
+                    "display_name": doc.get("display_name") or doc.get("original_filename"),
+                    "doc_kind": doc.get("doc_kind"),
+                    "status": doc.get("status"),
+                    "focused": focused,
+                    "nyscef_no": _nyscef_no(doc, {}, text),
+                    "snippets": snippets,
+                    "findings": [
+                        f.get("title")
+                        for f in findings[:6]
+                        if isinstance(f, dict) and f.get("title")
+                    ],
+                },
+            )
+        )
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [item[1] for item in scored[:limit] if (item[1].get("snippets") or [""])[0]]
+
+
+def finalize_citations_packet(
+    answer: str,
+    model_cites: list[Any],
+    hits: list[dict[str, Any]],
+    catalog: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Same citation shaping as finalize_citations, but catalog is the packet."""
+    # Reuse finalize_citations matching by fabricating a fake case_id path via catalog inject.
+    hit_by_id = {hit["document_id"]: hit for hit in hits}
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add(*, document_id: str | None, display_name: str, note: str = "", nyscef_no: str | None = None) -> None:
+        match = None
+        if document_id:
+            match = next((c for c in catalog if c.get("document_id") == document_id or c.get("id") == document_id), None)
+        if match is None:
+            needle = (display_name or "").lower()
+            match = next(
+                (
+                    c
+                    for c in catalog
+                    if needle and needle in (c.get("display_name") or "").lower()
+                ),
+                None,
+            )
+        if match is None and document_id and document_id in hit_by_id:
+            match = hit_by_id[document_id]
+        if match is None:
+            return
+        key = match.get("document_id") or match.get("id") or display_name
+        if key in seen:
+            return
+        seen.add(key)
+        stored_name = match.get("display_name") or display_name
+        label = display_name if len(display_name) > 12 and display_name.lower() not in stored_name.lower() else stored_name
+        no = nyscef_no or match.get("nyscef_no")
+        if no and f"NYSCEF {no}" not in label:
+            label = f"{label} (NYSCEF {no})"
+        out.append(
+            {
+                "document_id": match.get("document_id") or match.get("id"),
+                "display_name": label,
+                "nyscef_no": no,
+                "note": (note or match.get("note") or "")[:240],
+            }
+        )
+
+    for title, number in TITLE_WITH_NYSCEF_RE.findall(answer or ""):
+        add(document_id=None, display_name=title.strip(), nyscef_no=number, note="Named in the answer")
+    for number in NYSCEF_RE.findall(answer or ""):
+        add(document_id=None, display_name=f"NYSCEF Doc. No. {number}", nyscef_no=number, note="Named in the answer")
+    for item in model_cites:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("display_name") or "").strip()
+        if not name:
+            continue
+        nos = NYSCEF_RE.findall(f"{name} {item.get('note') or ''}")
+        add(
+            document_id=str(item.get("document_id") or "") or None,
+            display_name=name,
+            note=str(item.get("note") or ""),
+            nyscef_no=nos[0] if nos else None,
+        )
+    for hit in hits:
+        if hit.get("focused") or (hit.get("display_name") and hit["display_name"].lower() in (answer or "").lower()):
+            add(
+                document_id=hit["document_id"],
+                display_name=hit["display_name"],
+                note=(hit.get("snippets") or [""])[0],
+                nyscef_no=hit.get("nyscef_no"),
+            )
+    if not out:
+        for hit in hits[:5]:
+            add(
+                document_id=hit["document_id"],
+                display_name=hit["display_name"],
+                note=(hit.get("snippets") or [""])[0],
+                nyscef_no=hit.get("nyscef_no"),
+            )
+    return out[:8]
 
 
 def retrieve(

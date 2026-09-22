@@ -498,7 +498,10 @@ def evaluate_tainted_support() -> dict:
         "produced_uses_their_exhibit": bool(produced) and produced[0].get("document_id") == "ex-a",
         "produced_marked_tainted": bool(produced) and produced[0].get("tainted_support") is True,
         "produced_says_edited": bool(produced)
-        and produced[0].get("title") == "Exhibit appears fraudulently edited",
+        and (
+            produced[0].get("title") == "Exhibit appears fraudulently edited"
+            or "appears altered" in str(produced[0].get("title") or "").lower()
+        ),
         "bare_denial_does_not_use_aos": bare == [],
         "residence_bill_dates_are_gotcha": bool(focused)
         and focused[0].get("document_id") == "ex-a"
@@ -777,6 +780,10 @@ def evaluate_statement_dates() -> dict:
 
 def evaluate_case_impact() -> dict:
     """Only element/procedure/credibility/damages interrupts; scan noise and advocacy do not."""
+    from app.gotcha import _boilerplate_collision
+    from app.impact_judge import apply_case_impact_judge
+    from app.report.scoring import score_risk
+
     residence = {
         "claim_quote": "I did not live at 5616 14th Avenue when I was served.",
         "evidence_quote": "Con Edison bill lists service at 5616 14th Avenue for November 2023.",
@@ -827,6 +834,21 @@ def evaluate_case_impact() -> dict:
         "aff-1": {"findings_summary": []},
     }
     edited = propose_tainted_support([], docs, snaps, focus_document_id="ex-a")
+    # Claim → tainted exhibit linker
+    claim_rows = [
+        {
+            "quote": "As shown in Exhibit A, defendant resided at the premises.",
+            "source": "Affidavit in support",
+            "document_id": "aff-1",
+            "doc_kind": "affidavit",
+        }
+    ]
+    linked = propose_tainted_support(
+        claim_rows,
+        docs,
+        snaps,
+        filing_text="As shown in Exhibit A, defendant resided at the premises.",
+    )
     jurat_card = {
         "tainted_support": True,
         "document_id": "ex-clean",
@@ -865,6 +887,54 @@ def evaluate_case_impact() -> dict:
     )
     two_v = verify_pair(two_filings)
     incidental_v = verify_pair(incidental)
+
+    # Noise gotcha demoted → risk green
+    noise_finding = Finding(
+        id="ctx-gotcha-noise",
+        category="gotcha",
+        severity="high",
+        title="Apparent factual contradiction",
+        explanation="United States collision",
+        why_suspicious="noise",
+        confidence=85.0,
+        evidence={
+            "gotcha": True,
+            "verified": True,
+            "claim_quote": (
+                "The said mail matter was left under the exclusive care and custody "
+                "of the United States Postal Service."
+            ),
+            "evidence_quote": (
+                "a corporation organized and existing under the laws of the "
+                "United States of America."
+            ),
+            "fact_named": "united, state",
+            "analysis_type": "gotcha",
+            "evidence_tier": 1,
+            "material": True,
+        },
+    )
+    fraud_finding = Finding(
+        id="ctx-logo-ship",
+        category="contextual",
+        severity="medium",
+        title="Logo / chrome mismatch",
+        explanation="Wrong-era National Grid mark on 2007 Brooklyn statement.",
+        why_suspicious="Print-scan still leaves wrong chrome.",
+        confidence=70.0,
+        evidence={
+            "analysis_type": "logo_chrome_mismatch",
+            "ai_generated": True,
+            "content_hook": True,
+            "issuer": "National Grid",
+            "quoted_evidence": "Statement Date: April 12, 2007",
+        },
+    )
+    judged, _ = apply_case_impact_judge([noise_finding, fraud_finding])
+    noise_out = next(f for f in judged if f.id == "ctx-gotcha-noise")
+    fraud_out = next(f for f in judged if f.id == "ctx-logo-ship")
+    risk_level, _ = score_risk(judged)
+
     return {
         "residence_hits_element": residence_ok,
         "two_filings_dropped": keep_board_gotcha(two_filings, docs, snaps) is False
@@ -872,10 +942,14 @@ def evaluate_case_impact() -> dict:
         or not two_v.get("pass"),
         "date_format_not_material": not incidental_v.get("pass"),
         "defective_statement_one_edited_card": len(edited) == 1
-        and edited[0].get("title") == "Exhibit appears fraudulently edited"
+        and "fraudulently edited" in str(edited[0].get("title") or "").lower()
         and "03/02/2018" in str(edited[0].get("evidence_quote") or "")
         and "2023" in str(edited[0].get("evidence_quote") or "")
         and "fraudulently edited. Open the scan report" not in str(edited[0].get("why_it_may_matter") or ""),
+        "claim_links_tainted_exhibit": len(linked) >= 1
+        and bool(str(linked[0].get("claim_quote") or ""))
+        and "Exhibit A" in str(linked[0].get("claim_quote") or "")
+        and "altered" in str(linked[0].get("title") or "").lower(),
         "jurat_spam_dropped": keep_board_gotcha(
             jurat_card,
             [{"id": "ex-clean", "doc_kind": "exhibit", "display_name": "Exhibit S_76"}],
@@ -888,8 +962,183 @@ def evaluate_case_impact() -> dict:
             snaps_ela,
         )
         is False,
+        "mamiye_boilerplate_suppressed": _mamiye_boilerplate_eval(),
+        "noise_demoted_risk_not_red": noise_out.severity == "info"
+        and (noise_out.evidence or {}).get("case_impact") == "noise"
+        and risk_level != "red"
+        and is_material_finding(fraud_out)
+        and (fraud_out.evidence or {}).get("case_impact") in {"case_winning", "material_review"},
+        "quote_must_attest": _quote_attest_eval(),
+        "national_grid_historical_fixture": _national_grid_historical_fixture_eval(),
+        "ai_print_scan_fixtures": _ai_print_scan_fixtures_eval(),
         "all_pass": False,
     }
+
+
+def _mamiye_boilerplate_eval() -> bool:
+    path = Path(__file__).resolve().parent / "fixtures" / "foreclosure" / "mamiye_aos_united_states_collision.json"
+    if not path.exists():
+        return False
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not data.get("must_suppress"):
+        return False
+    from app.gotcha import _boilerplate_collision
+
+    for pair in data.get("pairs") or []:
+        claim = str(pair.get("claim_quote") or "")
+        evidence = str(pair.get("evidence_quote") or "")
+        verdict = verify_pair(pair)
+        veto = hard_veto_step(pair, verdict)
+        if verdict.get("pass") and veto is None:
+            return False
+        if not (
+            _boilerplate_collision(claim, evidence)
+            or veto == "same_fact"
+            or not verdict.get("pass")
+        ):
+            return False
+        merged = merge_verdicts(pair, verdict, None)
+        if merged.get("pass"):
+            return False
+    return True
+
+
+def _quote_attest_eval() -> bool:
+    from app.quote_attest import gotcha_quotes_attest, quote_attests
+
+    corpus = "I did not live at 5616 14th Avenue when I was served on the evening in question."
+    if not quote_attests("I did not live at 5616 14th Avenue when I was served", corpus):
+        return False
+    if quote_attests("I lived on Mars with the penguins forever", corpus):
+        return False
+    bad = {
+        "claim_quote": "totally fabricated claim text that is not in the excerpt",
+        "evidence_quote": "also fabricated evidence",
+        "claim_document_id": "a",
+        "document_id": "b",
+    }
+    good = {
+        "claim_quote": "I did not live at 5616 14th Avenue when I was served",
+        "evidence_quote": "5616 14th Avenue",
+        "claim_document_id": "a",
+        "document_id": "b",
+    }
+    texts = {"a": corpus, "b": "Utility bill for 5616 14th Avenue November 2023"}
+    return gotcha_quotes_attest(good, texts) and not gotcha_quotes_attest(bad, texts)
+
+
+def _national_grid_historical_fixture_eval() -> bool:
+    """Track C must-ship: National Grid Brooklyn Apr 2007 stays a Gemini historical lane."""
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent / "fixtures" / "foreclosure" / "national_grid_brooklyn_apr2007.json"
+    if not path.exists():
+        return False
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not data.get("must_ship"):
+        return False
+    if data.get("lane") != "historical_impossibility":
+        return False
+    if data.get("provider") != "gemini":
+        return False
+    facts = data.get("facts_on_page") or {}
+    if facts.get("issuer") != "National Grid" or "Brooklyn" not in str(facts.get("place") or ""):
+        return False
+    if not str(facts.get("statement_date") or "").startswith("2007-04"):
+        return False
+    timeline = data.get("public_timeline") or {}
+    if not str(timeline.get("earliest_brooklyn_service") or "").startswith("2007-08"):
+        return False
+    expected = data.get("expected_finding") or {}
+    if expected.get("analysis_type") != "historical_impossibility":
+        return False
+    text = (data.get("exhibit_text") or "").lower()
+    for token in expected.get("must_mention") or []:
+        if str(token).lower() not in text and str(token).lower() not in json.dumps(facts).lower():
+            return False
+    # Statement date before Brooklyn market entry → historically impossible.
+    return facts["statement_date"][:7] < timeline["earliest_brooklyn_service"][:7]
+
+
+def _ai_print_scan_fixtures_eval() -> bool:
+    """Fixtures for wrong-era logo, too-crisp fields, and texture-only suppress."""
+    from app.engines.contextual_logic import ANALYSIS_TYPES
+    from app.finding_policy import is_material_finding
+    from app.models import Finding
+
+    root = Path(__file__).resolve().parent / "fixtures" / "foreclosure"
+    wrong = root / "wrong_era_logo_2007.json"
+    crisp = root / "too_crisp_fields_aged_form.json"
+    clean = root / "clean_statement_suppress_texture.json"
+    if not wrong.exists() or not crisp.exists() or not clean.exists():
+        return False
+
+    wrong_data = json.loads(wrong.read_text(encoding="utf-8"))
+    crisp_data = json.loads(crisp.read_text(encoding="utf-8"))
+    clean_data = json.loads(clean.read_text(encoding="utf-8"))
+    if not wrong_data.get("must_ship") or not crisp_data.get("must_ship"):
+        return False
+    if not clean_data.get("must_suppress"):
+        return False
+    if "logo_chrome_mismatch" not in ANALYSIS_TYPES:
+        return False
+
+    # Material interrupt when chrome pass ships with content hook.
+    chrome_hit = Finding(
+        id="ctx-logo-test",
+        category="contextual",
+        severity="medium",
+        title="Logo / chrome mismatch — National Grid",
+        explanation="Wrong-era mark on 2007 Brooklyn statement.",
+        why_suspicious="Print-scan concealment still leaves wrong chrome.",
+        confidence=55.0,
+        evidence={
+            "analysis_type": "logo_chrome_mismatch",
+            "ai_generated": True,
+            "content_hook": True,
+            "issuer": "National Grid",
+            "statement_date": "2007-04-12",
+            "quoted_evidence": "Statement Date: April 12, 2007",
+        },
+    )
+    if not is_material_finding(chrome_hit):
+        return False
+
+    # Whole-page ELA texture alone must not interrupt.
+    texture_only = Finding(
+        id="img-ela-texture",
+        category="image",
+        severity="high",
+        title="Scan texture",
+        explanation="Whole-page flatbed texture",
+        why_suspicious="Noise",
+        confidence=80.0,
+        evidence={
+            "analysis_type": "graphic_manipulation",
+            "scan_heavy": True,
+            "quoted_evidence": "Whole-page scan texture",
+        },
+    )
+    if is_material_finding(texture_only):
+        return False
+
+    # logo_chrome without hook should not interrupt via bare AI path alone if we require hook —
+    # still allow MAJOR_AI_TYPES path: ensure content_hook path is the one we use.
+    bare = Finding(
+        id="ctx-logo-bare",
+        category="contextual",
+        severity="medium",
+        title="Vague chrome",
+        explanation="Maybe odd",
+        why_suspicious="Unsure",
+        confidence=55.0,
+        evidence={"analysis_type": "logo_chrome_mismatch", "ai_generated": True},
+    )
+    return (
+        is_material_finding(chrome_hit)
+        and not is_material_finding(texture_only)
+        and not is_material_finding(bare)
+    )
 
 
 def evaluate() -> dict:

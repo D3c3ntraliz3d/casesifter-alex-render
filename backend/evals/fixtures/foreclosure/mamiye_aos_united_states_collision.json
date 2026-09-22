@@ -1,0 +1,42 @@
+{
+  "id": "mamiye_aos_united_states_collision",
+  "practice": "foreclosure",
+  "lane": "gotcha_boilerplate",
+  "must_suppress": true,
+  "title": "AOS United States vs corporate charter — token collision",
+  "pairs": [
+    {
+      "id": "usps_vs_laws_of_us",
+      "claim_quote": "The said mail matter was left under the exclusive care and custody of the United States Postal Service.",
+      "evidence_quote": "Federal Home Loan Mortgage Corporation, a corporation organized and existing under the laws of the United States of America.",
+      "claim_source": "Affidavit of Service — Eddie Mamiye",
+      "evidence_source": "Assignment of Mortgage",
+      "claim_kind": "affidavit",
+      "evidence_kind": "assignment",
+      "expect_fail": "same_fact",
+      "notes": "Shared 'United States' is boilerplate, not a disputed service fact."
+    },
+    {
+      "id": "mailing_made_vs_mortgage_made",
+      "claim_quote": "Service was made by depositing a true copy of the summons in a first-class post-paid wrapper.",
+      "evidence_quote": "Mortgage made by Eddie Mamiye to the lender on March 3, 2006.",
+      "claim_source": "CPLR 3215 mail AOS",
+      "evidence_source": "Mortgage",
+      "claim_kind": "affidavit",
+      "evidence_kind": "mortgage",
+      "expect_fail": "same_fact",
+      "notes": "Shared stem 'made' is not the same nameable fact."
+    },
+    {
+      "id": "person_service_vs_notary_person",
+      "claim_quote": "I was never served with process; no person of suitable age and discretion was present.",
+      "evidence_quote": "Sworn to before me this day by the person known to me to be the individual described.",
+      "claim_source": "Answer — traverse",
+      "evidence_source": "Notary jurat",
+      "claim_kind": "answer",
+      "evidence_kind": "exhibit",
+      "expect_fail": "same_fact",
+      "notes": "Shared 'person' is not a service-element conflict."
+    }
+  ]
+}

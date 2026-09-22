@@ -13,9 +13,15 @@ backend/data/
 *.db
 
 # Node
+node_modules/
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
+desktop/node_modules/
+desktop/dist/
+desktop/renderer/app/
+control_plane/.venv/
+control_plane/data/
 
 # OS / IDE
 .DS_Store

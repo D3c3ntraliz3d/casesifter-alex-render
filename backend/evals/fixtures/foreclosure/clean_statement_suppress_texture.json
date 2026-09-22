@@ -1,0 +1,18 @@
+{
+  "id": "clean_statement_suppress_texture",
+  "practice": "foreclosure",
+  "lane": "logo_chrome_mismatch",
+  "must_suppress": true,
+  "title": "Ordinary scanned authentic-looking statement — no chrome interrupt from texture alone",
+  "exhibit_text": "CON EDISON\nAccount Statement\nStatement Date: June 15, 2022\nService Address: 123 Main Street, New York, NY 10001\nAmount Due: $98.40\nPrevious Balance $90.00\nPayments -$90.00\nCurrent Charges $98.40",
+  "facts": {
+    "issuer": "Con Edison",
+    "statement_date": "2022-06-15",
+    "scan_texture_only": true
+  },
+  "expected": {
+    "suppress_analysis_types_alone": ["graphic_manipulation"],
+    "do_not_ship_on": "whole-page scan texture without math, template leftover, historical, or logo/chrome content hook"
+  },
+  "notes": "Whole-page flatbed texture is noise. Suppress unless a content hook exists."
+}

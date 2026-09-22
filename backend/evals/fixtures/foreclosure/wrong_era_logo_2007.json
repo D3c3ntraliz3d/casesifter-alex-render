@@ -1,0 +1,20 @@
+{
+  "id": "wrong_era_logo_2007",
+  "practice": "foreclosure",
+  "lane": "logo_chrome_mismatch",
+  "must_ship": true,
+  "title": "Wrong-era logo on aged utility statement",
+  "exhibit_text": "NATIONAL GRID\nAccount Statement\nStatement Date: April 12, 2007\nService Address: 5616 14th Avenue, Brooklyn, NY 11219\nAmount Due: $184.22",
+  "facts": {
+    "issuer": "National Grid",
+    "statement_date": "2007-04-12",
+    "place": "Brooklyn",
+    "logo_era_problem": "Modern National Grid mark on a pre-market-entry Brooklyn bill"
+  },
+  "expected_finding": {
+    "analysis_type": "logo_chrome_mismatch",
+    "or_types": ["logo_chrome_mismatch", "historical_impossibility", "template_fabrication"],
+    "must_mention": ["National Grid", "2007"]
+  },
+  "notes": "Successor brand / wrong-era chrome vs statement date. Content survives print-scan."
+}

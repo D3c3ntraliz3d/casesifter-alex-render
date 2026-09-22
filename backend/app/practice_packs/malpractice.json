@@ -1,0 +1,26 @@
+{
+  "label": "Medical malpractice",
+  "element_cues": [
+    "standard of care",
+    "causation",
+    "informed consent",
+    "deviation",
+    "damages",
+    "chart",
+    "operative note",
+    "medication administration",
+    "statute of limitations"
+  ],
+  "ordinary_dispute_examples": [
+    "Competing expert affirmations with no chart-entry conflict or fabricated record.",
+    "Plaintiff narrative versus defense narrative alone."
+  ],
+  "high_value_exhibit_kinds": [
+    "operative_note",
+    "progress_note",
+    "medication_record",
+    "lab",
+    "billing",
+    "consent_form"
+  ]
+}

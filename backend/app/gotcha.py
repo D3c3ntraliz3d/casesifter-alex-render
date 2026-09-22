@@ -86,7 +86,37 @@ STOP = frozenset(
     over under about after before within without such any all also only other
     document file case court plaintiff defendant party counsel attorney said
     section paragraph exhibit attached hereto hereby pursuant
+    united states america laws postal service made make making person persons
+    name names upon under such thereof hereby herein aforesaid aforesaidly
+    custody care exclusive official depositor first class mail mailing
     """.split()
+)
+
+# Stems that look like a "shared fact" but are legal/English boilerplate (Mamiye AOS noise).
+BOILERPLATE_STEMS = frozenset(
+    {
+        "united",
+        "state",
+        "america",
+        "law",
+        "postal",
+        "service",
+        "made",
+        "make",
+        "person",
+        "name",
+        "mail",
+        "mailing",
+        "custody",
+        "care",
+        "exclusive",
+        "depositor",
+        "official",
+        "first",
+        "class",
+        "upon",
+        "under",
+    }
 )
 
 CLAIM_CUE = re.compile(
@@ -168,6 +198,7 @@ INTERNAL_TAINTED = frozenset(
         "historical_impossibility",
         "date_inconsistency",
         "template_fabrication",
+        "logo_chrome_mismatch",
     }
 )
 CAPTION_OR_FORM = re.compile(
@@ -218,6 +249,7 @@ TAINTED_ANALYSIS = frozenset(
         "historical_impossibility",
         "date_inconsistency",
         "template_fabrication",
+        "logo_chrome_mismatch",
     }
 )
 
@@ -448,11 +480,25 @@ def find_gotchas(
         )
     accepted.extend(verified)
     accepted.sort(key=lambda item: (0 if item.get("tainted_support") else 1))
-    findings = [_to_finding(item, case_docs=docs) for item in accepted[:8] if _shippable(item, docs)]
+    from app.quote_attest import gotcha_quotes_attest
+
+    text_by_doc = {
+        str(doc_id): str((snap or {}).get("text_excerpt") or "")
+        for doc_id, snap in snaps.items()
+    }
+    if text:
+        text_by_doc[str(document_id)] = text
+    findings = [
+        _to_finding(item, case_docs=docs)
+        for item in accepted[:8]
+        if _shippable(item, docs) and gotcha_quotes_attest(item, text_by_doc)
+    ]
+    timing = getattr(verify_candidates, "last_timing", None) or {}
     return findings, {
         "candidates": len(candidates) + len(internals),
         "accepted": len(findings),
         "rejected": rejected,
+        **timing,
     }
 
 
@@ -530,14 +576,15 @@ def propose_tainted_support(
     filing_text: str = "",
     focus_document_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    """One card per exhibit that looks edited. Do not stitch it to leftover filing quotes."""
+    """Link fraud-flagged exhibits to the claim they support when possible."""
     if focus_document_id:
         focus = next((doc for doc in docs if doc["id"] == focus_document_id), None)
         snap = snaps.get(focus_document_id) or {}
         rows = _standalone_tainted_rows(focus, snap) if focus else []
-        if focus and rows:
-            return [_exhibit_edited_item(focus, rows)]
-        return []
+        if not (focus and rows):
+            return []
+        linked_claim = _claim_that_cites_exhibit(claims, focus, snaps, filing_text)
+        return [_exhibit_edited_item(focus, rows, claim=linked_claim)]
 
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -552,21 +599,53 @@ def propose_tainted_support(
             if not rows:
                 continue
             seen.add(doc["id"])
-            out.append(_exhibit_edited_item(doc, rows))
+            out.append(_exhibit_edited_item(doc, rows, claim=claim))
             if len(out) >= 6:
                 return out
     return out
 
 
-def _exhibit_edited_item(doc: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _claim_that_cites_exhibit(
+    claims: list[dict[str, Any]],
+    doc: dict[str, Any],
+    snaps: dict[str, dict[str, Any]],
+    filing_text: str,
+) -> dict[str, Any] | None:
+    for claim in claims:
+        if _explicitly_uses_exhibit(claim, doc, snaps, filing_text) or _claim_uses_exhibit(
+            claim, doc, snaps, filing_text
+        ):
+            return claim
+    return None
+
+
+def _exhibit_edited_item(
+    doc: dict[str, Any],
+    rows: list[dict[str, Any]],
+    claim: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     source = doc.get("display_name") or doc.get("original_filename") or "exhibit"
     detail, matter = _flagged_issue_detail(rows)
+    claim_quote = str((claim or {}).get("quote") or "").strip()
+    claim_source = str((claim or {}).get("source") or "").strip()
+    if claim_quote:
+        title = "Claim relies on exhibit that appears altered"
+        matter = (
+            "The claim uses this exhibit as support, but the exhibit itself carries "
+            "scan-survivable fraud indicators. Credibility of that proof is at issue."
+            if not matter
+            else matter
+        )
+        verify = _force_tainted_pass(claim_quote, detail, bucket="credibility")
+    else:
+        title = "Exhibit appears fraudulently edited"
+        verify = _force_tainted_pass("", detail, bucket="credibility")
     return {
-        "title": "Exhibit appears fraudulently edited",
-        "claim_quote": "",
-        "claim_source": source,
-        "claim_document_id": doc.get("id"),
-        "claim_kind": doc.get("doc_kind") or "exhibit",
+        "title": title,
+        "claim_quote": claim_quote,
+        "claim_source": claim_source or source,
+        "claim_document_id": (claim or {}).get("document_id") or doc.get("id"),
+        "claim_kind": (claim or {}).get("doc_kind") or doc.get("doc_kind") or "exhibit",
         "evidence_quote": detail,
         "evidence_source": source,
         "document_id": doc["id"],
@@ -576,7 +655,7 @@ def _exhibit_edited_item(doc: dict[str, Any], rows: list[dict[str, Any]]) -> dic
         "tainted_support": True,
         "why_it_may_matter": matter,
         "contradiction_type": "procedural_foundational",
-        "verification": _force_tainted_pass("", detail),
+        "verification": verify,
     }
 
 
@@ -621,6 +700,15 @@ def keep_board_gotcha(
     evidence = str(item.get("evidence_quote") or "")
     if _ocr_broken(claim) or _ocr_broken(evidence):
         return False
+    from app.quote_attest import gotcha_quotes_attest
+
+    text_by_doc: dict[str, str] = {}
+    for doc_id, snap in (snaps or {}).items():
+        excerpt = str((snap or {}).get("text_excerpt") or "")
+        if excerpt:
+            text_by_doc[str(doc_id)] = excerpt
+    if not gotcha_quotes_attest(item, text_by_doc):
+        return False
     return True
 
 
@@ -638,11 +726,18 @@ def _keep_tainted_board_card(
     rows = _standalone_tainted_rows(doc or {"id": doc_id}, snap)
     if rows:
         detail, matter = _flagged_issue_detail(rows)
-        item["title"] = "Exhibit appears fraudulently edited"
-        item["claim_quote"] = ""
+        claim_q = str(item.get("claim_quote") or "").strip()
+        item["title"] = (
+            "Claim relies on exhibit that appears altered"
+            if claim_q
+            else "Exhibit appears fraudulently edited"
+        )
+        # Keep linked claim quote when present; do not wipe it to empty.
+        if not claim_q:
+            item["claim_quote"] = ""
         item["evidence_quote"] = detail
         item["why_it_may_matter"] = matter
-        item["gotcha_level"] = "Exhibit appears fraudulently edited"
+        item["gotcha_level"] = item["title"]
         if doc:
             item["display_name"] = doc.get("display_name") or doc.get("original_filename")
             item["related_documents"] = [
@@ -890,12 +985,26 @@ def _tainted_rows(snap: dict[str, Any]) -> list[dict[str, Any]]:
     return out[:3]
 
 
-def _force_tainted_pass(claim: str, evidence: str) -> dict[str, Any]:
+def _force_tainted_pass(
+    claim: str,
+    evidence: str,
+    *,
+    bucket: str = "credibility",
+) -> dict[str, Any]:
+    linked = bool(str(claim or "").strip())
     return {
         "same_fact": {
             "pass": True,
-            "fact_named": "authenticity of the offered exhibit",
-            "reason": "The exhibit itself is the record being checked.",
+            "fact_named": (
+                "authenticity of the exhibit offered to support the claim"
+                if linked
+                else "authenticity of the offered exhibit"
+            ),
+            "reason": (
+                "The claim relies on an exhibit that itself appears altered."
+                if linked
+                else "The exhibit itself is the record being checked."
+            ),
         },
         "directionality": {
             "pass": True,
@@ -905,8 +1014,12 @@ def _force_tainted_pass(claim: str, evidence: str) -> dict[str, Any]:
         },
         "materiality": {
             "pass": True,
-            "tier": "foundation",
-            "reason": "Open the report and review each flagged item before treating this exhibit as proof.",
+            "tier": bucket,
+            "reason": (
+                f"The contradicted fact bears on {bucket}."
+                if linked
+                else "Open the report and review each flagged item before treating this exhibit as proof."
+            ),
         },
         "textual_grounding": {"pass": True, "reason": "The flagged items are on the exhibit scan report."},
         "contradiction_type": "procedural_foundational",
@@ -939,9 +1052,13 @@ def verify_candidates(
     candidates: list[dict[str, Any]],
     case_docs: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Local gates first; model verify only for ambiguous pairs (cuts Claude latency)."""
+    import time
+
     accepted: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
-    model_results = _ask_verify(candidates) if settings.gemini_api_key and candidates else {}
+    ambiguous: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
+
     for idx, candidate in enumerate(candidates):
         if not evidence_is_probative(candidate, case_docs):
             rejected.append(
@@ -956,7 +1073,64 @@ def verify_candidates(
             )
             continue
         local = verify_pair(candidate)
-        verdict = merge_verdicts(candidate, local, model_results.get(idx))
+        veto = hard_veto_step(candidate, local)
+        if veto:
+            rejected.append(
+                _reject_record(
+                    candidate,
+                    {
+                        **local,
+                        "pass": False,
+                        "failed_step": veto,
+                        "gate": "hard_veto",
+                    },
+                )
+            )
+            continue
+        if _complete_pass(local):
+            verdict = merge_verdicts(candidate, local, None)
+            record = {**candidate, "verification": verdict}
+            if verdict.get("pass") and _complete_pass(verdict):
+                record["contradiction_type"] = _canonical_type(
+                    verdict.get("contradiction_type"),
+                    local,
+                    allow_retire_remap=verdict.get("gate") == "local",
+                )
+                if record["contradiction_type"] is None:
+                    rejected.append(
+                        _reject_record(
+                            candidate,
+                            {
+                                **verdict,
+                                "pass": False,
+                                "failed_step": "contradiction_type",
+                                "gate": "retired_type",
+                            },
+                        )
+                    )
+                else:
+                    accepted.append(record)
+            else:
+                rejected.append(_reject_record(candidate, verdict))
+            continue
+        ambiguous.append((idx, candidate, local))
+
+    model_results: dict[int, dict[str, Any]] = {}
+    verify_ms = 0
+    if ambiguous and (
+        settings.gemini_api_key or settings.anthropic_api_key or settings.openai_api_key
+    ):
+        batch = [row[1] for row in ambiguous]
+        t0 = time.perf_counter()
+        raw = _ask_verify(batch)
+        verify_ms = int((time.perf_counter() - t0) * 1000)
+        # Remap batch indices 0..n back to original candidate indices.
+        for batch_i, (orig_idx, _cand, _local) in enumerate(ambiguous):
+            if batch_i in raw:
+                model_results[orig_idx] = raw[batch_i]
+
+    for orig_idx, candidate, local in ambiguous:
+        verdict = merge_verdicts(candidate, local, model_results.get(orig_idx))
         record = {**candidate, "verification": verdict}
         if verdict.get("pass") and _complete_pass(verdict):
             record["contradiction_type"] = _canonical_type(
@@ -965,19 +1139,39 @@ def verify_candidates(
                 allow_retire_remap=verdict.get("gate") == "local",
             )
             if record["contradiction_type"] is None:
-                verdict = {
-                    **verdict,
-                    "pass": False,
-                    "failed_step": "contradiction_type",
-                    "gate": "retired_type",
-                }
-                record["verification"] = verdict
-                rejected.append(_reject_record(candidate, verdict))
-                continue
-            accepted.append(record)
+                rejected.append(
+                    _reject_record(
+                        candidate,
+                        {
+                            **verdict,
+                            "pass": False,
+                            "failed_step": "contradiction_type",
+                            "gate": "retired_type",
+                        },
+                    )
+                )
+            else:
+                accepted.append(record)
         else:
             rejected.append(_reject_record(candidate, verdict))
+
+    # Stash timing on rejected sentinel for callers that inspect logs — find_gotchas reads via return.
+    verify_candidates.last_timing = {  # type: ignore[attr-defined]
+        "gotcha_verify_ms": verify_ms,
+        "verify_candidate_count": len(candidates),
+        "verify_ambiguous_count": len(ambiguous),
+        "verify_provider": _verify_provider_label(),
+    }
     return accepted, rejected
+
+
+def _verify_provider_label() -> str:
+    try:
+        from app.llm_verify import resolve_verify_provider
+
+        return resolve_verify_provider()
+    except Exception:
+        return "unknown"
 
 
 def merge_verdicts(
@@ -1052,6 +1246,9 @@ def hard_veto_step(candidate: dict[str, Any], local: dict[str, Any]) -> str | No
     evidence = str(candidate.get("evidence_quote") or "")
     if not _usable(candidate):
         return "textual_grounding"
+    fact_named = str((local.get("same_fact") or {}).get("fact_named") or "")
+    if _boilerplate_collision(claim, evidence, fact_named):
+        return "same_fact"
     if _duty_vs_place(claim, evidence):
         return "same_fact"
     if _caption_or_form(evidence) or _party_list_only(claim, evidence):
@@ -1078,7 +1275,6 @@ def hard_veto_step(candidate: dict[str, Any], local: dict[str, Any]) -> str | No
         return "textual_grounding"
     if local.get("failed_step") == "textual_grounding":
         return "textual_grounding"
-    fact_named = str((local.get("same_fact") or {}).get("fact_named") or "")
     if (local.get("directionality") or {}).get("pass") and not _case_impact_bucket(
         claim, evidence, fact_named
     ):
@@ -1091,13 +1287,20 @@ def verify_pair(candidate: dict[str, Any]) -> dict[str, Any]:
     claim = str(candidate.get("claim_quote") or "")
     evidence = str(candidate.get("evidence_quote") or "")
     overlap = _stem_overlap(claim, evidence)
+    # Drop boilerplate stems so "United States" / "made" never look like a shared fact.
+    meaningful = {s for s in overlap if s not in BOILERPLATE_STEMS}
 
     same = {
         "pass": False,
         "fact_named": "",
         "reason": "No shared nameable fact in the two quotes.",
     }
-    if _duty_vs_place(claim, evidence):
+    if _boilerplate_collision(claim, evidence, ", ".join(sorted(overlap)[:6])):
+        same["reason"] = (
+            "Shared words are legal or English boilerplate (e.g. United States, made, person), "
+            "not a nameable disputed fact."
+        )
+    elif _duty_vs_place(claim, evidence):
         same["reason"] = "Claim is about a duty or condition; evidence is about place. Different facts."
     elif _caption_or_form(evidence) or _party_list_only(claim, evidence):
         same["reason"] = "Shared party names, a caption, or a form checkbox are not a nameable fact."
@@ -1134,21 +1337,21 @@ def verify_pair(candidate: dict[str, Any]) -> dict[str, Any]:
             "fact_named": "whereabouts on a shared date",
             "reason": "Both quotes address where a person was on the same date.",
         }
-    elif len(overlap) >= 2 and _has_opposing_polarity(claim, evidence) and (
+    elif len(meaningful) >= 2 and _has_opposing_polarity(claim, evidence) and (
         _predicate_overlap(claim, evidence) or _exclusive_vs_instance(claim, evidence)
     ):
         same = {
             "pass": True,
-            "fact_named": ", ".join(sorted(overlap)[:6]),
+            "fact_named": ", ".join(sorted(meaningful)[:6]),
             "reason": "Both quotes share the same discrete fact and opposing polarity.",
         }
-    elif len(overlap) == 1 and (
+    elif len(meaningful) == 1 and (
         (_has_opposing_polarity(claim, evidence) and _predicate_overlap(claim, evidence))
         or _exclusive_vs_instance(claim, evidence)
     ):
         same = {
             "pass": True,
-            "fact_named": next(iter(overlap)),
+            "fact_named": next(iter(meaningful)),
             "reason": "One shared fact token plus opposing polarity on the same predicate.",
         }
 
@@ -1237,17 +1440,21 @@ def _token_candidates(claims: list[dict[str, Any]], evidence: list[dict[str, Any
     out: list[dict[str, Any]] = []
     for claim in claims:
         quote = claim["quote"]
-        toks = set(_stems(_tokens(quote)))
+        toks = {s for s in set(_stems(_tokens(quote))) if s not in BOILERPLATE_STEMS}
+        if not toks:
+            continue
         for item in evidence:
             if item.get("document_id") == claim.get("document_id"):
                 continue
             for snippet in item.get("snippets") or []:
-                overlap = toks & set(_stems(_tokens(snippet)))
+                overlap = toks & {s for s in set(_stems(_tokens(snippet))) if s not in BOILERPLATE_STEMS}
                 if (
                     len(overlap) < 2
                     and not _has_opposing_polarity(quote, snippet)
                     and not (len(overlap) >= 1 and _exclusive_vs_instance(quote, snippet))
                 ):
+                    continue
+                if _boilerplate_collision(quote, snippet, ", ".join(sorted(overlap)[:6])):
                     continue
                 out.append(
                     {
@@ -1294,35 +1501,14 @@ def _ask_candidates(claims: list[dict[str, Any]], evidence: list[dict[str, Any]]
 
 
 def _ask_verify(candidates: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
-    blob = "\n\n".join(
-        f"[{idx}] CLAIM ({item.get('claim_source')}): “{item.get('claim_quote')}”\n"
-        f"EVIDENCE ({item.get('evidence_source')}): “{item.get('evidence_quote')}”"
-        for idx, item in enumerate(candidates)
-    )
-    try:
-        body = _post_gemini(
-            {
-                "contents": [{"role": "user", "parts": [{"text": VERIFY_PROMPT.format(candidates=blob)}]}],
-                "generationConfig": _generation_config(VERIFY_SCHEMA, settings.gemini_thinking_level),
-            },
-            timeout=max(settings.gemini_timeout_s, 45),
-        )
-        parsed = _parse_json_payload(body)
-    except Exception:
-        return {}
-    out: dict[int, dict[str, Any]] = {}
-    for item in parsed.get("results") or []:
-        if not isinstance(item, dict):
-            continue
-        try:
-            idx = int(item.get("index"))
-        except (TypeError, ValueError):
-            continue
-        if not item.get("pass"):
-            item["failed_step"] = item.get("failed_step") or _first_fail(item)
-        out[idx] = item
-    return out
+    from app.llm_verify import ask_verify
 
+    return ask_verify(
+        candidates,
+        verify_prompt=VERIFY_PROMPT,
+        verify_schema=VERIFY_SCHEMA,
+        first_fail=_first_fail,
+    )
 
 def _to_finding(item: dict[str, Any], case_docs: list[dict[str, Any]] | None = None) -> Finding:
     vtype = _canonical_type(item.get("contradiction_type"), item.get("verification") or {}) or "factual_contradiction"
@@ -1336,7 +1522,7 @@ def _to_finding(item: dict[str, Any], case_docs: list[dict[str, Any]] | None = N
     if tainted_hit:
         severity = "high"
         confidence = 90.0
-        title = "Exhibit appears fraudulently edited"
+        title = str(item.get("title") or "Exhibit appears fraudulently edited")
         self_hit = True
     elif self_hit:
         severity = "high"
@@ -1364,10 +1550,17 @@ def _to_finding(item: dict[str, Any], case_docs: list[dict[str, Any]] | None = N
     ev_label = counter_label(ev_tier)
     if tainted_hit:
         detail = str(item.get("evidence_quote") or "").strip()
-        explanation = detail or attorney_why or (
-            "This exhibit appears fraudulently edited. See the report for each flagged item."
-        )
-        seed = f"gotcha|edited|{item.get('document_id')}|{item.get('evidence_source')}"
+        claim_q = str(item.get("claim_quote") or "").strip()
+        if claim_q:
+            explanation = (
+                f"CLAIM ({item.get('claim_source') or 'filing'}): “{claim_q}” "
+                f"EXHIBIT ({item.get('evidence_source') or 'record'}): {detail}"
+            )
+        else:
+            explanation = detail or attorney_why or (
+                "This exhibit appears fraudulently edited. See the report for each flagged item."
+            )
+        seed = f"gotcha|edited|{item.get('document_id')}|{item.get('evidence_source')}|{claim_q[:40]}"
         fid = "ctx-gotcha-" + hashlib.sha1(seed.encode("utf-8")).hexdigest()[:10]
         why_suspicious = attorney_why if attorney_why and attorney_why not in explanation else (
             "Open the scan report and review each flagged item before treating this exhibit as proof."
@@ -1392,8 +1585,8 @@ def _to_finding(item: dict[str, Any], case_docs: list[dict[str, Any]] | None = N
             "gotcha_level": title,
             "contradiction_type": vtype,
             "analysis_type": "gotcha",
-            "claim_quote": None if tainted_hit else item.get("claim_quote"),
-            "claim_source": None if tainted_hit else item.get("claim_source"),
+            "claim_quote": item.get("claim_quote") or None,
+            "claim_source": item.get("claim_source") or None,
             "evidence_quote": item.get("evidence_quote"),
             "evidence_source": item.get("evidence_source"),
             "evidence_label": ev_label,
@@ -1402,13 +1595,15 @@ def _to_finding(item: dict[str, Any], case_docs: list[dict[str, Any]] | None = N
             "self_undercut": self_hit,
             "tainted_support": tainted_hit,
             "document_id": item.get("document_id"),
-            "fact_named": None if tainted_hit else fact_named,
-            "direction_reason": None if tainted_hit else direction_reason,
-            "materiality_reason": None if tainted_hit else material_reason,
+            "fact_named": None if (tainted_hit and not item.get("claim_quote")) else fact_named,
+            "direction_reason": None if (tainted_hit and not item.get("claim_quote")) else direction_reason,
+            "materiality_reason": None if (tainted_hit and not item.get("claim_quote")) else material_reason,
             "attorney_why": attorney_why,
             "verification": verify,
             "material": True,
             "prior_display_name": item.get("evidence_source"),
+            "case_impact": "case_winning" if tainted_hit else None,
+            "case_impact_bucket": "credibility" if tainted_hit else None,
         },
         recommended_action=(
             "Open the scan report and review each flagged item before treating this exhibit as proof."
@@ -1661,18 +1856,38 @@ def _has_opposing_polarity(claim: str, evidence: str) -> bool:
 
 def _case_impact_bucket(claim: str, evidence: str, fact_named: str = "") -> str | None:
     """Name element / procedure / credibility / damages, or None to suppress."""
+    if _boilerplate_collision(claim, evidence, fact_named):
+        return None
     blob = f"{claim} {evidence} {fact_named}".lower()
     fact = (fact_named or "").lower()
-    if fact in {"residence at the stated address", "whereabouts on a shared date"}:
-        return "element"
-    if fact == "authenticity of the offered exhibit":
-        return "procedure"
+    if fact in {
+        "residence at the stated address",
+        "whereabouts on a shared date",
+        "authenticity of the offered exhibit",
+        "authenticity of the exhibit offered to support the claim",
+    }:
+        return "credibility" if "authenticity" in fact else "element"
+    try:
+        from app.practice_packs import pack_impact_cues
+
+        for cue in pack_impact_cues():
+            if cue and cue in blob:
+                if any(k in cue for k in ("fee", "damage", "amount", "eob", "ucr")):
+                    return "damages"
+                if any(k in cue for k in ("discharge", "crfn", "foundation", "chart", "consent")):
+                    return "procedure"
+                return "element"
+    except Exception:
+        pass
     if _denies_residence(claim) or _asserts_residence(claim):
         if SERVICE_FACT.search(blob) or PLACE_FACT.search(blob):
             return "element"
     if SERVICE_FACT.search(claim) and (
         SERVICE_FACT.search(evidence) or PLACE_FACT.search(evidence) or _denies_residence(evidence)
     ):
+        # Competing service recitals are ordinary traverse — not an element interrupt.
+        if _ordinary_traverse(claim, evidence):
+            return None
         return "element"
     if re.search(
         r"(?i)\b("
@@ -1682,6 +1897,8 @@ def _case_impact_bucket(claim: str, evidence: str, fact_named: str = "") -> str 
         r")\b",
         blob,
     ):
+        if _ordinary_traverse(claim, evidence) or _boilerplate_collision(claim, evidence, fact_named):
+            return None
         return "element"
     if re.search(
         r"(?i)\b("
@@ -1736,6 +1953,35 @@ def _case_impact_bucket(claim: str, evidence: str, fact_named: str = "") -> str 
     ):
         return "procedure"
     return None
+
+
+def _boilerplate_collision(claim: str, evidence: str, fact_named: str = "") -> bool:
+    """True when the only 'shared fact' is legal/English boilerplate (Mamiye AOS pattern)."""
+    fact = (fact_named or "").strip().lower()
+    if fact in {
+        "residence at the stated address",
+        "whereabouts on a shared date",
+        "authenticity of the offered exhibit",
+        "authenticity of the exhibit offered to support the claim",
+    }:
+        return False
+    fact_parts = {p.strip() for p in re.split(r"[,;/|]+", fact) if p.strip()}
+    if fact_parts and fact_parts <= BOILERPLATE_STEMS:
+        return True
+    overlap = _stem_overlap(claim, evidence)
+    meaningful = {s for s in overlap if s not in BOILERPLATE_STEMS}
+    if overlap and not meaningful:
+        return True
+    # Classic USPS vs corporate charter collision.
+    if re.search(r"(?i)\bunited\s+states\s+postal", claim) and re.search(
+        r"(?i)\blaws?\s+of\s+the\s+united\s+states", evidence
+    ):
+        return True
+    if re.search(r"(?i)\blaws?\s+of\s+the\s+united\s+states", claim) and re.search(
+        r"(?i)\bunited\s+states\s+postal", evidence
+    ):
+        return True
+    return False
 
 
 def _street_numbers(text: str) -> set[str]:
