@@ -64,6 +64,9 @@ FACT_META: dict[str, dict[str, Any]] = {
     "first_default_date": {"label": "First default date", "kind": "date"},
     "foreclosure_date": {"label": "Foreclosure filing date", "kind": "date", "deadline": True},
     "notice_date": {"label": "Notice date", "kind": "date", "deadline": True},
+    # Documentary graph attributes (entity-scoped). Attribute extractors — not lie types.
+    "employment_start": {"label": "Employment start", "kind": "date"},
+    "employment_tax_year": {"label": "Employment tax year (W-2)", "kind": "year"},
 }
 
 # Note rate vs default/penalty rate, remaining principal, and the installment
@@ -79,6 +82,8 @@ LOAN_STATUS_KEYS = frozenset(
 )
 
 # Origination / recording / “mortgage dated” are ordinary chronology, not a lie.
+# Documentary graph attributes (employment_start, etc.) stay in GOTCHA_KEYS so
+# same-entity conflicts can interrupt under credibility.
 GOTCHA_KEYS = frozenset(key for key in FACT_META if key not in LOAN_STATUS_KEYS)
 
 # A genuinely declared fact -- even one repeated verbatim several times
@@ -186,10 +191,25 @@ NAME_ALIASES = {
 }
 
 
-def extract_facts(text: str, limit: int = 24) -> list[dict[str, Any]]:
+def extract_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
     body = text or ""
     facts: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
+
+    # Grounded documentary attributes first (entity-scoped) — general lie-detector lane.
+    try:
+        from app.fact_graph import extract_grounded_facts
+
+        for rec in extract_grounded_facts(body, limit=limit):
+            token = (rec["key"], f"{rec.get('entity_key')}|{rec['display']}")
+            if token in seen:
+                continue
+            seen.add(token)
+            facts.append(rec)
+            if len(facts) >= limit:
+                return facts
+    except Exception:
+        pass
 
     for key, pattern in MONEY_PATTERNS:
         key_records: list[dict[str, Any]] = []

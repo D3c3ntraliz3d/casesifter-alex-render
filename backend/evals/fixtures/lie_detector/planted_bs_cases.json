@@ -1,0 +1,124 @@
+{
+  "description": "Meta-rule planted BS: same nameable fact, incompatible documentary values. Not a catalog of lie types.",
+  "cases": [
+    {
+      "id": "summers_employment_start_conflict",
+      "label": "tp",
+      "shape": "same_entity_attribute_conflict",
+      "mode": "internal_binder",
+      "must_ship": true,
+      "impact_bucket": "credibility",
+      "text": "EMPLOYMENT VERIFICATION\nBorrower: Michael Summers\nEmployer: TechCore Solutions\nMichael Summers: has been employed by TechCore Solutions located in Cherry Hill, New Jersey since March 2019 in the position of Senior Business Analyst.\nMichael Summers: Employed since March 2022 at TechCore Solutions. Current annual salary $95,000.\n",
+      "notes": "Summers-style binder: two hire dates for the same person/employer."
+    },
+    {
+      "id": "paystub_hire_after_w2_year",
+      "label": "tp",
+      "shape": "cross_attribute_hire_vs_w2",
+      "mode": "cross_doc",
+      "must_ship": true,
+      "impact_bucket": "credibility",
+      "documents": [
+        {
+          "id": "pay",
+          "name": "Paystub March 2025",
+          "text": "PAYSTUB Earnings Statement\nEmployee: Jane Doe\nEmployer: Acme Medical Center\nHire Date: 03/15/2025\nEmployee ID: 4421\nGross pay $4,200.00\n"
+        },
+        {
+          "id": "w2",
+          "name": "Form W-2 2023",
+          "text": "Form W-2 Wage and Tax Statement\nEmployee: Jane Doe\nEmployer: Acme Medical Center\nTax year 2023\nWages tips other compensation 52000.00\n"
+        }
+      ],
+      "notes": "Hire date after a W-2 tax year for the same employer cannot both be true."
+    },
+    {
+      "id": "fee_amount_conflict",
+      "label": "tp",
+      "shape": "same_fact_money_conflict",
+      "mode": "aggregate",
+      "must_ship": true,
+      "documents": [
+        {
+          "id": "notice",
+          "name": "Arrears notice",
+          "text": "Notice of default. Late fees claimed $1,200.00. Accrued interest is separate."
+        },
+        {
+          "id": "complaint",
+          "name": "Complaint",
+          "text": "Plaintiff seeks judgment. Late fees claimed $8,500.00 on the account."
+        }
+      ],
+      "notes": "Fees are not ordinary loan-status movement when both quotes assert the same fee claim at incompatible amounts."
+    },
+    {
+      "id": "first_default_date_conflict",
+      "label": "tp",
+      "shape": "same_fact_date_conflict",
+      "mode": "aggregate",
+      "must_ship": true,
+      "documents": [
+        {
+          "id": "note",
+          "name": "Note affidavit",
+          "text": "Borrower defaulted on February 1, 2022. First default date February 1, 2022."
+        },
+        {
+          "id": "complaint",
+          "name": "Complaint",
+          "text": "The borrower defaulted on June 1, 2023. Date of first default June 1, 2023."
+        }
+      ]
+    },
+    {
+      "id": "clean_different_employer_twin",
+      "label": "fp",
+      "shape": "different_entity_near_miss",
+      "mode": "cross_doc",
+      "must_suppress": true,
+      "documents": [
+        {
+          "id": "pay",
+          "name": "Paystub Other Systems",
+          "text": "PAYSTUB Earnings Statement\nEmployee: Jane Doe\nEmployer: Other Systems Inc\nHire Date: 03/15/2025\n"
+        },
+        {
+          "id": "w2",
+          "name": "W-2 Acme",
+          "text": "Form W-2 Wage and Tax Statement\nEmployee: Jane Doe\nEmployer: Acme Medical Center\nTax year 2023\n"
+        }
+      ],
+      "notes": "Same person, different employers — not the same nameable employment fact."
+    },
+    {
+      "id": "clean_consistent_employment_twin",
+      "label": "fp",
+      "shape": "supporting_not_against",
+      "mode": "internal_binder",
+      "must_suppress": true,
+      "text": "Borrower: Michael Summers\nEmployer: TechCore Solutions\nMichael Summers: Employed since March 2019 at TechCore Solutions.\nMichael Summers has been employed by TechCore Solutions located in Cherry Hill since March 2019.\n"
+    },
+    {
+      "id": "seeded_mutation_flip_employment_start",
+      "label": "tp",
+      "shape": "seeded_real_case_mutation",
+      "mode": "internal_binder",
+      "must_ship": true,
+      "impact_bucket": "credibility",
+      "base_text": "Borrower: Alex Rivera\nEmployer: Northwind Solutions\nAlex Rivera: Employed since January 2018 at Northwind Solutions. Annual salary $88,000.\n",
+      "mutation": {
+        "append": "Alex Rivera: Employed since January 2021 at Northwind Solutions per updated verification letter.\n"
+      },
+      "notes": "Clean twin stays quiet; flipping one grounded hire date must interrupt."
+    },
+    {
+      "id": "seeded_clean_before_mutation",
+      "label": "fp",
+      "shape": "seeded_real_case_clean",
+      "mode": "internal_binder",
+      "must_suppress": true,
+      "text": "Borrower: Alex Rivera\nEmployer: Northwind Solutions\nAlex Rivera: Employed since January 2018 at Northwind Solutions. Annual salary $88,000.\nAlex Rivera has been employed by Northwind Solutions located in Newark since January 2018.\n"
+    }
+  ]
+}

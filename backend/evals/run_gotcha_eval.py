@@ -7,7 +7,12 @@ from collections import defaultdict
 from pathlib import Path
 
 from app.auto_title import propose_document_title
-from app.case_consistency import aggregate_fact_conflicts, dedupe_gotchas
+from app.case_consistency import (
+    aggregate_fact_conflicts,
+    compare_to_case,
+    dedupe_gotchas,
+    _internal_fact_conflicts,
+)
 from app.scan_profile import PROFILE_COURT_FILING, PROFILE_FORENSIC, resolve_scan_profile, scan_profile_for_kind
 from app.evidence_tier import classify_tier, evidence_is_probative, find_internal_evidence_defects
 from app.gotcha import (
@@ -1141,6 +1146,124 @@ def _ai_print_scan_fixtures_eval() -> bool:
     )
 
 
+def evaluate_lie_detector() -> dict:
+    """Planted documentary BS + clean twins + seeded mutations (meta-rule, not lie taxonomy)."""
+    from app.fact_extract import extract_facts
+
+    path = Path(__file__).resolve().parent / "fixtures" / "lie_detector" / "planted_bs_cases.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    rows = []
+
+    def _shipped_internal(text: str, name: str = "binder") -> list:
+        facts = extract_facts(text)
+        return _internal_fact_conflicts(name, facts)
+
+    def _shipped_cross(docs: list[dict]) -> list:
+        if len(docs) < 2:
+            return []
+        prior = docs[0]
+        new = docs[1]
+        prior_facts = extract_facts(prior["text"])
+        new_facts = extract_facts(new["text"])
+        findings, matrix = compare_to_case(
+            new_document_id=new["id"],
+            new_display_name=new["name"],
+            new_entities={},
+            new_amounts=[],
+            new_fingerprint=None,
+            new_doc_kind="exhibit",
+            prior_snapshots=[
+                {
+                    "document_id": prior["id"],
+                    "display_name": prior["name"],
+                    "doc_kind": "exhibit",
+                    "facts": prior_facts,
+                    "text_excerpt": prior["text"],
+                }
+            ],
+            new_facts=new_facts,
+            new_text=new["text"],
+        )
+        material = [
+            f
+            for f in findings
+            if f.severity in {"high", "medium"}
+            and (
+                (f.evidence or {}).get("documentary")
+                or (f.evidence or {}).get("case_impact")
+                or "Employment" in f.title
+                or "conflicts" in f.title.lower()
+            )
+        ]
+        red_matrix = [r for r in matrix if r.get("flag") == "red" and r.get("documentary")]
+        return material or red_matrix
+
+    def _shipped_aggregate(docs: list[dict]) -> list:
+        snaps = []
+        for doc in docs:
+            snaps.append(
+                {
+                    "document_id": doc["id"],
+                    "display_name": doc["name"],
+                    "facts": extract_facts(doc["text"]),
+                    "text_excerpt": doc["text"],
+                }
+            )
+        return [row for row in aggregate_fact_conflicts(snaps) if row.get("severity") in {"high", "medium"}]
+
+    for case in data.get("cases") or []:
+        mode = case.get("mode")
+        hits: list = []
+        if mode == "internal_binder":
+            text = case.get("text") or ""
+            if case.get("mutation"):
+                text = (case.get("base_text") or "") + str((case.get("mutation") or {}).get("append") or "")
+            hits = _shipped_internal(text, case.get("id", "binder"))
+        elif mode == "cross_doc":
+            hits = _shipped_cross(case.get("documents") or [])
+        elif mode == "aggregate":
+            hits = _shipped_aggregate(case.get("documents") or [])
+
+        shipped = len(hits) > 0
+        if case.get("must_ship"):
+            ok = shipped
+        elif case.get("must_suppress"):
+            ok = not shipped
+        else:
+            expect_tp = case.get("label") == "tp"
+            ok = shipped if expect_tp else not shipped
+
+        bucket_ok = True
+        if shipped and case.get("impact_bucket") and hits and hasattr(hits[0], "evidence"):
+            bucket_ok = (hits[0].evidence or {}).get("case_impact_bucket") == case["impact_bucket"] or (
+                hits[0].evidence or {}
+            ).get("case_impact") is True
+
+        rows.append(
+            {
+                "id": case.get("id"),
+                "shape": case.get("shape"),
+                "mode": mode,
+                "label": case.get("label"),
+                "shipped": shipped,
+                "hit_count": len(hits),
+                "ok": ok and (bucket_ok if case.get("must_ship") and case.get("impact_bucket") else True),
+            }
+        )
+
+    tp = [r for r in rows if r["label"] == "tp"]
+    fp = [r for r in rows if r["label"] == "fp"]
+    tp_hit = sum(1 for r in tp if r["shipped"])
+    fp_flagged = sum(1 for r in fp if r["shipped"])
+    return {
+        "rows": rows,
+        "precision": round(tp_hit / (tp_hit + fp_flagged), 3) if (tp_hit + fp_flagged) else 1.0,
+        "recall": round(tp_hit / len(tp), 3) if tp else 0.0,
+        "misses": [r for r in rows if not r["ok"]],
+        "all_pass": all(r["ok"] for r in rows),
+    }
+
+
 def evaluate() -> dict:
     dedupe = evaluate_dedupe()
     dedupe["all_pass"] = all(dedupe[key] for key in dedupe if key != "all_pass")
@@ -1160,6 +1283,7 @@ def evaluate() -> dict:
     )
     case_impact = evaluate_case_impact()
     case_impact["all_pass"] = all(case_impact[key] for key in case_impact if key != "all_pass")
+    lie_detector = evaluate_lie_detector()
     return {
         "pairs": evaluate_pairs(),
         "pipeline": evaluate_pipeline(),
@@ -1173,6 +1297,7 @@ def evaluate() -> dict:
         "template_fabrication": templates,
         "statement_dates": statement_dates,
         "case_impact": case_impact,
+        "lie_detector": lie_detector,
     }
 
 
@@ -1199,6 +1324,7 @@ def main() -> None:
     print("TEMPLATE FABRICATION", result["template_fabrication"])
     print("STATEMENT DATES", result["statement_dates"])
     print("CASE IMPACT", result["case_impact"])
+    print("LIE DETECTOR", result["lie_detector"])
     failed = bool(
         misses
         or pipe["misses"]
@@ -1211,6 +1337,7 @@ def main() -> None:
         or not result["template_fabrication"]["all_pass"]
         or not result["statement_dates"]["all_pass"]
         or not result["case_impact"]["all_pass"]
+        or not result["lie_detector"]["all_pass"]
     )
     if not result["score_independence"]["title_does_not_matter"]:
         failed = True

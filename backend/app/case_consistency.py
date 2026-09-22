@@ -20,6 +20,7 @@ from typing import Any
 
 from app.engines import finding
 from app.fact_extract import FACT_META, GOTCHA_KEYS, extract_facts
+from app.fact_graph import cluster_key, facts_compatible, same_nameable_fact
 from app.models import Finding
 from app.scan_profile import COURT_FILING_KINDS
 
@@ -253,8 +254,57 @@ def compare_to_case(
 
         for row in _compare_facts(facts, prior_facts, prior_name):
             matrix.append({"prior_document_id": prior_id, "prior_name": prior_name, **row})
-            # Cross-document fact mismatches are one case-level alert, not a
-            # per-file flag on every document that mentions the same number.
+            # Documentary graph conflicts (entity-scoped) interrupt as credibility —
+            # party's own exhibits cannot both be true on the same nameable fact.
+            if row.get("flag") == "red" and row.get("documentary"):
+                findings.append(
+                    _case_finding(
+                        prior_id=prior_id,
+                        prior_name=prior_name,
+                        field=str(row.get("key") or "fact"),
+                        new_value=str(row.get("this_display") or ""),
+                        prior_value=str(row.get("prior_display") or ""),
+                        title=(
+                            f"{row.get('severity_label')}: {row.get('label')} "
+                            f"does not match “{prior_name}”"
+                        ),
+                        explanation=(
+                            f"This file states “{row.get('this_quote')}” while "
+                            f"“{prior_name}” states “{row.get('prior_quote')}”. "
+                            f"Discrepancy: {row.get('discrepancy')}. {row.get('materiality')}"
+                        ),
+                        why=(
+                            "Same nameable fact with incompatible documentary values "
+                            "is a credibility interrupt — the packet's own exhibits undercut each other."
+                        ),
+                        confidence=float(row.get("confidence") or 78),
+                        severity=str(row.get("severity") or "high"),
+                        material=True,
+                        recommended_action=(
+                            f"Reconcile “{new_display_name}” with “{prior_name}” before "
+                            "relying on either exhibit."
+                        ),
+                    )
+                )
+                # Stamp credibility / documentary gates onto the finding evidence.
+                if findings and isinstance(findings[-1].evidence, dict):
+                    findings[-1].evidence.update(
+                        {
+                            "documentary": True,
+                            "analysis_type": "fact_conflict",
+                            "contradiction_type": "factual_contradiction",
+                            "case_impact": True,
+                            "case_impact_bucket": "credibility",
+                            "case_impact_rationale": (
+                                "Party's own documentary exhibits state incompatible values "
+                                "for the same nameable fact."
+                            ),
+                            "claim_quote": row.get("this_quote"),
+                            "evidence_quote": row.get("prior_quote"),
+                            "fact_named": row.get("label"),
+                        }
+                    )
+            # Other cross-document fact mismatches stay case-level via aggregate_fact_conflicts.
 
         # Exhibit-to-exhibit location split still matters; pleadings share many addresses.
         filing_involved = new_is_filing or prior_is_filing
@@ -358,24 +408,50 @@ def _discharged_mortgage_findings(
 
 
 def _internal_fact_conflicts(doc_name: str, facts: list[dict[str, Any]]) -> list[Finding]:
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    for fact in facts:
-        grouped.setdefault(fact["key"], []).append(fact)
+    """Flag incompatible values for the same nameable fact inside one binder/file."""
+    candidates = [
+        fact
+        for fact in facts
+        if fact.get("key") in GOTCHA_KEYS or fact.get("graph")
+    ]
     out: list[Finding] = []
-    for key, items in grouped.items():
-        if key not in GOTCHA_KEYS:
-            continue
-        unique = _unique_facts(items)
-        if len(unique) < 2:
-            continue
-        row = _score_pair(unique[0], unique[1], key)
-        if not row or not row.get("flag"):
-            continue
-        out.append(
-            _case_finding(
+    seen_pairs: set[tuple[str, str]] = set()
+    for i, left in enumerate(candidates):
+        for right in candidates[i + 1 :]:
+            if not same_nameable_fact(left, right):
+                continue
+            if facts_compatible(left, right):
+                continue
+            pair_token = tuple(
+                sorted([f"{left.get('key')}:{left.get('value')}", f"{right.get('key')}:{right.get('value')}"])
+            )
+            if pair_token in seen_pairs:
+                continue
+            seen_pairs.add(pair_token)
+            row = _score_graph_or_meta(left, right)
+            if not row or not row.get("flag"):
+                continue
+            evidence_extra = {
+                "case_consistency": True,
+                "analysis_type": "fact_conflict",
+                "contradiction_type": "factual_contradiction",
+                "documentary": True,
+                "graph": bool(left.get("graph") or right.get("graph")),
+                "case_impact": True,
+                "case_impact_bucket": "credibility",
+                "case_impact_rationale": (
+                    "Party's own documentary exhibits state incompatible values "
+                    "for the same nameable fact."
+                ),
+                "claim_quote": row["this_quote"],
+                "evidence_quote": row["prior_quote"],
+                "fact_named": row.get("label"),
+                "attorney_why": row.get("materiality"),
+            }
+            finding_obj = _case_finding(
                 prior_id=None,
                 prior_name=doc_name,
-                field=key,
+                field=str(row.get("key") or left.get("key")),
                 new_value=row["this_display"],
                 prior_value=row["prior_display"],
                 title=f"{row['severity_label']}: {row['label']} conflicts inside this document",
@@ -389,8 +465,42 @@ def _internal_fact_conflicts(doc_name: str, facts: list[dict[str, Any]]) -> list
                 material=row["flag"] == "red",
                 recommended_action="Reconcile the two figures in this filing before using either number.",
             )
-        )
+            if isinstance(finding_obj.evidence, dict):
+                finding_obj.evidence.update(evidence_extra)
+            out.append(finding_obj)
     return out
+
+
+def _score_graph_or_meta(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any] | None:
+    """Score a conflict; handles same-key meta pairs and cross-attribute graph rules."""
+    keys = {left.get("key"), right.get("key")}
+    if keys == {"employment_start", "employment_tax_year"}:
+        start = left if left.get("key") == "employment_start" else right
+        tax = right if left.get("key") == "employment_start" else left
+        label = "Employment tenure vs W-2 year"
+        discrepancy = f"hire/start {start.get('display')} vs W-2 year {tax.get('display')}"
+        materiality = (
+            "A W-2 for a tax year asserts wages that year; a later hire/start date "
+            "for the same person and employer cannot both be true."
+        )
+        row = _row(
+            start,
+            tax,
+            "employment_start",
+            label,
+            discrepancy,
+            materiality,
+            True,
+            False,
+            confidence=86,
+        )
+        row["documentary"] = True
+        return row
+    key = str(left.get("key") or right.get("key") or "")
+    row = _score_pair(left, right, key)
+    if row:
+        row["documentary"] = bool(left.get("documentary") or right.get("documentary") or left.get("graph"))
+    return row
 
 
 def _compare_facts(
@@ -400,28 +510,38 @@ def _compare_facts(
 ) -> list[dict[str, Any]]:
     del prior_name
     rows: list[dict[str, Any]] = []
-    prior_by_key: dict[str, list[dict[str, Any]]] = {}
-    for fact in prior_facts:
-        prior_by_key.setdefault(fact["key"], []).append(fact)
+    prior_candidates = [
+        fact
+        for fact in prior_facts
+        if fact.get("key") in GOTCHA_KEYS or fact.get("graph")
+    ]
     seen: set[str] = set()
     for fact in new_facts:
-        key = fact["key"]
-        if key not in GOTCHA_KEYS or key in seen:
+        key = fact.get("key")
+        if key not in GOTCHA_KEYS and not fact.get("graph"):
             continue
-        counterparts = prior_by_key.get(key) or []
+        ck = cluster_key(fact)
+        if ck in seen:
+            continue
+        counterparts = [other for other in prior_candidates if same_nameable_fact(fact, other)]
         if not counterparts:
             continue
-        seen.add(key)
+        seen.add(ck)
         best = None
         for other in _unique_facts(counterparts):
-            row = _score_pair(fact, other, key)
+            if facts_compatible(fact, other):
+                # Still record soft match rows for same-key dates that match
+                if fact.get("key") == other.get("key"):
+                    row = _score_graph_or_meta(fact, other)
+                    if row and best is None:
+                        best = row
+                continue
+            row = _score_graph_or_meta(fact, other)
             if row is None:
                 continue
             if best is None or (row.get("flag") == "red" and best.get("flag") != "red"):
                 best = row
             elif row.get("flag") and not best.get("flag"):
-                best = row
-            elif best is None:
                 best = row
         if best:
             rows.append(best)
@@ -452,6 +572,12 @@ def _score_pair(left: dict[str, Any], right: dict[str, Any], key: str) -> dict[s
         discrepancy = f"{delta:.3f} percentage points"
         materiality = f"Interest rate flags when it differs by more than {meta.get('abs', 0.1)} points."
         return _row(left, right, key, label, discrepancy, materiality, over, borderline, confidence=88 if over else 58)
+    if kind == "year":
+        if str(left.get("value")) == str(right.get("value")):
+            return _row(left, right, key, label, "same year", "Years match.", False, False, confidence=40)
+        discrepancy = f"{left.get('display')} vs {right.get('display')}"
+        materiality = f"{label} flags when the year differs for the same person/employer."
+        return _row(left, right, key, label, discrepancy, materiality, True, False, confidence=80)
     if kind == "date":
         if left.get("value") == right.get("value"):
             return _row(left, right, key, label, "same date", "Dates match.", False, False, confidence=40)
@@ -474,7 +600,15 @@ def _score_pair(left: dict[str, Any], right: dict[str, Any], key: str) -> dict[s
         materiality = (
             "Date flags when the month or year differs, or when a notice/foreclosure deadline day does not match."
         )
-        return _row(left, right, key, label, discrepancy, materiality, over, False, confidence=76 if over else 40)
+        row = _row(left, right, key, label, discrepancy, materiality, over, False, confidence=76 if over else 40)
+        if left.get("documentary") or right.get("graph") or left.get("graph"):
+            row["documentary"] = True
+            if over:
+                row["materiality"] = (
+                    "Same person/employer with incompatible employment dates in documentary "
+                    "exhibits is a credibility interrupt."
+                )
+        return row
     return None
 
 
@@ -662,23 +796,42 @@ def aggregate_fact_conflicts(snapshots: list[dict[str, Any]]) -> list[dict[str, 
         if _looks_like_complaint(name):
             complaint_crfns |= _crfns_in(snap.get("text_excerpt") or "")
 
+    # Soft-cluster same nameable facts (person-only merges with person|employer).
     by_key: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = {}
     for snap in snapshots:
         snap_crfns = _crfns_in(snap.get("text_excerpt") or "") if complaint_crfns else set()
         excluded_money = bool(complaint_crfns and snap_crfns and not (snap_crfns & complaint_crfns))
         for fact in snap.get("facts") or []:
             key = str(fact.get("key") or "")
-            if key not in GOTCHA_KEYS:
+            if key not in GOTCHA_KEYS and not fact.get("graph"):
                 continue
             if excluded_money and fact.get("kind") == "money":
                 continue
-            by_key.setdefault(key, []).append((snap, fact))
+            by_key.setdefault(cluster_key(fact), []).append((snap, fact))
+
+    cluster_ids = list(by_key.keys())
+    merged: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = {}
+    assigned: set[str] = set()
+    for i, ck in enumerate(cluster_ids):
+        if ck in assigned:
+            continue
+        bucket = list(by_key[ck])
+        assigned.add(ck)
+        sample = bucket[0][1]
+        for other_ck in cluster_ids[i + 1 :]:
+            if other_ck in assigned:
+                continue
+            other_sample = by_key[other_ck][0][1]
+            if same_nameable_fact(sample, other_sample):
+                bucket.extend(by_key[other_ck])
+                assigned.add(other_ck)
+        merged[ck] = bucket
 
     out: list[dict[str, Any]] = []
-    for key, pairs in by_key.items():
+    for ck, pairs in merged.items():
         variants: dict[str, dict[str, Any]] = {}
         for snap, fact in pairs:
-            token = str(fact.get("value"))
+            token = f"{fact.get('key')}:{fact.get('value')}"
             doc_id = snap.get("document_id")
             name = snap.get("display_name") or snap.get("original_filename") or "document"
             bucket = variants.setdefault(
@@ -699,9 +852,15 @@ def aggregate_fact_conflicts(snapshots: list[dict[str, Any]]) -> list[dict[str, 
         worst = "low"
         confidence = 70
         unique_facts = [bucket["fact"] for bucket in variants.values()]
+        key = str(unique_facts[0].get("key") or ck.split("::", 1)[0])
         for idx, left in enumerate(unique_facts):
             for right in unique_facts[idx + 1 :]:
-                row = _score_pair(left, right, key)
+                if not facts_compatible(left, right):
+                    row = _score_graph_or_meta(left, right)
+                elif left.get("key") == right.get("key"):
+                    row = _score_pair(left, right, key)
+                else:
+                    row = None
                 if row and row.get("flag"):
                     flagged = True
                     if row.get("severity") == "high":
@@ -710,7 +869,7 @@ def aggregate_fact_conflicts(snapshots: list[dict[str, Any]]) -> list[dict[str, 
         if not flagged:
             continue
         meta = FACT_META.get(key) or {}
-        label = str(meta.get("label") or key)
+        label = str(meta.get("label") or unique_facts[0].get("label") or key)
         related = []
         seen_docs: set[str] = set()
         for bucket in variants.values():
@@ -726,7 +885,7 @@ def aggregate_fact_conflicts(snapshots: list[dict[str, Any]]) -> list[dict[str, 
         ]
         out.append(
             {
-                "id": "fact-" + hashlib.sha1(key.encode("utf-8")).hexdigest()[:10],
+                "id": "fact-" + hashlib.sha1(ck.encode("utf-8")).hexdigest()[:10],
                 "title": f"{label} does not match across the case",
                 "gotcha_level": "Case fact conflict",
                 "contradiction_type": "factual_contradiction",
@@ -741,6 +900,10 @@ def aggregate_fact_conflicts(snapshots: list[dict[str, Any]]) -> list[dict[str, 
                     + "; ".join(variant_bits)
                     + ". Confirm which figure controls before relying on any filing."
                 ),
+                "case_impact": bool(unique_facts[0].get("documentary") or unique_facts[0].get("graph")),
+                "case_impact_bucket": "credibility"
+                if (unique_facts[0].get("documentary") or unique_facts[0].get("graph"))
+                else None,
                 "variants": [
                     {
                         "display": bucket["display"],
@@ -754,4 +917,5 @@ def aggregate_fact_conflicts(snapshots: list[dict[str, Any]]) -> list[dict[str, 
                 "display_name": related[0]["display_name"] if related else None,
             }
         )
+
     return out
