@@ -37,6 +37,11 @@ jobs:
         env:
           CASESIFTER_ANALYSIS_URL: ${{ vars.CASESIFTER_ANALYSIS_URL }}
           CASESIFTER_CONTROL_URL: ${{ vars.CASESIFTER_CONTROL_URL }}
+          # Real project DSN — bake into Vite UI + Electron main at pack time.
+          VITE_SENTRY_DSN: ${{ secrets.VITE_SENTRY_DSN }}
+          CASESIFTER_SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          VITE_SENTRY_ENVIRONMENT: production
+          CASESIFTER_SENTRY_ENV: production
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: npm run dist:win
 

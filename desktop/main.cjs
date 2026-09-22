@@ -6,13 +6,21 @@ const telemetry = require("./product_telemetry.cjs");
 const pkg = require("./package.json");
 
 function initSentry(cfg) {
-  const dsn = process.env.SENTRY_DSN || process.env.CASESIFTER_SENTRY_DSN;
+  const packaged = loadPackagedDefaults();
+  const dsn =
+    process.env.SENTRY_DSN ||
+    process.env.CASESIFTER_SENTRY_DSN ||
+    packaged.sentryDsn ||
+    "";
   if (!dsn) return;
   try {
     const Sentry = require("@sentry/electron/main");
     Sentry.init({
       dsn,
-      environment: process.env.CASESIFTER_SENTRY_ENV || "production",
+      environment:
+        process.env.CASESIFTER_SENTRY_ENV ||
+        packaged.sentryEnvironment ||
+        "production",
       release: `casesifter-desktop@${pkg.version}`,
       beforeSend(event) {
         const scrub = (v) => {
@@ -29,6 +37,7 @@ function initSentry(cfg) {
         return event;
       },
     });
+    Sentry.setTag("service", "casesifter-desktop");
     if (cfg.supportCode) Sentry.setUser({ id: cfg.supportCode });
   } catch {
     /* optional dependency */

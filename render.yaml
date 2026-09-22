@@ -24,6 +24,10 @@ services:
         value: "true"
       - key: OCR_MAX_PAGES
         value: "40"
+      - key: SENTRY_DSN
+        sync: false
+      - key: SENTRY_ENVIRONMENT
+        value: production
 
   - type: web
     name: casesifter-control

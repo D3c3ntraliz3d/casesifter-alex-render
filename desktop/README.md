@@ -53,11 +53,23 @@ npm ci
 # Optional overrides (otherwise prepare-ui writes Render placeholders):
 # $env:CASESIFTER_ANALYSIS_URL="https://your-analysis.onrender.com"
 # $env:CASESIFTER_CONTROL_URL="https://your-control.onrender.com"
+# Real Sentry DSN at pack time (UI + Electron main). Do not commit the value.
+# $env:VITE_SENTRY_DSN="https://…@o….ingest.sentry.io/…"
+# $env:CASESIFTER_SENTRY_DSN=$env:VITE_SENTRY_DSN
+# $env:VITE_SENTRY_ENVIRONMENT="production"
 
 npm run dist:win
 ```
 
 Output: `desktop/dist/CaseSifter-Setup-<version>.exe` (NSIS).
+
+### Sentry (pack + analysis API)
+
+- **Desktop UI**: set `VITE_SENTRY_DSN` when running `prepare-ui` / `dist:win` (GitHub Actions: `secrets.VITE_SENTRY_DSN`). Events tag `service=casesifter-ui`.
+- **Electron main**: same DSN via `CASESIFTER_SENTRY_DSN` / `packaged-defaults.json` `sentryDsn`. Tag `service=casesifter-desktop`.
+- **Analysis API**: set `SENTRY_DSN` on the Render service (`render.yaml` lists it as a sync secret). Tag `service=analysis-api`.
+
+No smoke-test throw remains in the tree — after end-to-end verification, production builds only report real errors.
 
 ### Release to the website
 
