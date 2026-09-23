@@ -75,6 +75,20 @@ FACT_META: dict[str, dict[str, Any]] = {
         "abs": 8000.0,
         "pct": 0.20,
     },
+    "presence_on_date": {
+        "label": "Presence / location on a date",
+        "kind": "presence",
+    },
+    "stated_principal": {
+        "label": "Stated principal",
+        "kind": "money",
+        "abs": 1000.0,
+        "pct": 0.005,
+    },
+    "sale_grantee": {
+        "label": "Sale / deed grantee",
+        "kind": "entity",
+    },
 }
 
 # Note rate vs default/penalty rate, remaining principal, and the installment

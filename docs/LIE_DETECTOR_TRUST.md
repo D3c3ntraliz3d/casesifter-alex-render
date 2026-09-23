@@ -93,16 +93,18 @@ Scan the real packet. Note green / no credibility fact-conflict cards.
 
 ### 2. Flip one grounded fact
 
-Pick a fact the OCR already sees (hire date, W-2 year, first-default date, fee amount, DOB, residence). In a **copy** of one exhibit or binder page:
+Pick a fact the OCR already sees (hire date, W-2 year, first-default date, fee amount, DOB, residence, presence-on-date, stated principal). In a **copy** of one exhibit or binder page:
 
 - Change only that value (e.g. employment start `March 2019` → `March 2022`), **or**  
-- Append a second documentary recital for the same person/employer with an incompatible value  
+- Append a second documentary recital for the same person/employer with an incompatible value, **or**
+- For presence plants: flip AOS personal-service place/date against a flight / conference / out-of-state bank spend for the same person+date
+- For principal plants: drop judgment principal below note principal while keeping arrears / no-payments language
 
 Keep person and employer the same. Do not invent a second employer (that is a clean twin, not a lie).
 
 ### 3. Re-scan the mutated copy
 
-Expect a **credibility** (or occupancy **element**) interrupt: same nameable fact, incompatible documentary values, both quotes present.
+Expect a **credibility** (or occupancy/service **element**, or **damages** for principal decline) interrupt: same nameable fact, incompatible documentary values, both quotes present.
 
 ### 4. Restore and confirm quiet again
 
@@ -118,6 +120,10 @@ Revert the mutation. Green should return. That cycle is the trust proof — not 
 | DOB conflict across party docs | Ship |
 | Primary residence vs license/tax address | Ship |
 | Stated income vs AGI (large divergence) | Ship |
+| AOS personal service vs flight / conference / out-of-state spend (same person+date) | Ship (element) |
+| Judgment principal drop vs note principal with arrears / no payments | Ship (damages) |
+| Distinct sale/deed grantee names (Highland vs IKJG) | Ship |
+| Highland vs Highland (same grantee; missing IKJG not invented) | Quiet |
 | Same person, **different** employers (near-miss) | Quiet |
 | Two recitals that **agree** | Quiet |
 | Seeded flip on an otherwise clean packet | Ship |
@@ -129,6 +135,28 @@ cd backend && python -m evals.run_gotcha_eval
 ```
 
 The `LIE DETECTOR` block must show `all_pass: true`.
+
+## Blind re-scan of a planted pack (no answer key)
+
+When an external tester drops a planted packet, re-score **blind**:
+
+1. Use only the documentary text files (`.txt` / PDF / images).  
+2. **Do not** open `plants.json`, `casesifter-report.json`, or any planted-ID key.  
+3. Headless CLI (one file at a time) or the analysis API:
+
+```bash
+cd backend
+# Prefer txt/PDF exhibits only — exclude plants.json and prior reports
+for f in /path/to/pack/*.txt; do
+  case "$f" in *plants.json*| *casesifter-report.json*) continue ;; esac
+  python -m app.scan_cli "$f" --doc-kind exhibit --json-out "/tmp/cs-$(basename "$f").json"
+done
+```
+
+4. Score recall against the tester’s sealed answer key **after** the run.  
+5. Misses that were never extracted as grounded facts → expand `fact_graph` attributes (presence-on-date, stated_principal, …). Do **not** loosen the four gates or add a free-form LLM lie hunt.
+
+Quiet on Highland-only / noise plants (P006/P007) is correct when there is no grounded AGAINST pair.
 
 ## Missed lie → fixture (not a new lie type)
 
@@ -142,7 +170,9 @@ When a human finds documentary BS the system missed:
 
 ## Suppress reminders (still out of scope)
 
-Loan-status movement (note vs default rate, remaining principal, installment after misses), caption/NYSCEF noise, OCR garbage, ordinary disputes, jurat-only spam, whole-page scan texture without a content hook, recorded-instrument math quirks.
+Loan-status movement (note vs default rate, remaining principal **increases**, installment after misses), caption/NYSCEF noise, OCR garbage, ordinary disputes, jurat-only spam, whole-page scan texture without a content hook, recorded-instrument math quirks.
+
+**Exception:** a **judgment/JFS principal that drops** below an earlier note/assignment principal while the packet asserts arrears / missed payments without payment history is **not** ordinary movement — ship under damages.
 
 ## Success criteria (product language)
 

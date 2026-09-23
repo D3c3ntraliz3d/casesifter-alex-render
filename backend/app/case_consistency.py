@@ -438,7 +438,7 @@ def _internal_fact_conflicts(doc_name: str, facts: list[dict[str, Any]]) -> list
                 "documentary": True,
                 "graph": bool(left.get("graph") or right.get("graph")),
                 "case_impact": True,
-                "case_impact_bucket": "credibility",
+                "case_impact_bucket": row.get("case_impact_bucket") or "credibility",
                 "case_impact_rationale": (
                     "Party's own documentary exhibits state incompatible values "
                     "for the same nameable fact."
@@ -568,9 +568,63 @@ def _score_pair(left: dict[str, Any], right: dict[str, Any], key: str) -> dict[s
                 "Stated income and tax AGI for the same person cannot both be operative when "
                 "they diverge this far — credibility interrupt on the financial story."
             )
+        if key == "stated_principal":
+            roles = {left.get("principal_role"), right.get("principal_role")}
+            if roles == {"note", "judgment"} and float(left["value"]) != float(right["value"]):
+                materiality = (
+                    "Judgment principal that is materially lower than the note/assignment "
+                    "principal while the packet asserts arrears / missed payments (no payment "
+                    "history) is a damages interrupt — not ordinary loan-status movement."
+                )
+                over = True
+                borderline = False
+                discrepancy = f"${delta:,.2f} principal decline ({pct:.1%})"
         row = _row(left, right, key, label, discrepancy, materiality, over, borderline, confidence=82 if over else 55)
         if key == "annual_income":
             row["documentary"] = True
+        if key == "stated_principal" and over:
+            row["documentary"] = True
+            row["case_impact_bucket"] = "damages"
+        return row
+    if kind == "presence":
+        from app.fact_graph import facts_compatible as _fc
+
+        if _fc(left, right):
+            return _row(
+                left,
+                right,
+                key,
+                label,
+                "compatible presence",
+                "Presence facts for this person/date are compatible.",
+                False,
+                False,
+                confidence=40,
+            )
+        discrepancy = f"{left.get('display')} vs {right.get('display')}"
+        statuses = {left.get("presence_status"), right.get("presence_status")}
+        materiality = (
+            "Same person cannot be personally served at a local address and be "
+            "out-of-state / in flight / at a remote conference on the same date — "
+            "credibility / service element interrupt."
+        )
+        bucket = "element" if "served_personally" in statuses else "credibility"
+        row = _row(left, right, key, label, discrepancy, materiality, True, False, confidence=88)
+        row["documentary"] = True
+        row["case_impact_bucket"] = bucket
+        return row
+    if kind == "entity":
+        lv = str(left.get("value") or "").strip().lower()
+        rv = str(right.get("value") or "").strip().lower()
+        if lv == rv:
+            return _row(left, right, key, label, "same entity", "Entities match.", False, False, confidence=40)
+        discrepancy = f"{left.get('display')} vs {right.get('display')}"
+        materiality = (
+            "Distinct grounded sale/deed grantee names across sale and deed papers "
+            "are a credibility interrupt. Identical Highland-vs-Highland naming is not."
+        )
+        row = _row(left, right, key, label, discrepancy, materiality, True, False, confidence=80)
+        row["documentary"] = True
         return row
     if kind == "rate":
         a, b = float(left["value"]), float(right["value"])
@@ -877,6 +931,7 @@ def aggregate_fact_conflicts(snapshots: list[dict[str, Any]]) -> list[dict[str, 
         flagged = False
         worst = "low"
         confidence = 70
+        impact_bucket = None
         unique_facts = [bucket["fact"] for bucket in variants.values()]
         key = str(unique_facts[0].get("key") or ck.split("::", 1)[0])
         for idx, left in enumerate(unique_facts):
@@ -889,6 +944,8 @@ def aggregate_fact_conflicts(snapshots: list[dict[str, Any]]) -> list[dict[str, 
                     row = None
                 if row and row.get("flag"):
                     flagged = True
+                    if row.get("case_impact_bucket"):
+                        impact_bucket = row.get("case_impact_bucket")
                     if row.get("severity") == "high":
                         worst = "high"
                         confidence = max(confidence, int(row.get("confidence") or 70))
@@ -909,6 +966,7 @@ def aggregate_fact_conflicts(snapshots: list[dict[str, Any]]) -> list[dict[str, 
             + ", ".join(f"“{doc['display_name']}”" for doc in bucket["documents"][:6])
             for bucket in variants.values()
         ]
+        documentary = bool(unique_facts[0].get("documentary") or unique_facts[0].get("graph"))
         out.append(
             {
                 "id": "fact-" + hashlib.sha1(ck.encode("utf-8")).hexdigest()[:10],
@@ -926,10 +984,8 @@ def aggregate_fact_conflicts(snapshots: list[dict[str, Any]]) -> list[dict[str, 
                     + "; ".join(variant_bits)
                     + ". Confirm which figure controls before relying on any filing."
                 ),
-                "case_impact": bool(unique_facts[0].get("documentary") or unique_facts[0].get("graph")),
-                "case_impact_bucket": "credibility"
-                if (unique_facts[0].get("documentary") or unique_facts[0].get("graph"))
-                else None,
+                "case_impact": documentary,
+                "case_impact_bucket": impact_bucket or ("credibility" if documentary else None),
                 "variants": [
                     {
                         "display": bucket["display"],

@@ -1234,10 +1234,17 @@ def evaluate_lie_detector() -> dict:
             ok = shipped if expect_tp else not shipped
 
         bucket_ok = True
-        if shipped and case.get("impact_bucket") and hits and hasattr(hits[0], "evidence"):
-            bucket_ok = (hits[0].evidence or {}).get("case_impact_bucket") == case["impact_bucket"] or (
-                hits[0].evidence or {}
-            ).get("case_impact") is True
+        if shipped and case.get("impact_bucket") and hits:
+            expected = case["impact_bucket"]
+            first = hits[0]
+            if hasattr(first, "evidence"):
+                bucket_ok = (first.evidence or {}).get("case_impact_bucket") == expected or (
+                    first.evidence or {}
+                ).get("case_impact") is True
+            elif isinstance(first, dict):
+                bucket_ok = first.get("case_impact_bucket") == expected or first.get("case_impact") is True
+            else:
+                bucket_ok = True
 
         rows.append(
             {

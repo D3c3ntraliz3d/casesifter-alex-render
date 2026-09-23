@@ -52,6 +52,26 @@ GRAPH_ATTRIBUTES: dict[str, dict[str, Any]] = {
         "abs": 8000.0,
         "pct": 0.20,
     },
+    "presence_on_date": {
+        "label": "Presence / location on a date",
+        "kind": "presence",
+        "documentary": True,
+        "impact": "credibility",
+    },
+    "stated_principal": {
+        "label": "Stated principal",
+        "kind": "money",
+        "documentary": True,
+        "impact": "damages",
+        "abs": 1000.0,
+        "pct": 0.005,
+    },
+    "sale_grantee": {
+        "label": "Sale / deed grantee",
+        "kind": "entity",
+        "documentary": True,
+        "impact": "credibility",
+    },
 }
 
 # Attribute keys that participate in gotcha-style case conflict aggregation.
@@ -239,6 +259,112 @@ INCOME_APPROX_ANNUAL_RE = re.compile(
     r"[^\n]{0,40}(?:≈|~|approximately|about|roughly)?\s*"
     r"(?:\$?\s*([\d,]{2,12})\s*k\b|\$?\s*([\d,]{2,12}(?:\.\d{2})?)\s*(?:per\s+year|/yr|annual))"
 )
+
+# Personal service AOS: On DATE … I served … upon NAME … personally … at place
+PERSONAL_SERVICE_DATE_LEAD_RE = re.compile(
+    rf"(?i)on\s+({DATE_TOKEN}),?\s+at\s+approximately\s+\d{{1,2}}:\d{{2}}\s*[ap]\.?m\.?,"
+    rf"\s+I\s+served\s+.{{0,100}}?upon\s+((?:[A-Z][A-Za-z'-]+\s+){{1,3}}[A-Z][A-Za-z'-]+)"
+    rf".{{0,180}}?personally"
+    rf".{{0,140}}?(?:at\s+)([0-9]{{1,6}}\s+[A-Za-z0-9 .,'-]{{3,80}})"
+)
+
+PERSONAL_SERVICE_SAME_DATE_RE = re.compile(
+    rf"(?i)I\s+served\s+(?:the\s+same\s+documents\s+)?upon\s+"
+    rf"([A-Z][A-Za-z .'-]{{2,60}}?)"
+    rf"\s+on\s+the\s+same\s+date,\s*({DATE_TOKEN})"
+    rf".{{0,140}}?personally"
+    rf".{{0,140}}?(?:at\s+)([0-9]{{1,6}}\s+[A-Za-z0-9 .,'-]{{3,80}})"
+)
+
+FLIGHT_DEPART_RE = re.compile(
+    rf"(?i)(?:departed|depart|flew)\s+from\s+"
+    rf"([A-Za-z][A-Za-z .'-]{{2,40}}?(?:Airport|Field))"
+    rf".{{0,120}}?on\s+({DATE_TOKEN})"
+)
+
+OUT_OF_STATE_RE = re.compile(
+    rf"(?i)out\s+of\s+state.{{0,120}}?on\s+({DATE_TOKEN})"
+    rf"|on\s+({DATE_TOKEN}).{{0,100}}?out\s+of\s+state"
+)
+
+CONFERENCE_RE = re.compile(
+    rf"(?i)(?:attended|attending)\s+(?:the\s+)?"
+    rf"([A-Za-z0-9 &'.,-]{{4,80}}?Conference)"
+    rf".{{0,120}}?from\s+({DATE_TOKEN})\s*(?:through|-|to|–|—)\s*({DATE_TOKEN})"
+)
+
+WIFE_TRAVELING_RE = re.compile(
+    rf"(?i)(?:my\s+wife|spouse),\s*([A-Z][a-z]+(?:\s+[A-Z][a-z']+){{0,2}})"
+    rf",?\s+was\s+also\s+traveling.{{0,80}}?to\s+([A-Za-z .'-]{{2,40}})"
+    rf".{{0,100}}?on\s+({DATE_TOKEN})"
+)
+
+BANK_SPEND_RE = re.compile(
+    rf"(?i)({DATE_TOKEN})\s*[-–—]\s*(?:Debit\s+Card|Purchase|POS)?"
+    rf"\s*[-–—]?\s*([A-Za-z0-9 &'.,-]{{3,70}})"
+    rf"\s*[-–—]\s*\$\s*[\d,]+\.\d{{2}}"
+)
+
+NOTE_PRINCIPAL_RE = re.compile(
+    r"(?i)(?:principal\s+amount|original\s+(?:loan\s+)?principal|principal\s+sum(?:\s+of)?)"
+    r"[^\d$]{0,24}\$?\s*([\d,]{3,12}(?:\.\d{2})?)"
+)
+
+JUDGMENT_PRINCIPAL_LINE_RE = re.compile(
+    r"(?i)(?:^|\n)\s*principal\s*:\s*\$?\s*([\d,]{3,12}(?:\.\d{2})?)"
+)
+
+ARREARS_HINT_RE = re.compile(
+    r"(?i)\b(arrears|missed\s+payments?|four\s+missed|default(?:ed)?\s+on|"
+    r"no\s+payments?\s+(?:were\s+)?(?:made|received))\b"
+)
+
+SALE_GRANTEE_RE = re.compile(
+    r"(?i)(?:successful\s+bidder\s+was|"
+    r"authorize\s+the\s+delivery\s+of\s+a\s+referee'?s?\s+deed\s+to|"
+    r"referee'?s?\s+deed\s+(?:delivered\s+)?to|"
+    r"deed\s+delivered\s+to)\s*"
+    r"((?:[A-Z][A-Za-z0-9&'.-]+(?:\s+[A-Z0-9][A-Za-z0-9&'.-]*){0,5})"
+    r"(?:\s+(?:LLC|Inc\.?|Corp\.?|L\.?P\.?|LLP))?)"
+)
+
+NYC_PLACE_TOKENS = frozenset(
+    {
+        "brooklyn",
+        "queens",
+        "manhattan",
+        "bronx",
+        "bedford",
+        "new york",
+        "nyc",
+        "hauppauge",
+        "long island",
+    }
+)
+REMOTE_PLACE_TOKENS = frozenset(
+    {
+        "chicago",
+        "illinois",
+        "out of state",
+        "california",
+        "san francisco",
+        "orlando",
+        "miami",
+        "dallas",
+        "houston",
+        "atlanta",
+        "las vegas",
+        "denver",
+        "seattle",
+        "boston",
+        "detroit",
+        "phoenix",
+    }
+)
+AIRPORT_DEPART_TOKENS = frozenset(
+    {"laguardia", "jfk", "kennedy", "newark", "lga", "ewr", "airport"}
+)
+
 
 
 def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
@@ -507,19 +633,368 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
         if _add(rec):
             return facts
 
+    # --- presence / personal service vs alibi (P001 / P002 / P008) ---
+    for match in PERSONAL_SERVICE_DATE_LEAD_RE.finditer(body):
+        parsed = _date(match.group(1))
+        person = _clean_served_name(match.group(2))
+        place = (match.group(3) or "").strip().rstrip(".,;")
+        if not parsed or not person or not place:
+            continue
+        rec = _presence_record(
+            person,
+            parsed["value"],
+            parsed.get("display") or parsed["value"],
+            place,
+            "served_personally",
+            match.group(0)[:220],
+            impact="element",
+        )
+        if _add(rec):
+            return facts
+
+    for match in PERSONAL_SERVICE_SAME_DATE_RE.finditer(body):
+        person = _clean_served_name(match.group(1))
+        parsed = _date(match.group(2))
+        place = (match.group(3) or "").strip().rstrip(".,;")
+        if not parsed or not person or not place:
+            continue
+        rec = _presence_record(
+            person,
+            parsed["value"],
+            parsed.get("display") or parsed["value"],
+            place,
+            "served_personally",
+            match.group(0)[:220],
+            impact="element",
+        )
+        if _add(rec):
+            return facts
+
+    for match in FLIGHT_DEPART_RE.finditer(body):
+        place = (match.group(1) or "").strip()
+        parsed = _date(match.group(2))
+        if not parsed or not place:
+            continue
+        window = body[max(0, match.start() - 400) : match.end() + 80]
+        person = _nearest_person(window) or _nearest_person(body[:400])
+        # Affidavit first-person: "I, Marcus Thompson"
+        if not person:
+            m_i = re.search(
+                r"(?i)\bI,\s*([A-Z][a-z]+(?:\s+[A-Z][a-z']+){1,2})\b",
+                body[: match.start()],
+            )
+            if m_i:
+                person = m_i.group(1)
+        rec = _presence_record(
+            person,
+            parsed["value"],
+            parsed.get("display") or parsed["value"],
+            place,
+            "departed_flight",
+            match.group(0)[:220],
+        )
+        if _add(rec):
+            return facts
+
+    for match in OUT_OF_STATE_RE.finditer(body):
+        raw_date = match.group(1) or match.group(2)
+        parsed = _date(raw_date) if raw_date else None
+        if not parsed:
+            continue
+        window = body[max(0, match.start() - 400) : match.end() + 40]
+        person = _nearest_person(window) or _nearest_person(body[:400])
+        if not person:
+            m_i = re.search(
+                r"(?i)\bI,\s*([A-Z][a-z]+(?:\s+[A-Z][a-z']+){1,2})\b",
+                body[: match.start()],
+            )
+            if m_i:
+                person = m_i.group(1)
+        rec = _presence_record(
+            person,
+            parsed["value"],
+            parsed.get("display") or parsed["value"],
+            "out of state",
+            "out_of_state",
+            match.group(0)[:220],
+        )
+        if _add(rec):
+            return facts
+
+    for match in CONFERENCE_RE.finditer(body):
+        conf = (match.group(1) or "").strip()
+        start_p = _date(match.group(2))
+        end_p = _date(match.group(3))
+        if not start_p:
+            continue
+        window = body[max(0, match.start() - 500) : match.end() + 80]
+        # Prefer named traveler in nearby wife/spouse or first person
+        person = None
+        wife = WIFE_TRAVELING_RE.search(window) or WIFE_TRAVELING_RE.search(body)
+        # Conference often attributed to the deponent; also Diane via wife clause
+        person = _nearest_person(window) or _nearest_person(body[:400])
+        place = conf
+        # Infer city from nearby "Chicago" etc.
+        city_m = re.search(
+            r"(?i)\b(Chicago|Illinois|Orlando|Miami|Dallas|Houston|Atlanta|"
+            r"Las Vegas|Denver|Seattle|Boston|Detroit|Phoenix)\b",
+            window,
+        )
+        if city_m:
+            place = f"{city_m.group(1)} ({conf})"
+        dates = [start_p]
+        if end_p and end_p.get("value") != start_p.get("value"):
+            dates.append(end_p)
+            # Also mid-range single-day: use start as the conflict day (service day)
+        for parsed in dates[:1]:
+            rec = _presence_record(
+                person,
+                parsed["value"],
+                parsed.get("display") or parsed["value"],
+                place,
+                "conference",
+                match.group(0)[:220],
+            )
+            if _add(rec):
+                return facts
+        # Explicit: for each day in range up to 4 days, stamp presence
+        if start_p and end_p:
+            try:
+                from datetime import datetime, timedelta
+
+                d0 = datetime.strptime(str(start_p["value"])[:10], "%Y-%m-%d").date()
+                d1 = datetime.strptime(str(end_p["value"])[:10], "%Y-%m-%d").date()
+                cur = d0
+                n = 0
+                while cur <= d1 and n < 5:
+                    if cur != d0:  # start already added
+                        rec = _presence_record(
+                            person,
+                            cur.isoformat(),
+                            cur.isoformat(),
+                            place,
+                            "conference",
+                            match.group(0)[:220],
+                        )
+                        if _add(rec):
+                            return facts
+                    cur = cur + timedelta(days=1)
+                    n += 1
+            except (ValueError, TypeError):
+                pass
+
+    for match in WIFE_TRAVELING_RE.finditer(body):
+        person = (match.group(1) or "").strip()
+        place = (match.group(2) or "").strip()
+        parsed = _date(match.group(3))
+        if not person or not place or not parsed:
+            continue
+        rec = _presence_record(
+            person,
+            parsed["value"],
+            parsed.get("display") or parsed["value"],
+            place,
+            "traveling",
+            match.group(0)[:220],
+        )
+        if _add(rec):
+            return facts
+
+    for match in BANK_SPEND_RE.finditer(body):
+        parsed = _date(match.group(1))
+        place = (match.group(2) or "").strip().rstrip(".,;")
+        if not parsed or not place:
+            continue
+        # Only keep spends that look remote (city/hotel), not local grocery noise
+        region = _presence_region(place, "bank_spend")
+        if region != "remote":
+            continue
+        window = body[max(0, match.start() - 500) : match.end()]
+        person = _nearest_person(window) or _nearest_person(body[:400])
+        if not person:
+            m_i = re.search(
+                r"(?i)\b(?:account\s+holder|cardholder|borrower)\s*:\s*"
+                r"([A-Z][a-z]+(?:\s+[A-Z][a-z']+){1,2})",
+                body,
+            )
+            if m_i:
+                person = m_i.group(1)
+            else:
+                m_i = re.search(
+                    r"(?i)\bI,\s*([A-Z][a-z]+(?:\s+[A-Z][a-z']+){1,2})\b",
+                    body[: match.start()] or body,
+                )
+                if m_i:
+                    person = m_i.group(1)
+        rec = _presence_record(
+            person,
+            parsed["value"],
+            parsed.get("display") or parsed["value"],
+            place,
+            "bank_spend",
+            match.group(0)[:220],
+        )
+        if _add(rec):
+            return facts
+
+    # --- principal decline (P003) ---
+    arrears = bool(ARREARS_HINT_RE.search(body))
+    for match in NOTE_PRINCIPAL_RE.finditer(body):
+        amount = _parse_money(match.group(1))
+        if amount is None or amount < 1000:
+            continue
+        # Skip judgment-style lines caught here
+        if re.search(r"(?i)judgment|total\s+amount\s+due", match.group(0)):
+            continue
+        rec = _graph_record(
+            "stated_principal",
+            round(amount, 2),
+            f"${amount:,.2f}",
+            match.group(0)[:220],
+            extra={
+                "principal_role": "note",
+                "arrears_context": arrears,
+            },
+        )
+        if _add(rec):
+            return facts
+
+    # Judgment principal: prefer line "Principal: $..." in a judgment / amount-due block
+    judgmentish = bool(
+        re.search(r"(?i)judgment\s+of\s+foreclosure|total\s+amount\s+due|amount\s+due\s+as\s+of", body)
+    )
+    for match in JUDGMENT_PRINCIPAL_LINE_RE.finditer(body):
+        amount = _parse_money(match.group(1))
+        if amount is None or amount < 1000:
+            continue
+        if not judgmentish and not arrears:
+            # Still allow if nearby block mentions judgment within 400 chars
+            near = body[max(0, match.start() - 400) : match.end() + 80]
+            if not re.search(r"(?i)judgment|amount\s+due|foreclosure", near):
+                continue
+        rec = _graph_record(
+            "stated_principal",
+            round(amount, 2),
+            f"${amount:,.2f}",
+            match.group(0)[:220],
+            extra={
+                "principal_role": "judgment",
+                "arrears_context": arrears or bool(
+                    ARREARS_HINT_RE.search(body[max(0, match.start() - 500) : match.end() + 200])
+                ),
+            },
+        )
+        if _add(rec):
+            return facts
+
+    # --- sale grantee (P006 only when distinct names) ---
+    for match in SALE_GRANTEE_RE.finditer(body):
+        name = (match.group(1) or "").strip().rstrip(".,;")
+        name = re.sub(r"\s+", " ", name)
+        if len(name) < 4:
+            continue
+        # Drop trailing "to vacate" / OSC chrome
+        if re.search(r"(?i)\b(vacate|order|court|plaintiff|defendant)\b", name):
+            continue
+        rec = _graph_record(
+            "sale_grantee",
+            _norm_name(name),
+            name,
+            match.group(0)[:220],
+            extra={"grantee_display": name},
+        )
+        if _add(rec):
+            return facts
+
     return facts
+
+
+def _clean_served_name(raw: str | None) -> str | None:
+    if not raw:
+        return None
+    name = re.sub(r"\s+", " ", raw).strip(" ,.")
+    # Trim trailing "by delivering" fragments if capture overran
+    name = re.split(r"(?i)\bby\b|\bwith\b|\bat\b", name)[0].strip(" ,.")
+    parts = name.split()
+    if len(parts) < 2 or len(parts) > 4:
+        return None
+    if any(p.lower() in PERSON_STOP for p in parts):
+        return None
+    # Title-case normalize ALL CAPS AOS names
+    return " ".join(p[:1].upper() + p[1:].lower() if p.isupper() else p for p in parts)
+
+
+def _presence_region(place: str, status: str) -> str:
+    low = (place or "").lower()
+    if status in {"departed_flight"} or any(tok in low for tok in AIRPORT_DEPART_TOKENS):
+        return "departed"
+    if status in {"out_of_state", "traveling", "conference", "bank_spend"} or any(
+        tok in low for tok in REMOTE_PLACE_TOKENS
+    ):
+        return "remote"
+    if status == "served_personally" or any(tok in low for tok in NYC_PLACE_TOKENS):
+        return "local_serve"
+    if any(tok in low for tok in NYC_PLACE_TOKENS):
+        return "local_serve"
+    return "other"
+
+
+def _presence_record(
+    person: str | None,
+    on_date: str,
+    date_display: str,
+    place: str,
+    status: str,
+    quote: str,
+    *,
+    impact: str | None = None,
+) -> dict[str, Any]:
+    region = _presence_region(place, status)
+    display = f"{person or 'person'} @ {place} on {date_display} ({status})"
+    value = f"{region}|{status}|{_norm_name(place)[:40]}"
+    extra = {
+        "on_date": str(on_date)[:10],
+        "place": place,
+        "presence_status": status,
+        "presence_region": region,
+        "impact": impact or GRAPH_ATTRIBUTES["presence_on_date"].get("impact"),
+    }
+    return _graph_record(
+        "presence_on_date",
+        value,
+        display,
+        quote,
+        person=person,
+        extra=extra,
+    )
 
 
 def cluster_key(fact: dict[str, Any]) -> str:
     """Same nameable fact identity for conflict clustering."""
     key = str(fact.get("key") or "")
     entity = _entity_key(fact)
+    if key == "presence_on_date":
+        on_date = str(fact.get("on_date") or "")[:10]
+        person = _norm_name(str(fact.get("person") or "")) or "_"
+        return f"{key}::{person}|{on_date}"
+    if key == "stated_principal":
+        return "stated_principal::loan"
+    if key == "sale_grantee":
+        return "sale_grantee::sale"
     if entity and entity != "_":
         return f"{key}::{entity}"
     return key
 
 
 def _entity_key(fact: dict[str, Any]) -> str:
+    if fact.get("key") == "presence_on_date":
+        person = _norm_name(str(fact.get("person") or ""))
+        on_date = str(fact.get("on_date") or "")[:10]
+        if person and on_date:
+            return f"{person}|{on_date}"
+        if person:
+            return person
+        return f"_|{on_date}" if on_date else "_"
     person = _norm_name(str(fact.get("person") or ""))
     employer = _norm_name(str(fact.get("employer") or ""))
     if person and employer:
@@ -537,6 +1012,20 @@ def entity_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:
     Person-only and person|employer records for the same person merge; conflicting
     employers or persons do not. Unscoped facts only merge with other unscoped facts.
     """
+    if left.get("key") == "presence_on_date" or right.get("key") == "presence_on_date":
+        if left.get("key") != right.get("key"):
+            return False
+        pa = _norm_name(str(left.get("person") or ""))
+        pb = _norm_name(str(right.get("person") or ""))
+        da = str(left.get("on_date") or "")[:10]
+        db = str(right.get("on_date") or "")[:10]
+        if not pa or not pb or pa != pb:
+            return False
+        return bool(da and db and da == db)
+    if left.get("key") == "stated_principal" and right.get("key") == "stated_principal":
+        return True
+    if left.get("key") == "sale_grantee" and right.get("key") == "sale_grantee":
+        return True
     pa = _norm_name(str(left.get("person") or ""))
     pb = _norm_name(str(right.get("person") or ""))
     ea = _norm_name(str(left.get("employer") or ""))
@@ -590,6 +1079,12 @@ def facts_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:
         return _addresses_compatible(left.get("value"), right.get("value"))
     if key == "annual_income":
         return _income_compatible(left, right)
+    if key == "presence_on_date":
+        return _presence_compatible(left, right)
+    if key == "stated_principal":
+        return _principal_compatible(left, right)
+    if key == "sale_grantee":
+        return _norm_name(str(left.get("value") or "")) == _norm_name(str(right.get("value") or ""))
     return str(left.get("value")) == str(right.get("value"))
 
 
@@ -649,6 +1144,64 @@ def _income_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:
     baseline = max(a, b, 1.0)
     meta = GRAPH_ATTRIBUTES.get("annual_income") or {}
     return not (delta > float(meta.get("abs") or 8000) or (delta / baseline) > float(meta.get("pct") or 0.20))
+
+
+def _presence_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    """False when same person+date cannot be both personally served locally and remote/departed."""
+    ra = str(left.get("presence_region") or "")
+    rb = str(right.get("presence_region") or "")
+    if not ra or not rb or ra == rb:
+        # Same region — still conflict local_serve vs departed (both may code differently)
+        sa = str(left.get("presence_status") or "")
+        sb = str(right.get("presence_status") or "")
+        if {sa, sb} == {"served_personally", "departed_flight"}:
+            return False
+        return True
+    conflict_pairs = {
+        frozenset({"local_serve", "remote"}),
+        frozenset({"local_serve", "departed"}),
+        frozenset({"departed", "remote"}),  # departed then remote is compatible; suppress
+    }
+    pair = frozenset({ra, rb})
+    if pair == frozenset({"departed", "remote"}):
+        return True  # flight + Chicago spend agree
+    if pair in conflict_pairs or pair == frozenset({"local_serve", "remote"}) or pair == frozenset(
+        {"local_serve", "departed"}
+    ):
+        return False
+    return True
+
+
+def _principal_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    """False when judgment principal is materially lower than note principal with arrears and no payments."""
+    try:
+        a = float(left.get("value"))
+        b = float(right.get("value"))
+    except (TypeError, ValueError):
+        return True
+    role_a = str(left.get("principal_role") or "")
+    role_b = str(right.get("principal_role") or "")
+    if role_a == role_b:
+        # Same role — ordinary money compare with thresholds
+        delta = abs(a - b)
+        baseline = max(a, b, 1.0)
+        meta = GRAPH_ATTRIBUTES.get("stated_principal") or {}
+        return not (delta > float(meta.get("abs") or 1000) or (delta / baseline) > float(meta.get("pct") or 0.005))
+    # note vs judgment: only interrupt on a *decline* into judgment with arrears context
+    if {role_a, role_b} != {"note", "judgment"}:
+        return True
+    note_v = a if role_a == "note" else b
+    judg_v = b if role_a == "note" else a
+    if judg_v >= note_v:
+        return True  # increase / same is ordinary loan movement — suppress
+    delta = note_v - judg_v
+    baseline = max(note_v, 1.0)
+    meta = GRAPH_ATTRIBUTES.get("stated_principal") or {}
+    material = delta > float(meta.get("abs") or 1000) or (delta / baseline) > float(meta.get("pct") or 0.005)
+    arrears = bool(left.get("arrears_context") or right.get("arrears_context"))
+    if material and arrears:
+        return False
+    return True
 
 
 def _parse_money(raw: str | None) -> float | None:

@@ -182,6 +182,131 @@
         }
       ],
       "notes": "Financial story BS — stated income vs tax AGI for the same person."
+    },
+    {
+      "id": "p001_aos_vs_flight_alibi",
+      "label": "tp",
+      "shape": "presence_on_date_service_vs_alibi",
+      "mode": "aggregate",
+      "must_ship": true,
+      "impact_bucket": "element",
+      "documents": [
+        {
+          "id": "aos",
+          "name": "Affidavit of service",
+          "text": "AFFIDAVIT OF SERVICE\nOn April 9, 2007, at approximately 10:15 a.m., I served the Summons and Complaint upon MARCUS THOMPSON by delivering a true copy of each personally at 1847 Bedford Avenue, Brooklyn, New York.\n"
+        },
+        {
+          "id": "aff",
+          "name": "Defendant affidavit and bank excerpt",
+          "text": "AFFIDAVIT OF MARCUS THOMPSON\nI, Marcus Thompson, state as follows:\nI departed from LaGuardia Airport on Delta Flight 1847 at 7:30 a.m. on April 9, 2007.\nI was out of state on April 9, 2007.\nApril 9, 2007 - Debit Card - Chicago Grand Hotel - $245.00\nAccount holder: Marcus Thompson\n"
+        }
+      ],
+      "notes": "P001 — personal service in Brooklyn vs flight/out-of-state/Chicago spend same date."
+    },
+    {
+      "id": "p002_diane_aos_vs_conference",
+      "label": "tp",
+      "shape": "presence_on_date_service_vs_alibi",
+      "mode": "aggregate",
+      "must_ship": true,
+      "impact_bucket": "element",
+      "documents": [
+        {
+          "id": "aos",
+          "name": "Affidavit of service Diane",
+          "text": "AFFIDAVIT OF SERVICE\nI served the same documents upon DIANE THOMPSON on the same date, April 9, 2007, by delivering copies personally at 1847 Bedford Avenue, Brooklyn, New York.\n"
+        },
+        {
+          "id": "aff",
+          "name": "Marcus affidavit re Diane travel",
+          "text": "AFFIDAVIT OF MARCUS THOMPSON\nI attended the National Real Estate Investment Conference from April 9, 2007 through April 11, 2007 in Chicago, Illinois.\nMy wife, Diane Thompson, was also traveling to Chicago on April 9, 2007.\n"
+        }
+      ],
+      "notes": "P002 — Diane personal service vs Chicago conference/travel same date."
+    },
+    {
+      "id": "p008_occupancy_alibi_vs_aos",
+      "label": "tp",
+      "shape": "presence_on_date_service_vs_alibi",
+      "mode": "aggregate",
+      "must_ship": true,
+      "impact_bucket": "element",
+      "documents": [
+        {
+          "id": "aos",
+          "name": "AOS Marcus personal service",
+          "text": "On April 9, 2007, at approximately 10:15 a.m., I served the Summons and Complaint upon MARCUS THOMPSON by delivering a true copy of each personally at 1847 Bedford Avenue, Brooklyn, New York.\n"
+        },
+        {
+          "id": "occ",
+          "name": "Occupancy affidavit with alibi",
+          "text": "I, Marcus Thompson, state that 1847 Bedford Avenue, Brooklyn is my primary residence.\nI departed from LaGuardia Airport on Delta Flight 1847 at 7:30 a.m. on April 9, 2007 and was out of state on April 9, 2007.\n"
+        }
+      ],
+      "notes": "P008 — residence alone does not contradict AOS; alibi/date presence vs personal service does."
+    },
+    {
+      "id": "p003_principal_decline_with_arrears",
+      "label": "tp",
+      "shape": "principal_decline_without_payments",
+      "mode": "aggregate",
+      "must_ship": true,
+      "impact_bucket": "damages",
+      "documents": [
+        {
+          "id": "note",
+          "name": "Note / assignment principal",
+          "text": "Note principal amount $485,000.00.\nBorrower is in arrears with four missed payments. No payments were made after default.\n"
+        },
+        {
+          "id": "jfs",
+          "name": "Judgment of foreclosure",
+          "text": "JUDGMENT OF FORECLOSURE\nTotal amount due as of May 1, 2008:\nPrincipal: $478,500.00\nInterest: $12,000.00\nBorrower remains in arrears.\n"
+        }
+      ],
+      "notes": "P003 — judgment principal drop vs note principal with arrears / no payments is not ordinary loan-status movement."
+    },
+    {
+      "id": "p006_highland_same_grantee_quiet",
+      "label": "fp",
+      "shape": "sale_grantee_same_name",
+      "mode": "aggregate",
+      "must_suppress": true,
+      "documents": [
+        {
+          "id": "sale",
+          "name": "Sale report",
+          "text": "The successful bidder was Highland Capital LLC.\n"
+        },
+        {
+          "id": "osc",
+          "name": "Order to show cause",
+          "text": "Authorize the delivery of a referee's deed to Highland Capital LLC.\n"
+        }
+      ],
+      "notes": "P006 — Highland vs Highland is not AGAINST; do not invent missing IKJG."
+    },
+    {
+      "id": "p006_distinct_grantee_conflict",
+      "label": "tp",
+      "shape": "sale_grantee_distinct_names",
+      "mode": "aggregate",
+      "must_ship": true,
+      "impact_bucket": "credibility",
+      "documents": [
+        {
+          "id": "sale",
+          "name": "Sale report",
+          "text": "The successful bidder was Highland Capital LLC.\n"
+        },
+        {
+          "id": "deed",
+          "name": "Referee deed / vacate papers",
+          "text": "Authorize the delivery of a referee's deed to IKJG Holdings LLC.\n"
+        }
+      ],
+      "notes": "Only ship when two distinct grounded grantee names appear."
     }
   ]
 }
