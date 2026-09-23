@@ -4,6 +4,40 @@ CaseSifter is an **attorney lie detector**: it surfaces documentary inconsistenc
 
 Quiet means: under the gates, the packet’s own papers do not assert the same nameable fact two incompatible ways. It does **not** mean every narrative inference was checked.
 
+## What this is not (explicit non-goals)
+
+CaseSifter does **not** ship:
+
+- Ocular / voice / heart-rate “AI polygraphs” (EyeDetect-class tools)
+- Linguistic deception scores (pronoun drop, cognitive-complexity, DeBERTa-on-fibbing datasets) as case-impact interrupts
+- Free-form LLM passes that ask “list every deceptive sentence”
+- Advocacy pairing of competing briefs (he-said-she-said)
+
+Those products optimize for suspicion or anxiety, not attorney-winning documentary contradiction. Do not add them.
+
+## AI engines (how models are used)
+
+| Lane | Engine | Role |
+|---|---|---|
+| Multimodal exhibit forensics | **Gemini** (`gemini-3.6-flash`) | Native PDF/image + text for alteration / historical chrome |
+| Gotcha verify | **Claude** when `ANTHROPIC_API_KEY` set (`GOTCHA_VERIFY_PROVIDER=auto`), else Gemini | Judges **already-proposed** claim/evidence pairs only |
+| Extraction / clustering | Deterministic fact graph + regex bootstrap | Names attributes; invents no soft “lies” |
+
+Claude is a **gated verifier**, not a lie oracle. Candidates are proposed first; `hard_veto_step` + four gates (same fact / against / material / quotes) + case-impact judge contain noise. Setting the Anthropic key does **not** open a second free-form suspicion firehose.
+
+Ops: on Render analysis, set `ANTHROPIC_API_KEY` (sync secret) and leave `GOTCHA_VERIFY_PROVIDER=auto`. Leave Gemini keys for multimodal.
+
+## Primary roadmap (not LLM shopping)
+
+Best forward path remains:
+
+1. Expand **grounded same-fact extraction** for attorney-winning attributes (identity, occupancy, income, later presence-on-date, …)
+2. Keep **hard gates** + case-impact allowlist
+3. Optionally improve verify judgment with Claude
+4. Grow planted-BS evals — not foundation-model shopping
+
+Tester misses that were never extracted as facts will not be fixed by swapping verifiers.
+
 ## What the attorney should hear
 
 Ship only when all four hold:
@@ -32,6 +66,7 @@ Silence is expected on most real packets. Trust that silence when seeded flips s
 - Advocacy / he-said-she-said between competing briefs was scored  
 - Shared topic, caption, or party list was treated as a conflict  
 - A specialty detector was invented per lie motif  
+- Physiological or linguistic “deception probability” was scored  
 
 Employment, DOB, residence, and income conflicts are **instances** of “same person, incompatible documentary values,” not separate products.
 
@@ -41,11 +76,12 @@ Employment, DOB, residence, and income conflicts are **instances** of “same pe
 OCR text → grounded facts (who / attribute / value / quote)
         → cluster same nameable fact
         → incompatible value pairs
-        → materiality four gates
-        → case-impact interrupt (or stay quiet)
+        → (optional) LLM four-gate verify on proposed pairs
+        → materiality / case-impact
+        → interrupt (or stay quiet)
 ```
 
-Regex/bootstrap extractors name **attributes**. The consistency engine decides when two values cannot both be true. Prefer extending grounded extraction over growing a lie-type enum.
+Regex/bootstrap extractors name **attributes**. The consistency engine decides when two values cannot both be true. Prefer extending grounded extraction over growing a lie-type enum or swapping foundation models.
 
 ## How to seed-test a real case
 
@@ -57,7 +93,7 @@ Scan the real packet. Note green / no credibility fact-conflict cards.
 
 ### 2. Flip one grounded fact
 
-Pick a fact the OCR already sees (hire date, W-2 year, first-default date, fee amount). In a **copy** of one exhibit or binder page:
+Pick a fact the OCR already sees (hire date, W-2 year, first-default date, fee amount, DOB, residence). In a **copy** of one exhibit or binder page:
 
 - Change only that value (e.g. employment start `March 2019` → `March 2022`), **or**  
 - Append a second documentary recital for the same person/employer with an incompatible value  
@@ -66,7 +102,7 @@ Keep person and employer the same. Do not invent a second employer (that is a cl
 
 ### 3. Re-scan the mutated copy
 
-Expect a **credibility** interrupt: same nameable fact, incompatible documentary values, both quotes present.
+Expect a **credibility** (or occupancy **element**) interrupt: same nameable fact, incompatible documentary values, both quotes present.
 
 ### 4. Restore and confirm quiet again
 
@@ -79,6 +115,9 @@ Revert the mutation. Green should return. That cycle is the trust proof — not 
 | Same person/employer, two hire dates (Summers-style binder) | Ship |
 | Paystub hire date after W-2 tax year, same employer | Ship |
 | Fee / first-default date conflict across docs | Ship |
+| DOB conflict across party docs | Ship |
+| Primary residence vs license/tax address | Ship |
+| Stated income vs AGI (large divergence) | Ship |
 | Same person, **different** employers (near-miss) | Quiet |
 | Two recitals that **agree** | Quiet |
 | Seeded flip on an otherwise clean packet | Ship |
@@ -99,6 +138,7 @@ When a human finds documentary BS the system missed:
 2. Add a planted case under `fixtures/lie_detector/` with `must_ship: true`  
 3. Fix the **engine** (grounding, clustering, compatibility) — do **not** add `if employment… if HOA…` specialty branches unless you are naming a new extractable **attribute**  
 4. Add a clean twin that must stay quiet  
+5. Do **not** “fix” by adding linguistic deception scores or a free-form LLM lie hunt  
 
 ## Suppress reminders (still out of scope)
 
@@ -109,4 +149,4 @@ Loan-status movement (note vs default rate, remaining principal, installment aft
 - Novel planted BS that fits “same nameable fact / incompatible documentary values / material” is caught **without** a new hardcoded lie type for that story  
 - Summers and paystub-vs-W-2 pass as instances of that rule  
 - Real cases may stay green when seeded flips still interrupt  
-- CaseSifter finds **documentary BS in the story**, not “we listed every fraud motif”
+- CaseSifter finds **documentary BS in the story**, not “we listed every fraud motif” and not “an AI polygraph scored the witness”

@@ -1,4 +1,10 @@
-"""Gotcha verify providers: claude (default hypothesis), gemini, openai. Hard vetoes stay in gotcha.py."""
+"""Gotcha verify providers: claude (default when keyed), gemini, openai.
+
+Hard vetoes and the four gates stay in gotcha.py. This module only judges
+*already-proposed* candidates — it is not a free-form deception / linguistics
+pass and must not be used as one. GOTCHA_VERIFY_PROVIDER=auto picks Claude when
+ANTHROPIC_API_KEY is set; Gemini remains the multimodal forensics engine.
+"""
 
 from __future__ import annotations
 

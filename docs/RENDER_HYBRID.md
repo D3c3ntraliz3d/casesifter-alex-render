@@ -12,10 +12,16 @@ Ephemeral analysis API and Stripe control plane. **No customer document vault.**
   - `EPHEMERAL_JOBS=true`
   - `EPHEMERAL_TTL_HOURS=6`
   - `ANALYSIS_API_KEYS=` (optional comma-separated)
-  - `GEMINI_API_KEY`, `GEMINI_MODEL`, `CONTEXTUAL_MULTIMODAL`
+  - `GEMINI_API_KEY`, `GEMINI_MODEL=gemini-3.6-flash`, `CONTEXTUAL_MULTIMODAL=true` — multimodal exhibit forensics
+  - `GOTCHA_VERIFY_PROVIDER=auto` — Claude verifies gated gotcha candidates when key set; else Gemini
+  - `ANTHROPIC_API_KEY` (optional sync secret) — set this to enable Claude as the gotcha verifier
+  - `CLAUDE_MODEL=claude-sonnet-4-5-20250929`
   - `ENTITLEMENT_MODE=open` for internal ops, or require API keys in production
+  - `SENTRY_DSN` (optional)
 
 Scratch disk only if needed for in-flight jobs; do not treat it as permanent case storage.
+
+**AI split (do not confuse with consumer “lie detectors”):** Gemini reads native PDF/images for alteration/historical chrome. Claude (when keyed) only **judges already-proposed claim/evidence pairs** behind hard vetoes and four gates — it does not open a free-form deception pass.
 
 ### control (Python from `control_plane/`)
 
