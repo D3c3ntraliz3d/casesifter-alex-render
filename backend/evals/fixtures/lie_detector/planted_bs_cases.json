@@ -307,6 +307,111 @@
         }
       ],
       "notes": "Only ship when two distinct grounded grantee names appear."
+    },
+    {
+      "id": "p0_aos_vs_boarding_pass_alibi",
+      "label": "tp",
+      "shape": "presence_on_date_service_vs_alibi",
+      "mode": "aggregate",
+      "must_ship": true,
+      "impact_bucket": "element",
+      "documents": [
+        {
+          "id": "aos",
+          "name": "Affidavit of service",
+          "text": "AFFIDAVIT OF SERVICE\nOn March 12, 2016, at approximately 2:15 p.m., I served the Summons upon ROBERT VALDEZ by delivering a true copy personally at 88 Pine Street, Brooklyn, New York.\n"
+        },
+        {
+          "id": "board",
+          "name": "Defendant affidavit + boarding pass",
+          "text": "AFFIDAVIT OF ROBERT VALDEZ\nI, Robert Valdez, state:\nBoarding pass Delta Flight DL441 passenger: Robert Valdez from LaGuardia Airport on March 12, 2016.\nI departed from LaGuardia Airport on Delta Flight DL441 on March 12, 2016.\n"
+        }
+      ],
+      "notes": "Live P0#1 — personal service vs same-day boarding pass / flight alibi (foreclosure-shaped)."
+    },
+    {
+      "id": "p0_aos_vs_server_daily_log",
+      "label": "tp",
+      "shape": "service_attempt_aos_vs_log",
+      "mode": "aggregate",
+      "must_ship": true,
+      "impact_bucket": "credibility",
+      "documents": [
+        {
+          "id": "aos",
+          "name": "Affidavit of service",
+          "text": "AFFIDAVIT OF SERVICE\nI, James Porter, being duly sworn, state:\nOn June 3, 2016, at approximately 2:15 p.m., I served the Summons upon Maria Lopez by delivering a true copy of each personally at 220 Oak Avenue, Brooklyn, New York.\n"
+        },
+        {
+          "id": "log",
+          "name": "Process server daily log",
+          "text": "PROCESS SERVER DAILY LOG\nI, James Porter, a process server\nDaily log for June 3, 2016\n9:30 a.m. — nail-and-mail at 220 Oak Avenue, Brooklyn, New York\n2:30 p.m. — attempted at 415 Court Street, Brooklyn, New York\n"
+        }
+      ],
+      "notes": "Live P0#2 — sworn personal service vs server's own daily log (nail-mail + different address near claimed time)."
+    },
+    {
+      "id": "p0_same_date_balance_collision",
+      "label": "tp",
+      "shape": "balance_on_date_collision",
+      "mode": "aggregate",
+      "must_ship": true,
+      "impact_bucket": "damages",
+      "documents": [
+        {
+          "id": "notice",
+          "name": "Default notice",
+          "text": "Default notice. Outstanding balance $398,450.00 as of January 18, 2023.\n"
+        },
+        {
+          "id": "judgment",
+          "name": "Judgment affidavit",
+          "text": "Judgment affidavit. Amount due $412,680.00 as of January 18, 2023.\n"
+        }
+      ],
+      "notes": "Live P0#3 — two incompatible balances on the same named date."
+    },
+    {
+      "id": "p0_servicer_vs_bank_payment_dates",
+      "label": "tp",
+      "shape": "loan_payment_date_reconciliation",
+      "mode": "aggregate",
+      "must_ship": true,
+      "impact_bucket": "credibility",
+      "documents": [
+        {
+          "id": "servicer",
+          "name": "Plaintiff payment history affirmation",
+          "text": "Plaintiff affirms trial payments were received December 5, 2022 and January 8, 2023.\n"
+        },
+        {
+          "id": "bank",
+          "name": "Borrower bank statement",
+          "text": "BANK STATEMENT\nDecember 1, 2022 - ACH Mortgage Payment - $2,450.00\nJanuary 2, 2023 - ACH Mortgage Payment - $2,450.00\nFebruary 1, 2023 - ACH Mortgage Payment - $2,450.00\n"
+        }
+      ],
+      "notes": "Live P0#4 — servicer credited dates vs bank debit dates for the same payment cycle."
+    },
+    {
+      "id": "p0_employer_service_narrative_collision",
+      "label": "tp",
+      "shape": "employer_of_record_collision",
+      "mode": "aggregate",
+      "must_ship": true,
+      "impact_bucket": "credibility",
+      "documents": [
+        {
+          "id": "aos",
+          "name": "Affidavit of service",
+          "text": "AFFIDAVIT OF SERVICE\nOn May 1, 2016 I served Juan Rivera. Defendant stated he was on way to Brooklyn Medical Center.\n"
+        },
+        {
+          "id": "emp",
+          "name": "Deposition + employment verification",
+          "text": "DEPOSITION OF JUAN RIVERA\nEmployee: Juan Rivera\nEmployer: Presbyterian Hospital\n"
+        }
+      ],
+      "notes": "Live P0#5 — named employer on service narrative vs employment verification for same person."
     }
   ]
 }

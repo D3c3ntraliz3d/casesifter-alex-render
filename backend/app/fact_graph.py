@@ -72,6 +72,32 @@ GRAPH_ATTRIBUTES: dict[str, dict[str, Any]] = {
         "documentary": True,
         "impact": "credibility",
     },
+    "service_attempt": {
+        "label": "Process-server service attempt",
+        "kind": "service_attempt",
+        "documentary": True,
+        "impact": "credibility",
+    },
+    "balance_on_date": {
+        "label": "Balance on a named date",
+        "kind": "money_on_date",
+        "documentary": True,
+        "impact": "damages",
+        "abs": 1000.0,
+        "pct": 0.005,
+    },
+    "loan_payment_date": {
+        "label": "Loan payment date (servicer vs bank)",
+        "kind": "payment_date",
+        "documentary": True,
+        "impact": "credibility",
+    },
+    "employer_of_record": {
+        "label": "Employer of record",
+        "kind": "entity",
+        "documentary": True,
+        "impact": "credibility",
+    },
 }
 
 # Attribute keys that participate in gotcha-style case conflict aggregation.
@@ -365,6 +391,96 @@ AIRPORT_DEPART_TOKENS = frozenset(
     {"laguardia", "jfk", "kennedy", "newark", "lga", "ewr", "airport"}
 )
 
+
+
+BOARDING_PASS_RE = re.compile(
+    rf"(?i)boarding\s+pass.{{0,200}}?"
+    rf"from\s+((?:[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){{0,3}}\s+)?Airport)"
+    rf".{{0,40}}?on\s+({DATE_TOKEN})"
+)
+
+# Process server daily log / AOS method
+NAIL_MAIL_RE = re.compile(
+    rf"(?i)(?:nail[- ]and[- ]mail|nailed\s+(?:and\s+)?mail(?:ed)?|"
+    rf"affixed\s+(?:a\s+copy|the\s+summons).{{0,40}}?mail)"
+    rf".{{0,100}}?(?:at\s+)?(?:approximately\s+)?"
+    rf"(?:(\d{{1,2}}:\d{{2}}\s*[ap]\.?m\.?)|"
+    rf"on\s+({DATE_TOKEN}))"
+    rf".{{0,120}}?(?:at\s+)?([0-9]{{1,6}}\s+[A-Za-z0-9 .,'-]{{3,80}})?"
+)
+
+SERVICE_PERSONAL_TIME_RE = re.compile(
+    rf"(?i)(?:on\s+({DATE_TOKEN}))?.{{0,40}}?"
+    rf"(?:at\s+(?:approximately\s+)?)?(\d{{1,2}}:\d{{2}}\s*[ap]\.?m\.?)"
+    rf".{{0,80}}?(?:I\s+)?(?:served|effected\s+personal\s+service).{{0,80}}?"
+    rf"(?:upon\s+)?((?:[A-Z][A-Za-z'-]+\s+){{1,3}}[A-Z][A-Za-z'-]+)?"
+    rf".{{0,120}}?personally.{{0,100}}?(?:at\s+)([0-9]{{1,6}}\s+[A-Za-z0-9 .,'-]{{3,80}})"
+)
+
+SERVER_LOG_LINE_RE = re.compile(
+    rf"(?i)(?:^|\n)\s*(?:[-*•]\s*)?(?:({DATE_TOKEN})\s+)?"
+    rf"(\d{{1,2}}:\d{{2}}\s*[ap]\.?m\.?)\s*[-–—:]?\s*"
+    rf"(personal(?:ly)?(?:\s+service)?|nail[- ]and[- ]mail|attempt(?:ed)?|"
+    rf"no\s+answer|posted|mailed)"
+    rf".{{0,40}}?at\s+([0-9]{{1,6}}\s+[A-Za-z0-9 .,'-]{{3,70}})"
+)
+
+PROCESS_SERVER_NAME_RE = re.compile(
+    r"(?i)\bI,\s*((?:[A-Z][a-z]+(?:\s+[A-Z][a-z'.]+){1,3})),"
+    r"\s*(?:being\s+duly\s+sworn|a\s+process\s+server|state)"
+)
+
+# Balance as of / outstanding on a named date
+BALANCE_ON_DATE_RE = re.compile(
+    rf"(?i)(?:(?:outstanding|unpaid|principal)?\s*balance|amount\s+due|total\s+due|"
+    rf"sum\s+due|indebtedness)"
+    rf"[^\d$]{{0,40}}\$?\s*([\d,]{{3,12}}(?:\.\d{{2}})?)"
+    rf".{{0,60}}?(?:as\s+of|on|dated)\s+({DATE_TOKEN})"
+    rf"|(?:as\s+of|on)\s+({DATE_TOKEN})"
+    rf"[^\d$]{{0,40}}(?:(?:outstanding|unpaid|principal)?\s*balance|amount\s+due)"
+    rf"[^\d$]{{0,24}}\$?\s*([\d,]{{3,12}}(?:\.\d{{2}})?)"
+)
+
+# Frozen principal across months still "as of" earlier date restated later
+BALANCE_AS_OF_RE = re.compile(
+    rf"(?i)(?:principal\s+(?:balance\s+)?(?:remains|was|is)|balance\s+(?:remains|was|is))"
+    rf"[^\d$]{{0,24}}\$?\s*([\d,]{{3,12}}(?:\.\d{{2}})?)"
+    rf".{{0,80}}?(?:as\s+of|on)\s+({DATE_TOKEN})"
+)
+
+# Servicer: payments received / credited on dates
+SERVICER_PAYMENT_RE = re.compile(
+    rf"(?i)(?:(?:trial\s+)?payments?\s+(?:were\s+)?(?:received|credited|posted|made)|"
+    rf"received\s+(?:trial\s+)?payments?)"
+    rf".{{0,120}}?({DATE_TOKEN})(?:\s*(?:,|and|&)\s*({DATE_TOKEN}))?"
+)
+
+SERVICER_PAYMENT_LINE_RE = re.compile(
+    rf"(?i)(?:payment\s+(?:received|credited|posted)|credited)\s*"
+    rf"(?:on\s+)?({DATE_TOKEN})"
+    rf"(?:[^\d$]{{0,40}}\$?\s*([\d,]{{2,12}}(?:\.\d{{2}})?))?"
+)
+
+BANK_DEBIT_RE = re.compile(
+    rf"(?i)({DATE_TOKEN})\s*[-–—]\s*"
+    rf"(?:ACH|Debit|Withdrawal|Auto[- ]Pay|Mortgage\s+Payment|Payment)?"
+    rf"[^\n]{{0,40}}?(?:mortgage|loan|servicer|payment)?"
+    rf"[^\n]{{0,40}}\$\s*([\d,]+\.\d{{2}})"
+)
+
+# "on (my )?way to EMPLOYER" on AOS narrative
+WAY_TO_EMPLOYER_RE = re.compile(
+    r"(?i)(?:on\s+(?:my\s+)?way\s+to|employed\s+at|works?\s+at|works?\s+for|"
+    r"place\s+of\s+employment)\s+"
+    r"((?:[A-Z][A-Za-z0-9&'.-]+(?:\s+[A-Z0-9][A-Za-z0-9&'.-]*){0,5})"
+    r"(?:\s+(?:Hospital|Center|Medical|Clinic|Corp|LLC|Inc))?)"
+)
+
+EMPLOYER_VERIFICATION_RE = re.compile(
+    r"(?i)employer\s*(?:name)?\s*:\s*"
+    r"((?:[A-Z][A-Za-z0-9&'.-]+(?:[ \t]+[A-Z0-9][A-Za-z0-9&'.-]*){0,5})"
+    r"(?:[ \t]+(?:Hospital|Center|Medical|Clinic|Corp|LLC|Inc))?)"
+)
 
 
 def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
@@ -906,6 +1022,301 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
         if _add(rec):
             return facts
 
+    # --- boarding pass (supports P0#1 alibi) ---
+    for match in BOARDING_PASS_RE.finditer(body):
+        place = (match.group(1) or match.group(4) or "").strip()
+        raw_date = match.group(2) or match.group(3)
+        parsed = _date(raw_date) if raw_date else None
+        if not parsed:
+            continue
+        if not place:
+            place = "boarding pass destination"
+        window = body[max(0, match.start() - 400) : match.end() + 40]
+        person = _nearest_person(window) or _nearest_person(body[:400])
+        if not person:
+            m_i = re.search(
+                r"(?i)\b(?:passenger|name)\s*:\s*((?:[A-Z][a-z]+(?:\s+[A-Z][a-z']+){1,2}))",
+                window,
+            )
+            if m_i:
+                person = m_i.group(1)
+        rec = _presence_record(
+            person,
+            parsed["value"],
+            parsed.get("display") or parsed["value"],
+            place,
+            "boarding_pass",
+            match.group(0)[:220],
+        )
+        if _add(rec):
+            return facts
+
+    # --- process server service_attempt (P0#2) ---
+    server_name = None
+    m_server = PROCESS_SERVER_NAME_RE.search(body)
+    if m_server:
+        server_name = m_server.group(1).strip()
+    if not server_name and re.search(r"(?i)affidavit\s+of\s+service|process\s+server|daily\s+log", body[:240]):
+        m_top = re.search(
+            r"(?i)\bI,\s*((?:[A-Z][a-z]+(?:\s+[A-Z][a-z'.]+){1,3}))\b",
+            body[:400],
+        )
+        if m_top:
+            server_name = m_top.group(1).strip()
+
+    for match in SERVICE_PERSONAL_TIME_RE.finditer(body):
+        parsed = _date(match.group(1)) if match.group(1) else None
+        if not parsed:
+            before = body[max(0, match.start() - 200) : match.start()]
+            dm = re.search(rf"(?i)({DATE_TOKEN})", before)
+            parsed = _date(dm.group(1)) if dm else None
+        time_s = (match.group(2) or "").strip().lower()
+        place = (match.group(4) or "").strip().rstrip(".,;")
+        if not parsed or not place:
+            continue
+        rec = _service_attempt_record(
+            server_name,
+            parsed["value"],
+            parsed.get("display") or parsed["value"],
+            time_s,
+            place,
+            "personal",
+            match.group(0)[:220],
+        )
+        if _add(rec):
+            return facts
+
+    for match in NAIL_MAIL_RE.finditer(body):
+        time_s = (match.group(1) or "").strip().lower()
+        parsed = _date(match.group(2)) if match.group(2) else None
+        place = ""
+        if match.lastindex and match.lastindex >= 3 and match.group(3):
+            place = match.group(3).strip().rstrip(".,;")
+        if not parsed:
+            before = body[max(0, match.start() - 240) : match.start()]
+            dm = re.search(rf"(?i)on\s+({DATE_TOKEN})", before) or re.search(
+                rf"(?i)({DATE_TOKEN})", before
+            )
+            parsed = _date(dm.group(1)) if dm else None
+        if not parsed:
+            continue
+        if not place:
+            pm = re.search(
+                r"(?i)at\s+([0-9]{1,6}\s+[A-Za-z0-9 .,'-]{3,70})",
+                body[match.start() : match.end() + 120],
+            )
+            place = pm.group(1).strip().rstrip(".,;") if pm else "property"
+        rec = _service_attempt_record(
+            server_name,
+            parsed["value"],
+            parsed.get("display") or parsed["value"],
+            time_s or "unspecified",
+            place,
+            "nail_mail",
+            match.group(0)[:220],
+        )
+        if _add(rec):
+            return facts
+
+    log_date = None
+    m_log_date = re.search(
+        rf"(?i)(?:daily\s+log|service\s+log|log\s+for)\s*(?:dated\s+|of\s+)?({DATE_TOKEN})",
+        body,
+    )
+    if m_log_date:
+        log_date = _date(m_log_date.group(1))
+    for match in SERVER_LOG_LINE_RE.finditer(body):
+        parsed = _date(match.group(1)) if match.group(1) else log_date
+        time_s = (match.group(2) or "").strip().lower()
+        method_raw = (match.group(3) or "").strip().lower()
+        place = (match.group(4) or "").strip().rstrip(".,;") if match.group(4) else ""
+        if not parsed or not time_s or not place:
+            continue
+        if "nail" in method_raw or "mail" in method_raw or "post" in method_raw:
+            method = "nail_mail"
+        elif "personal" in method_raw:
+            method = "personal"
+        else:
+            method = "attempt"
+        on_date = parsed["value"] if isinstance(parsed, dict) else str(parsed)
+        date_display = (parsed.get("display") if isinstance(parsed, dict) else None) or str(on_date)
+        rec = _service_attempt_record(
+            server_name,
+            on_date,
+            date_display,
+            time_s,
+            place,
+            method,
+            match.group(0)[:220],
+        )
+        if _add(rec):
+            return facts
+
+    # --- balance_on_date (P0#3) ---
+    for match in BALANCE_ON_DATE_RE.finditer(body):
+        if match.group(1) and match.group(2):
+            amount = _parse_money(match.group(1))
+            parsed = _date(match.group(2))
+        else:
+            parsed = _date(match.group(3)) if match.group(3) else None
+            amount = _parse_money(match.group(4)) if match.group(4) else None
+        if amount is None or amount < 1000 or not parsed:
+            continue
+        rec = _graph_record(
+            "balance_on_date",
+            round(amount, 2),
+            f"${amount:,.2f} as of {parsed.get('display') or parsed['value']}",
+            match.group(0)[:220],
+            extra={"on_date": str(parsed["value"])[:10]},
+        )
+        if _add(rec):
+            return facts
+
+    for match in BALANCE_AS_OF_RE.finditer(body):
+        amount = _parse_money(match.group(1))
+        parsed = _date(match.group(2))
+        if amount is None or amount < 1000 or not parsed:
+            continue
+        rec = _graph_record(
+            "balance_on_date",
+            round(amount, 2),
+            f"${amount:,.2f} as of {parsed.get('display') or parsed['value']}",
+            match.group(0)[:220],
+            extra={"on_date": str(parsed["value"])[:10]},
+        )
+        if _add(rec):
+            return facts
+
+    # --- loan_payment_date (P0#4) ---
+    for match in SERVICER_PAYMENT_RE.finditer(body):
+        for gi in (1, 2):
+            if not match.group(gi):
+                continue
+            parsed = _date(match.group(gi))
+            if not parsed:
+                continue
+            rec = _graph_record(
+                "loan_payment_date",
+                str(parsed["value"])[:10],
+                f"servicer credited {parsed.get('display') or parsed['value']}",
+                match.group(0)[:220],
+                extra={
+                    "payment_role": "servicer_credit",
+                    "on_date": str(parsed["value"])[:10],
+                },
+            )
+            if _add(rec):
+                return facts
+
+    for match in SERVICER_PAYMENT_LINE_RE.finditer(body):
+        parsed = _date(match.group(1))
+        if not parsed:
+            continue
+        amount = _parse_money(match.group(2)) if match.lastindex and match.lastindex >= 2 else None
+        rec = _graph_record(
+            "loan_payment_date",
+            str(parsed["value"])[:10],
+            f"servicer credited {parsed.get('display') or parsed['value']}",
+            match.group(0)[:220],
+            extra={
+                "payment_role": "servicer_credit",
+                "on_date": str(parsed["value"])[:10],
+                "payment_amount": amount,
+            },
+        )
+        if _add(rec):
+            return facts
+
+    for match in BANK_DEBIT_RE.finditer(body):
+        parsed = _date(match.group(1))
+        amount = _parse_money(match.group(2))
+        if not parsed:
+            continue
+        quote = match.group(0)
+        near = body[max(0, match.start() - 80) : match.end() + 40]
+        if not re.search(r"(?i)mortgage|loan|servicer|payment|ach|auto", quote + near):
+            continue
+        rec = _graph_record(
+            "loan_payment_date",
+            str(parsed["value"])[:10],
+            f"bank debit {parsed.get('display') or parsed['value']}"
+            + (f" ${amount:,.2f}" if amount else ""),
+            quote[:220],
+            extra={
+                "payment_role": "bank_debit",
+                "on_date": str(parsed["value"])[:10],
+                "payment_amount": amount,
+            },
+        )
+        if _add(rec):
+            return facts
+
+    # --- employer_of_record (P0#5) ---
+    for match in WAY_TO_EMPLOYER_RE.finditer(body):
+        emp = _clean_employer(match.group(1) or "")
+        if not emp or not _employer_ok(emp):
+            continue
+        person = None
+        m_def = re.search(
+            r"(?i)(?:upon|served)\s+((?:[A-Z][A-Za-z'-]+\s+){1,3}[A-Z][A-Za-z'-]+)",
+            body,
+        )
+        if m_def:
+            person = _clean_served_name(m_def.group(1))
+        if not person:
+            m_def = re.search(
+                r"(?i)(?:deponent|defendant|borrower|employee)\s*:\s*"
+                r"((?:[A-Z][a-z]+(?:[ \t]+[A-Z][a-z']+){1,2}))",
+                body,
+            )
+            if m_def:
+                person = m_def.group(1)
+        if not person:
+            window = body[max(0, match.start() - 300) : match.end() + 40]
+            person = _nearest_person(window) or _nearest_person(body[:400])
+        rec = _graph_record(
+            "employer_of_record",
+            _norm_name(emp),
+            emp,
+            match.group(0)[:220],
+            person=person,
+            employer=emp,
+            extra={"employer_source": "service_narrative"},
+        )
+        if _add(rec):
+            return facts
+
+    for match in EMPLOYER_VERIFICATION_RE.finditer(body):
+        emp = _clean_employer(match.group(1) or "")
+        if not emp or not _employer_ok(emp):
+            continue
+        person = None
+        m_emp = re.search(
+            r"(?i)(?:employee|borrower|deponent|defendant)\s*:\s*"
+            r"((?:[A-Z][a-z]+(?:[ \t]+[A-Z][a-z']+){1,2}))",
+            body,
+        )
+        if m_emp:
+            person = m_emp.group(1)
+        if not person:
+            window = body[max(0, match.start() - 300) : match.end() + 80]
+            person = (
+                _nearest_person(window)
+                or _nearest_person(body[:400])
+                or _nearest_person(body[match.end() : match.end() + 200])
+            )
+        rec = _graph_record(
+            "employer_of_record",
+            _norm_name(emp),
+            emp,
+            match.group(0)[:220],
+            person=person,
+            employer=emp,
+            extra={"employer_source": "employment_record"},
+        )
+        if _add(rec):
+            return facts
+
     return facts
 
 
@@ -924,9 +1335,63 @@ def _clean_served_name(raw: str | None) -> str | None:
     return " ".join(p[:1].upper() + p[1:].lower() if p.isupper() else p for p in parts)
 
 
+def _service_attempt_record(
+    server: str | None,
+    on_date: str,
+    date_display: str,
+    time_s: str,
+    place: str,
+    method: str,
+    quote: str,
+) -> dict[str, Any]:
+    value = f"{method}|{_norm_time(time_s)}|{_norm_address(place)}"
+    display = f"{server or 'process server'}: {method} at {time_s} @ {place} on {date_display}"
+    return _graph_record(
+        "service_attempt",
+        value,
+        display,
+        quote,
+        person=server,
+        extra={
+            "on_date": str(on_date)[:10],
+            "service_time": _norm_time(time_s),
+            "service_place": place,
+            "service_method": method,
+            "impact": "credibility",
+        },
+    )
+
+
+def _norm_time(raw: str) -> str:
+    m = re.search(r"(?i)(\d{1,2}):(\d{2})\s*([ap])\.?m\.?", raw or "")
+    if not m:
+        return (raw or "").strip().lower()
+    hour = int(m.group(1))
+    minute = int(m.group(2))
+    ap = m.group(3).lower()
+    if ap == "p" and hour != 12:
+        hour += 12
+    if ap == "a" and hour == 12:
+        hour = 0
+    return f"{hour:02d}:{minute:02d}"
+
+
+def _minutes_apart(a: str, b: str) -> int | None:
+    def _parts(t: str) -> tuple[int, int] | None:
+        m = re.match(r"^(\d{2}):(\d{2})$", t or "")
+        if not m:
+            return None
+        return int(m.group(1)), int(m.group(2))
+
+    pa, pb = _parts(a), _parts(b)
+    if not pa or not pb:
+        return None
+    return abs((pa[0] * 60 + pa[1]) - (pb[0] * 60 + pb[1]))
+
+
 def _presence_region(place: str, status: str) -> str:
     low = (place or "").lower()
-    if status in {"departed_flight"} or any(tok in low for tok in AIRPORT_DEPART_TOKENS):
+    if status in {"departed_flight", "boarding_pass"} or any(tok in low for tok in AIRPORT_DEPART_TOKENS):
         return "departed"
     if status in {"out_of_state", "traveling", "conference", "bank_spend"} or any(
         tok in low for tok in REMOTE_PLACE_TOKENS
@@ -977,6 +1442,18 @@ def cluster_key(fact: dict[str, Any]) -> str:
         on_date = str(fact.get("on_date") or "")[:10]
         person = _norm_name(str(fact.get("person") or "")) or "_"
         return f"{key}::{person}|{on_date}"
+    if key == "service_attempt":
+        on_date = str(fact.get("on_date") or "")[:10]
+        server = _norm_name(str(fact.get("person") or "")) or "server"
+        return f"{key}::{server}|{on_date}"
+    if key == "balance_on_date":
+        on_date = str(fact.get("on_date") or "")[:10]
+        return f"{key}::{on_date or 'loan'}"
+    if key == "loan_payment_date":
+        return "loan_payment_date::loan"
+    if key == "employer_of_record":
+        person = _norm_name(str(fact.get("person") or "")) or "_"
+        return f"{key}::{person}"
     if key == "stated_principal":
         return "stated_principal::loan"
     if key == "sale_grantee":
@@ -1022,6 +1499,27 @@ def entity_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:
         if not pa or not pb or pa != pb:
             return False
         return bool(da and db and da == db)
+    if left.get("key") == "service_attempt" and right.get("key") == "service_attempt":
+        da = str(left.get("on_date") or "")[:10]
+        db = str(right.get("on_date") or "")[:10]
+        if not da or da != db:
+            return False
+        pa = _norm_name(str(left.get("person") or ""))
+        pb = _norm_name(str(right.get("person") or ""))
+        # Same server when both named; allow unscoped to merge with named on same date
+        if pa and pb and pa != pb:
+            return False
+        return True
+    if left.get("key") == "balance_on_date" and right.get("key") == "balance_on_date":
+        return str(left.get("on_date") or "")[:10] == str(right.get("on_date") or "")[:10]
+    if left.get("key") == "loan_payment_date" and right.get("key") == "loan_payment_date":
+        return True
+    if left.get("key") == "employer_of_record" and right.get("key") == "employer_of_record":
+        pa = _norm_name(str(left.get("person") or ""))
+        pb = _norm_name(str(right.get("person") or ""))
+        if pa and pb:
+            return pa == pb
+        return False
     if left.get("key") == "stated_principal" and right.get("key") == "stated_principal":
         return True
     if left.get("key") == "sale_grantee" and right.get("key") == "sale_grantee":
@@ -1081,10 +1579,29 @@ def facts_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:
         return _income_compatible(left, right)
     if key == "presence_on_date":
         return _presence_compatible(left, right)
+    if key == "service_attempt":
+        return _service_attempt_compatible(left, right)
+    if key == "balance_on_date":
+        return _balance_on_date_compatible(left, right)
+    if key == "loan_payment_date":
+        return _payment_dates_compatible(left, right)
     if key == "stated_principal":
         return _principal_compatible(left, right)
     if key == "sale_grantee":
         return _norm_name(str(left.get("value") or "")) == _norm_name(str(right.get("value") or ""))
+    if key == "employer_of_record":
+        if _norm_name(str(left.get("value") or "")) == _norm_name(str(right.get("value") or "")):
+            return True
+        sources = {str(left.get("employer_source") or ""), str(right.get("employer_source") or "")}
+        # P0#5: only interrupt when service narrative collides with an employment record.
+        # Two employment extracts with different employers is a near-miss / multi-job — suppress.
+        if "service_narrative" in sources and (
+            "employment_record" in sources or sources - {"service_narrative", ""}
+        ):
+            return False
+        if sources == {"service_narrative"}:
+            return False
+        return True
     return str(left.get("value")) == str(right.get("value"))
 
 
@@ -1150,25 +1667,92 @@ def _presence_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:
     """False when same person+date cannot be both personally served locally and remote/departed."""
     ra = str(left.get("presence_region") or "")
     rb = str(right.get("presence_region") or "")
+    sa = str(left.get("presence_status") or "")
+    sb = str(right.get("presence_status") or "")
+    if {sa, sb} & {"served_personally"} and {sa, sb} & {"departed_flight", "boarding_pass"}:
+        return False
     if not ra or not rb or ra == rb:
-        # Same region — still conflict local_serve vs departed (both may code differently)
-        sa = str(left.get("presence_status") or "")
-        sb = str(right.get("presence_status") or "")
         if {sa, sb} == {"served_personally", "departed_flight"}:
             return False
         return True
-    conflict_pairs = {
-        frozenset({"local_serve", "remote"}),
-        frozenset({"local_serve", "departed"}),
-        frozenset({"departed", "remote"}),  # departed then remote is compatible; suppress
-    }
     pair = frozenset({ra, rb})
     if pair == frozenset({"departed", "remote"}):
         return True  # flight + Chicago spend agree
-    if pair in conflict_pairs or pair == frozenset({"local_serve", "remote"}) or pair == frozenset(
-        {"local_serve", "departed"}
-    ):
+    if pair in {
+        frozenset({"local_serve", "remote"}),
+        frozenset({"local_serve", "departed"}),
+    }:
         return False
+    return True
+
+
+def _service_attempt_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    """False when AOS personal service collides with same-day log (nail-mail only / other address)."""
+    ma = str(left.get("service_method") or "")
+    mb = str(right.get("service_method") or "")
+    pa = _norm_address(str(left.get("service_place") or ""))
+    pb = _norm_address(str(right.get("service_place") or ""))
+    ta = str(left.get("service_time") or "")
+    tb = str(right.get("service_time") or "")
+    # Personal service vs nail-and-mail on same date is always AGAINST for that claim
+    if {ma, mb} == {"personal", "nail_mail"}:
+        return False
+    # Same method but incompatible places near the claimed personal-service time
+    if pa and pb and pa != pb:
+        mins = _minutes_apart(ta, tb)
+        if mins is not None and mins <= 45:
+            return False
+        # One side personal at place A; other attempt/log at place B same afternoon window
+        if "personal" in {ma, mb} and mins is not None and mins <= 120:
+            return False
+    return True
+
+
+def _balance_on_date_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    try:
+        a = float(left.get("value"))
+        b = float(right.get("value"))
+    except (TypeError, ValueError):
+        return True
+    if str(left.get("on_date") or "")[:10] != str(right.get("on_date") or "")[:10]:
+        return True
+    delta = abs(a - b)
+    baseline = max(a, b, 1.0)
+    meta = GRAPH_ATTRIBUTES.get("balance_on_date") or {}
+    return not (delta > float(meta.get("abs") or 1000) or (delta / baseline) > float(meta.get("pct") or 0.005))
+
+
+def _payment_dates_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    """False when a servicer credit and a bank debit for the same payment disagree on date."""
+    role_a = str(left.get("payment_role") or "")
+    role_b = str(right.get("payment_role") or "")
+    if role_a == role_b:
+        return True
+    if {role_a, role_b} != {"servicer_credit", "bank_debit"}:
+        return True
+    try:
+        from datetime import datetime
+
+        da = datetime.strptime(str(left.get("value"))[:10], "%Y-%m-%d")
+        db = datetime.strptime(str(right.get("value"))[:10], "%Y-%m-%d")
+    except (TypeError, ValueError):
+        return True
+    days = abs((da - db).days)
+    amt_a = left.get("payment_amount")
+    amt_b = right.get("payment_amount")
+    same_amount = False
+    if amt_a is not None and amt_b is not None:
+        try:
+            same_amount = abs(float(amt_a) - float(amt_b)) <= max(
+                50.0, 0.05 * max(float(amt_a), float(amt_b))
+            )
+        except (TypeError, ValueError):
+            same_amount = False
+        if not same_amount:
+            return True
+    # Pair only near-cycle dates (or matched amounts). Same payment cannot be both Dec 5 and Dec 1.
+    if same_amount or days <= 14:
+        return days <= 3
     return True
 
 
@@ -1300,11 +1884,20 @@ def _employer_ok(name: str) -> bool:
     # Reject mid-word window chops like "oyed by TechCore Solutions"
     if n[:1].islower():
         return False
+    if re.search(r"(?i)\b(has|been|was|were|since|employee|borrower|defendant)\b", n):
+        return False
     return True
 
 
 def _clean_employer(name: str) -> str:
-    return (name or "").strip().rstrip(".,")
+    n = re.sub(r"[\r\n]+", " ", name or "")
+    n = re.sub(r"\s+", " ", n).strip().rstrip(".,;")
+    # Cut trailing person / since clauses that rode along
+    n = re.split(
+        r"(?i)\s+since\b|\s+from\b|\s+located\b|\s+has\b|\s+employee\b",
+        n,
+    )[0].strip()
+    return n
 
 
 def _nearest_employer(window: str) -> str | None:

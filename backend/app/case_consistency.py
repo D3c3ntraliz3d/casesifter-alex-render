@@ -613,18 +613,100 @@ def _score_pair(left: dict[str, Any], right: dict[str, Any], key: str) -> dict[s
         row["documentary"] = True
         row["case_impact_bucket"] = bucket
         return row
+    if kind == "service_attempt":
+        from app.fact_graph import facts_compatible as _fc
+
+        if _fc(left, right):
+            return _row(
+                left,
+                right,
+                key,
+                label,
+                "compatible service attempts",
+                "Service-attempt facts are compatible.",
+                False,
+                False,
+                confidence=40,
+            )
+        discrepancy = f"{left.get('display')} vs {right.get('display')}"
+        materiality = (
+            "Process server's sworn personal-service AOS collides with the server's own "
+            "daily log (nail-and-mail only and/or different address near the claimed time) — "
+            "credibility / sewerservice risk on plaintiff's own papers."
+        )
+        row = _row(left, right, key, label, discrepancy, materiality, True, False, confidence=90)
+        row["documentary"] = True
+        row["case_impact_bucket"] = "credibility"
+        return row
+    if kind == "money_on_date":
+        from app.fact_graph import facts_compatible as _fc
+
+        if _fc(left, right):
+            return _row(left, right, key, label, "same balance", "Balances match.", False, False, confidence=40)
+        try:
+            a, b = float(left["value"]), float(right["value"])
+            delta = abs(a - b)
+            pct = delta / max(a, b, 1.0)
+            discrepancy = f"${delta:,.2f} ({pct:.1%}) on {left.get('on_date')}"
+        except (TypeError, ValueError, KeyError):
+            discrepancy = f"{left.get('display')} vs {right.get('display')}"
+        materiality = (
+            "Two incompatible balances for the same named date cannot both be operative — "
+            "damages / financial impossibility interrupt."
+        )
+        row = _row(left, right, key, label, discrepancy, materiality, True, False, confidence=86)
+        row["documentary"] = True
+        row["case_impact_bucket"] = "damages"
+        return row
+    if kind == "payment_date":
+        from app.fact_graph import facts_compatible as _fc
+
+        if _fc(left, right):
+            return _row(
+                left,
+                right,
+                key,
+                label,
+                "compatible payment dates",
+                "Payment dates are compatible.",
+                False,
+                False,
+                confidence=40,
+            )
+        discrepancy = f"{left.get('display')} vs {right.get('display')}"
+        materiality = (
+            "Servicer payment-received dates disagree with bank debit dates for the same "
+            "loan payment cycle — own-packet hazard / payment-plan credibility interrupt."
+        )
+        row = _row(left, right, key, label, discrepancy, materiality, True, False, confidence=84)
+        row["documentary"] = True
+        row["case_impact_bucket"] = "credibility"
+        return row
     if kind == "entity":
+        from app.fact_graph import facts_compatible as _fc
+
+        if _fc(left, right):
+            return _row(left, right, key, label, "same entity", "Entities match.", False, False, confidence=40)
         lv = str(left.get("value") or "").strip().lower()
         rv = str(right.get("value") or "").strip().lower()
         if lv == rv:
             return _row(left, right, key, label, "same entity", "Entities match.", False, False, confidence=40)
         discrepancy = f"{left.get('display')} vs {right.get('display')}"
-        materiality = (
-            "Distinct grounded sale/deed grantee names across sale and deed papers "
-            "are a credibility interrupt. Identical Highland-vs-Highland naming is not."
-        )
+        if key == "employer_of_record":
+            materiality = (
+                "Named employer on the service narrative cannot both be true with a different "
+                "employer of record in deposition / employment verification for the same person."
+            )
+            bucket = "credibility"
+        else:
+            materiality = (
+                "Distinct grounded sale/deed grantee names across sale and deed papers "
+                "are a credibility interrupt. Identical Highland-vs-Highland naming is not."
+            )
+            bucket = "credibility"
         row = _row(left, right, key, label, discrepancy, materiality, True, False, confidence=80)
         row["documentary"] = True
+        row["case_impact_bucket"] = bucket
         return row
     if kind == "rate":
         a, b = float(left["value"]), float(right["value"])

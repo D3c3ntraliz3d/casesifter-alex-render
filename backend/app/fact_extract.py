@@ -89,6 +89,24 @@ FACT_META: dict[str, dict[str, Any]] = {
         "label": "Sale / deed grantee",
         "kind": "entity",
     },
+    "service_attempt": {
+        "label": "Process-server service attempt",
+        "kind": "service_attempt",
+    },
+    "balance_on_date": {
+        "label": "Balance on a named date",
+        "kind": "money_on_date",
+        "abs": 1000.0,
+        "pct": 0.005,
+    },
+    "loan_payment_date": {
+        "label": "Loan payment date (servicer vs bank)",
+        "kind": "payment_date",
+    },
+    "employer_of_record": {
+        "label": "Employer of record",
+        "kind": "entity",
+    },
 }
 
 # Note rate vs default/penalty rate, remaining principal, and the installment

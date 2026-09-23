@@ -47,7 +47,31 @@ Ship only when all four hold:
 3. **Material** — hits **element / procedure / credibility / damages**  
 4. **Both quotes in pulled text**
 
-Examples of attorney-winning interrupts (same meta-rule, different attributes): identity (DOB), occupancy/residence, income vs tax AGI, employment tenure vs W-2, fee/default-date conflicts, exhibit fraud forensics.
+Examples of attorney-winning interrupts (same meta-rule, different attributes): identity (DOB), occupancy/residence, income vs tax AGI, employment tenure vs W-2, **presence-on-date / boarding-pass alibi**, **AOS vs process-server daily log**, **balance-on-date**, **servicer vs bank payment dates**, **employer-of-record**, fee/default-date conflicts, exhibit fraud forensics.
+
+## Live blind-eval priority (2026-09-23 full day)
+
+Primary buyers = bank / big-corp counsel. Prefer opposing-side BS early; also surface own-packet hazards.
+
+**P0 regression shapes (live 11467 / 702161 packs — not mock fallback):**
+
+1. Personal service vs same-day travel alibi (+ boarding passes)
+2. AOS personal service vs process server’s own daily log (nail-and-mail / other address near claimed time)
+3. Same-date money figure collision (two balances on one named date)
+4. Servicer payment-received dates vs bank debit dates
+5. Employer / identity collision on service narrative (named workplace vs employment verification)
+
+**Do not burn sprint capacity** on harness mock-template plants (NYC closing vs UA220 next day; 220 Maple vs CA/SF; monthly income vs AGI; DOB 1980 vs 1981) until live generators are richer. Those inflate miss counts without teaching foreclosure-specific logic. Existing unit fixtures for DOB/Maple/income may remain as smoke tests — they are not the live P0 bar.
+
+Keep green the arithmetic / RPAPL / edited-exhibit catches already shipping (arrearage math, distribution schedule, notice-before-assignment, Hauppauge→Brooklyn travel).
+
+Live pack paths (when present in `casesifter-testing` — never load `plants.json`):
+
+```
+casesifter-testing/test-cases/runs/2026-09-23/<runId>/planted-<seed>/*.txt
+```
+
+This CaseSifter repo stores **reconstructed foreclosure-shaped fixtures** under `backend/evals/fixtures/lie_detector/planted_bs_cases.json` (`p0_*` ids) because the testing harness packs are not vendored here.
 
 ## What green means
 
@@ -121,9 +145,15 @@ Revert the mutation. Green should return. That cycle is the trust proof — not 
 | Primary residence vs license/tax address | Ship |
 | Stated income vs AGI (large divergence) | Ship |
 | AOS personal service vs flight / conference / out-of-state spend (same person+date) | Ship (element) |
+| AOS personal service vs boarding pass same day | Ship (element) |
+| AOS personal service vs process-server daily log (nail-mail / other address) | Ship (credibility) |
+| Two balances on the same named date | Ship (damages) |
+| Servicer payment dates vs bank debit dates (same cycle) | Ship (credibility) |
+| Employer on service narrative vs employment verification | Ship (credibility) |
 | Judgment principal drop vs note principal with arrears / no payments | Ship (damages) |
 | Distinct sale/deed grantee names (Highland vs IKJG) | Ship |
 | Highland vs Highland (same grantee; missing IKJG not invented) | Quiet |
+| Mock UA220 / Maple / DOB±1 template (harness fallback) | Deprioritize — not live P0 |
 | Same person, **different** employers (near-miss) | Quiet |
 | Two recitals that **agree** | Quiet |
 | Seeded flip on an otherwise clean packet | Ship |
