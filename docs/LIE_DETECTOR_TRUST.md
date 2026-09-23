@@ -1,6 +1,19 @@
 # CaseSifter lie detector — operator trust runbook
 
-CaseSifter finds **documentary BS in the story**, not a catalog of taught fraud motifs. A green case means: under the shipped gates, the packet’s own documents do not assert the same nameable fact two incompatible ways (and forensic exhibit checks did not fire). It does **not** mean omniscient clearance of every possible lie.
+CaseSifter is an **attorney lie detector**: it surfaces documentary inconsistencies that can **win the case** (credibility wipeout, jurisdiction/occupancy element, damages). It is not a catalog of taught fraud motifs, and it is not a brief-writing assistant.
+
+Quiet means: under the gates, the packet’s own papers do not assert the same nameable fact two incompatible ways. It does **not** mean every narrative inference was checked.
+
+## What the attorney should hear
+
+Ship only when all four hold:
+
+1. **Same nameable fact** — who + attribute + value, grounded in OCR quotes  
+2. **Evidence runs AGAINST** — values cannot both be true  
+3. **Material** — hits **element / procedure / credibility / damages**  
+4. **Both quotes in pulled text**
+
+Examples of attorney-winning interrupts (same meta-rule, different attributes): identity (DOB), occupancy/residence, income vs tax AGI, employment tenure vs W-2, fee/default-date conflicts, exhibit fraud forensics.
 
 ## What green means
 
@@ -15,12 +28,12 @@ Silence is expected on most real packets. Trust that silence when seeded flips s
 
 ## What green does *not* mean
 
-- Every lie in the world was checked  
+- Every possible story-level inference (e.g. flight schedules vs signing cities) was checked  
 - Advocacy / he-said-she-said between competing briefs was scored  
 - Shared topic, caption, or party list was treated as a conflict  
-- A new specialty “employment detector” (or HOA/insurance/…) must be invented per story  
+- A specialty detector was invented per lie motif  
 
-Employment tenure, paystub-vs-W-2, fee clashes, and impossible statement dates are **instances** of the same meta-rule: incompatible documentary values for one fact.
+Employment, DOB, residence, and income conflicts are **instances** of “same person, incompatible documentary values,” not separate products.
 
 ## Architecture (operator view)
 

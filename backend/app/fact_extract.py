@@ -67,6 +67,14 @@ FACT_META: dict[str, dict[str, Any]] = {
     # Documentary graph attributes (entity-scoped). Attribute extractors — not lie types.
     "employment_start": {"label": "Employment start", "kind": "date"},
     "employment_tax_year": {"label": "Employment tax year (W-2)", "kind": "year"},
+    "date_of_birth": {"label": "Date of birth", "kind": "date", "deadline": True},
+    "residence_address": {"label": "Residence / occupancy address", "kind": "address"},
+    "annual_income": {
+        "label": "Annual income (stated or tax)",
+        "kind": "money",
+        "abs": 8000.0,
+        "pct": 0.20,
+    },
 }
 
 # Note rate vs default/penalty rate, remaining principal, and the installment

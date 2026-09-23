@@ -119,6 +119,69 @@
       "mode": "internal_binder",
       "must_suppress": true,
       "text": "Borrower: Alex Rivera\nEmployer: Northwind Solutions\nAlex Rivera: Employed since January 2018 at Northwind Solutions. Annual salary $88,000.\nAlex Rivera has been employed by Northwind Solutions located in Newark since January 2018.\n"
+    },
+    {
+      "id": "dob_conflict_credibility",
+      "label": "tp",
+      "shape": "same_person_identity_conflict",
+      "mode": "cross_doc",
+      "must_ship": true,
+      "impact_bucket": "credibility",
+      "documents": [
+        {
+          "id": "depo",
+          "name": "Deposition transcript",
+          "text": "Deposition of Jordan Blake.\nJordan Blake date of birth: June 1, 1980.\nQ: State your age for the record.\n"
+        },
+        {
+          "id": "urla",
+          "name": "URLA application",
+          "text": "Uniform Residential Loan Application\nBorrower: Jordan Blake\nDate of Birth: 06/01/1981\n"
+        }
+      ],
+      "notes": "Attorney-winning identity BS — party's own DOBs cannot both be true."
+    },
+    {
+      "id": "residence_occupancy_conflict",
+      "label": "tp",
+      "shape": "same_person_occupancy_conflict",
+      "mode": "cross_doc",
+      "must_ship": true,
+      "impact_bucket": "element",
+      "documents": [
+        {
+          "id": "aff",
+          "name": "Borrower affidavit",
+          "text": "Borrower: Sam Ortiz\nI state that my primary residence 220 Maple Avenue, Queens continuously since 2018.\n"
+        },
+        {
+          "id": "dl_tax",
+          "name": "CA license and tax excerpt",
+          "text": "Sam Ortiz\nDriver's license address: 100 Market Street, San Francisco, CA\n2023 tax return address: 100 Market Street, San Francisco, CA\nAGI $42,000\n"
+        }
+      ],
+      "notes": "Occupancy element — primary residence vs license/tax address for the same person."
+    },
+    {
+      "id": "income_vs_agi_conflict",
+      "label": "tp",
+      "shape": "same_person_income_conflict",
+      "mode": "cross_doc",
+      "must_ship": true,
+      "impact_bucket": "credibility",
+      "documents": [
+        {
+          "id": "app",
+          "name": "Loan application",
+          "text": "Borrower: Taylor Ng\nGross monthly income $7,500 (approximately $90k annual).\n"
+        },
+        {
+          "id": "tax",
+          "name": "2023 tax transcript",
+          "text": "Taylor Ng\nTax year 2023\nAdjusted Gross Income AGI $38,400\n"
+        }
+      ],
+      "notes": "Financial story BS — stated income vs tax AGI for the same person."
     }
   ]
 }

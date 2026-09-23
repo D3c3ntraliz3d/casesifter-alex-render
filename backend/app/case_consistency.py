@@ -294,7 +294,7 @@ def compare_to_case(
                             "analysis_type": "fact_conflict",
                             "contradiction_type": "factual_contradiction",
                             "case_impact": True,
-                            "case_impact_bucket": "credibility",
+                            "case_impact_bucket": row.get("case_impact_bucket") or "credibility",
                             "case_impact_rationale": (
                                 "Party's own documentary exhibits state incompatible values "
                                 "for the same nameable fact."
@@ -563,7 +563,15 @@ def _score_pair(left: dict[str, Any], right: dict[str, Any], key: str) -> dict[s
         materiality = (
             f"{label} flags when the difference exceeds ${meta.get('abs', 0):,.0f} or {meta.get('pct', 0):.1%}."
         )
-        return _row(left, right, key, label, discrepancy, materiality, over, borderline, confidence=82 if over else 55)
+        if key == "annual_income":
+            materiality = (
+                "Stated income and tax AGI for the same person cannot both be operative when "
+                "they diverge this far — credibility interrupt on the financial story."
+            )
+        row = _row(left, right, key, label, discrepancy, materiality, over, borderline, confidence=82 if over else 55)
+        if key == "annual_income":
+            row["documentary"] = True
+        return row
     if kind == "rate":
         a, b = float(left["value"]), float(right["value"])
         delta = abs(a - b)
@@ -578,11 +586,23 @@ def _score_pair(left: dict[str, Any], right: dict[str, Any], key: str) -> dict[s
         discrepancy = f"{left.get('display')} vs {right.get('display')}"
         materiality = f"{label} flags when the year differs for the same person/employer."
         return _row(left, right, key, label, discrepancy, materiality, True, False, confidence=80)
+    if kind == "address":
+        if str(left.get("value")) == str(right.get("value")):
+            return _row(left, right, key, label, "same address", "Addresses match.", False, False, confidence=40)
+        discrepancy = f"{left.get('display')} vs {right.get('display')}"
+        materiality = (
+            "Same person with incompatible residence/occupancy addresses in their own "
+            "papers is an element/credibility interrupt (primary residence vs license/tax address)."
+        )
+        row = _row(left, right, key, label, discrepancy, materiality, True, False, confidence=84)
+        row["documentary"] = True
+        row["case_impact_bucket"] = "element"
+        return row
     if kind == "date":
         if left.get("value") == right.get("value"):
             return _row(left, right, key, label, "same date", "Dates match.", False, False, confidence=40)
         same_month = left.get("month_key") and left.get("month_key") == right.get("month_key")
-        deadline = bool(meta.get("deadline"))
+        deadline = bool(meta.get("deadline") or left.get("deadline") or key == "date_of_birth")
         if same_month and not deadline:
             return _row(
                 left,
@@ -597,17 +617,23 @@ def _score_pair(left: dict[str, Any], right: dict[str, Any], key: str) -> dict[s
             )
         over = (left.get("month_key") != right.get("month_key")) or deadline
         discrepancy = f"{left.get('display')} vs {right.get('display')}"
-        materiality = (
-            "Date flags when the month or year differs, or when a notice/foreclosure deadline day does not match."
-        )
+        if key == "date_of_birth":
+            materiality = (
+                "Date of birth cannot differ across the party's own documents — "
+                "identity conflict is a credibility interrupt."
+            )
+        elif left.get("documentary") or right.get("graph") or left.get("graph"):
+            materiality = (
+                "Same person/employer with incompatible employment dates in documentary "
+                "exhibits is a credibility interrupt."
+            )
+        else:
+            materiality = (
+                "Date flags when the month or year differs, or when a notice/foreclosure deadline day does not match."
+            )
         row = _row(left, right, key, label, discrepancy, materiality, over, False, confidence=76 if over else 40)
-        if left.get("documentary") or right.get("graph") or left.get("graph"):
+        if left.get("documentary") or right.get("graph") or left.get("graph") or key == "date_of_birth":
             row["documentary"] = True
-            if over:
-                row["materiality"] = (
-                    "Same person/employer with incompatible employment dates in documentary "
-                    "exhibits is a credibility interrupt."
-                )
         return row
     return None
 

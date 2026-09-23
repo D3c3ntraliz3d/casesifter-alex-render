@@ -15,18 +15,42 @@ from dateutil import parser as dateparser
 
 from app.fact_extract import DATE_TOKEN, _date
 
-# Documentary attributes eligible for same-entity conflict (credibility lane).
-# These are extractable fields — not a catalog of fraud motifs.
+# Documentary attributes eligible for same-entity conflict.
+# Attribute names only — the attorney interrupt is credibility / element when
+# the party's own papers cannot both be true.
 GRAPH_ATTRIBUTES: dict[str, dict[str, Any]] = {
     "employment_start": {
         "label": "Employment start",
         "kind": "date",
         "documentary": True,
+        "impact": "credibility",
     },
     "employment_tax_year": {
         "label": "Employment tax year (W-2)",
         "kind": "year",
         "documentary": True,
+        "impact": "credibility",
+    },
+    "date_of_birth": {
+        "label": "Date of birth",
+        "kind": "date",
+        "documentary": True,
+        "impact": "credibility",
+        "deadline": True,
+    },
+    "residence_address": {
+        "label": "Residence / occupancy address",
+        "kind": "address",
+        "documentary": True,
+        "impact": "element",
+    },
+    "annual_income": {
+        "label": "Annual income (stated or tax)",
+        "kind": "money",
+        "documentary": True,
+        "impact": "credibility",
+        "abs": 8000.0,
+        "pct": 0.20,
     },
 }
 
@@ -99,6 +123,28 @@ PERSON_STOP = frozenset(
         "jersey",
         "cherry",
         "hill",
+        "maple",
+        "avenue",
+        "market",
+        "street",
+        "francisco",
+        "san",
+        "queens",
+        "brooklyn",
+        "manhattan",
+        "adjusted",
+        "gross",
+        "income",
+        "primary",
+        "residence",
+        "driver",
+        "license",
+        "uniform",
+        "residential",
+        "application",
+        "deposition",
+        "transcript",
+        "continuously",
     }
 )
 
@@ -114,7 +160,8 @@ EMPLOYER_NEAR_RE = re.compile(
 )
 
 EMPLOYEE_LABEL_RE = re.compile(
-    r"(?i)\b(?:employee(?:'s)?\s+name|employee|borrower|applicant)\s*[:#]\s*"
+    r"(?i)\b(?:employee(?:'s)?\s+name|employee|borrower|applicant|"
+    r"deponent|taxpayer|name)\s*[:#]\s*"
     r"([A-Z][a-z]+(?:\s+[A-Z][a-z'.]+){1,3})"
 )
 
@@ -149,6 +196,48 @@ TAX_YEAR_ONLY_RE = re.compile(
 PAYSTUB_HIRE_RE = re.compile(
     rf"(?i)(?:hire\s+date|date\s+of\s+hire|start\s+date|employee\s+start)"
     rf"\D{{0,20}}({DATE_TOKEN}|({MONTHS})\.?\s+\d{{4}}|\d{{1,2}}[/-]\d{{1,2}}[/-]\d{{2,4}})"
+)
+
+# Person identity / occupancy / income — attorney-winning documentary attributes.
+DOB_RE = re.compile(
+    rf"(?i)(?:date\s+of\s+birth|d\.?o\.?b\.?|birth\s+date|born\s+on)"
+    rf"\s*[:#]?\s*({DATE_TOKEN}|\d{{1,2}}[/-]\d{{1,2}}[/-]\d{{2,4}})"
+)
+
+RESIDENCE_RE = re.compile(
+    r"(?i)(?:primary\s+residence|resides?\s+at|residential\s+address|"
+    r"home\s+address|dwelling\s+(?:at|address)|I\s+live\s+at|"
+    r"continuously\s+(?:resided|lived)\s+at|"
+    r"(?:driver'?s?\s+)?licen[cs]e\s+address|mailing\s+address\s+on\s+(?:tax|return)|"
+    r"(?:tax\s+return|form\s*1040).{0,40}address)"
+    r"\s*[:#]?\s*"
+    r"([0-9]{1,6}\s+[A-Za-z0-9 .'-]{2,60}(?:,?\s*[A-Za-z .'-]{2,40}){0,3})"
+)
+
+# Bare "220 Maple … Queens" after primary-residence language without "at"
+RESIDENCE_INLINE_RE = re.compile(
+    r"(?i)primary\s+residence\s+"
+    r"([0-9]{1,6}\s+[A-Za-z0-9 .'-]{2,80})"
+)
+
+INCOME_MONTHLY_RE = re.compile(
+    r"(?i)(?:gross\s+monthly(?:\s+income)?|monthly\s+(?:gross\s+)?income|"
+    r"base\s+monthly\s+(?:income|salary))"
+    r"[^\d$]{0,24}\$?\s*([\d,]{2,12}(?:\.\d{2})?)"
+)
+
+INCOME_ANNUAL_RE = re.compile(
+    r"(?i)(?:(?:adjusted\s+gross\s+income|\bAGI\b)|"
+    r"annual\s+(?:gross\s+)?(?:income|salary)|gross\s+annual(?:\s+income)?|"
+    r"yearly\s+(?:gross\s+)?income)"
+    r"[^\d$]{0,24}\$?\s*([\d,]{2,12}(?:\.\d{2})?)"
+)
+
+INCOME_APPROX_ANNUAL_RE = re.compile(
+    r"(?i)(?:gross\s+monthly|monthly\s+income)[^\d$]{0,40}"
+    r"\$?\s*([\d,]{2,12}(?:\.\d{2})?)"
+    r"[^\n]{0,40}(?:≈|~|approximately|about|roughly)?\s*"
+    r"(?:\$?\s*([\d,]{2,12})\s*k\b|\$?\s*([\d,]{2,12}(?:\.\d{2})?)\s*(?:per\s+year|/yr|annual))"
 )
 
 
@@ -302,6 +391,122 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             if _add(rec):
                 return facts
 
+    # --- Person documentary attributes (identity / occupancy / income) ---
+    for match in DOB_RE.finditer(body):
+        parsed = _date(match.group(1))
+        if not parsed:
+            continue
+        window = body[max(0, match.start() - 200) : match.end() + 80]
+        person = _nearest_person(window) or _nearest_person(body[:300])
+        rec = _graph_record(
+            "date_of_birth",
+            parsed["value"],
+            parsed["display"],
+            match.group(0),
+            person=person,
+            extra={**parsed, "deadline": True},
+        )
+        if _add(rec):
+            return facts
+
+    for pattern in (RESIDENCE_RE, RESIDENCE_INLINE_RE):
+        for match in pattern.finditer(body):
+            raw_addr = match.group(1).strip().rstrip(".,;")
+            raw_addr = re.split(r"(?i)\b(?:continuously|since|for\s+\d+\s+years?)\b", raw_addr)[0].strip(" ,.")
+            norm = _norm_address(raw_addr)
+            if not norm or len(norm) < 6:
+                continue
+            window = body[max(0, match.start() - 220) : match.end() + 80]
+            # Prefer person labeled earlier in the document when window is address-heavy
+            person = (
+                _nearest_person(window)
+                or _nearest_person(body[: match.start()])
+                or _nearest_person(body[:400])
+            )
+            rec = _graph_record(
+                "residence_address",
+                norm,
+                raw_addr[:120],
+                match.group(0)[:220],
+                person=person,
+            )
+            if _add(rec):
+                return facts
+
+    for match in INCOME_APPROX_ANNUAL_RE.finditer(body):
+        monthly = _parse_money(match.group(1))
+        annual = None
+        if match.group(2):
+            annual = _parse_money(match.group(2))
+            if annual is not None and annual < 1000:
+                annual = annual * 1000.0  # "$90k"
+        elif match.group(3):
+            annual = _parse_money(match.group(3))
+        if annual is None and monthly is not None:
+            annual = monthly * 12.0
+        if annual is None:
+            continue
+        window = body[max(0, match.start() - 200) : match.end() + 40]
+        person = (
+            _nearest_person(window)
+            or _nearest_person(body[: match.start()])
+            or _nearest_person(body[:300])
+        )
+        rec = _graph_record(
+            "annual_income",
+            round(annual, 2),
+            f"${annual:,.0f}/yr",
+            match.group(0)[:220],
+            person=person,
+            extra={"income_source": "monthly_stated"},
+        )
+        if _add(rec):
+            return facts
+
+    for match in INCOME_MONTHLY_RE.finditer(body):
+        monthly = _parse_money(match.group(1))
+        if monthly is None or monthly < 100:
+            continue
+        annual = monthly * 12.0
+        window = body[max(0, match.start() - 200) : match.end() + 40]
+        person = (
+            _nearest_person(window)
+            or _nearest_person(body[: match.start()])
+            or _nearest_person(body[:300])
+        )
+        rec = _graph_record(
+            "annual_income",
+            round(annual, 2),
+            f"${monthly:,.0f}/mo (~${annual:,.0f}/yr)",
+            match.group(0)[:220],
+            person=person,
+            extra={"income_source": "monthly", "monthly": monthly},
+        )
+        if _add(rec):
+            return facts
+
+    for match in INCOME_ANNUAL_RE.finditer(body):
+        annual = _parse_money(match.group(1))
+        if annual is None or annual < 1000:
+            continue
+        window = body[max(0, match.start() - 200) : match.end() + 40]
+        person = (
+            _nearest_person(window)
+            or _nearest_person(body[: match.start()])
+            or _nearest_person(body[:300])
+        )
+        source = "agi" if re.search(r"(?i)\bAGI\b|adjusted\s+gross", match.group(0)) else "annual"
+        rec = _graph_record(
+            "annual_income",
+            round(annual, 2),
+            f"${annual:,.0f}/yr",
+            match.group(0)[:220],
+            person=person,
+            extra={"income_source": source},
+        )
+        if _add(rec):
+            return facts
+
     return facts
 
 
@@ -376,8 +581,15 @@ def facts_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:
         return True
     if key == "employment_start":
         return _same_date_value(left, right)
+    if key == "date_of_birth":
+        # Any day/year mismatch is identity BS — not soft same-month.
+        return str(left.get("value")) == str(right.get("value"))
     if key == "employment_tax_year":
         return str(left.get("value")) == str(right.get("value"))
+    if key == "residence_address":
+        return _addresses_compatible(left.get("value"), right.get("value"))
+    if key == "annual_income":
+        return _income_compatible(left, right)
     return str(left.get("value")) == str(right.get("value"))
 
 
@@ -406,6 +618,64 @@ def _same_date_value(a: dict[str, Any], b: dict[str, Any]) -> bool:
     if a.get("month_key") and a.get("month_key") == b.get("month_key"):
         return True
     return False
+
+
+def _addresses_compatible(left: Any, right: Any) -> bool:
+    a = _norm_address(str(left or ""))
+    b = _norm_address(str(right or ""))
+    if not a or not b:
+        return True
+    if a == b:
+        return True
+    # Same street number + street token → compatible even if city OCR differs slightly
+    a_parts = a.split()
+    b_parts = b.split()
+    if len(a_parts) >= 2 and len(b_parts) >= 2 and a_parts[0] == b_parts[0] and a_parts[1] == b_parts[1]:
+        # Different city/state after the street → conflict
+        if len(a_parts) >= 3 and len(b_parts) >= 3 and a_parts[2:] != b_parts[2:]:
+            # Queens vs San Francisco style — conflict when remaining tokens disjoint
+            return bool(set(a_parts[2:]) & set(b_parts[2:]))
+        return True
+    return False
+
+
+def _income_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    try:
+        a = float(left.get("value"))
+        b = float(right.get("value"))
+    except (TypeError, ValueError):
+        return True
+    delta = abs(a - b)
+    baseline = max(a, b, 1.0)
+    meta = GRAPH_ATTRIBUTES.get("annual_income") or {}
+    return not (delta > float(meta.get("abs") or 8000) or (delta / baseline) > float(meta.get("pct") or 0.20))
+
+
+def _parse_money(raw: str | None) -> float | None:
+    if not raw:
+        return None
+    cleaned = re.sub(r"[^\d.]", "", str(raw))
+    if not cleaned:
+        return None
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def _norm_address(value: str) -> str:
+    n = re.sub(r"[#,]", " ", value or "")
+    n = re.sub(r"\s+", " ", n).strip().lower()
+    n = re.sub(
+        r"\b(street|st|avenue|ave|boulevard|blvd|road|rd|drive|dr|lane|ln|court|ct|"
+        r"place|pl|apartment|apt|unit|suite|ste|continuously|since)\b\.?",
+        "",
+        n,
+    )
+    n = re.sub(r"\s+", " ", n).strip()
+    # Drop trailing years that rode along ("since 2018")
+    n = re.sub(r"\b(19|20)\d{2}\b", "", n).strip()
+    return re.sub(r"\s+", " ", n).strip()
 
 
 def _graph_record(
@@ -439,28 +709,32 @@ def _graph_record(
 
 
 def _nearest_person(window: str) -> str | None:
-    candidates: list[str] = []
-    for match in EMPLOYEE_LABEL_RE.finditer(window or ""):
-        candidates.append(match.group(1).strip())
-    for match in re.finditer(
-        r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z'.]+){1,3})\s*:",
-        window or "",
-    ):
-        candidates.append(match.group(1).strip())
-    for match in PERSON_NEAR_RE.finditer(window or ""):
-        candidates.append(match.group(1).strip())
-    # Fallback: Title Case pairs
-    candidates.extend(re.findall(r"\b([A-Z][a-z]+\s+[A-Z][a-z]+)\b", window or ""))
-
     def _ok(name: str) -> bool:
         parts = name.split()
         if len(parts) < 2:
             return False
         return not any(p.lower().strip(".") in PERSON_STOP for p in parts)
 
-    good = [c for c in candidates if _ok(c)]
-    if good:
-        return good[-1]
+    labeled: list[str] = []
+    for match in EMPLOYEE_LABEL_RE.finditer(window or ""):
+        labeled.append(match.group(1).strip())
+    for match in re.finditer(
+        r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z'.]+){1,3})\s*:",
+        window or "",
+    ):
+        labeled.append(match.group(1).strip())
+    for match in PERSON_NEAR_RE.finditer(window or ""):
+        labeled.append(match.group(1).strip())
+
+    good_labeled = [c for c in labeled if _ok(c)]
+    if good_labeled:
+        return good_labeled[-1]
+
+    # Fallback Title Case pairs — last resort only
+    loose = re.findall(r"\b([A-Z][a-z]+\s+[A-Z][a-z]+)\b", window or "")
+    good_loose = [c for c in loose if _ok(c)]
+    if good_loose:
+        return good_loose[0]
     return None
 
 
