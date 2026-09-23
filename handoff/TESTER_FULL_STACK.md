@@ -32,6 +32,16 @@ Writes risk level, findings JSON, and `report.html` under the jobs directory.
 | `CONTEXTUAL_MULTIMODAL` | `true` → original PDF/image sent as base64 `inline_data` + text excerpt |
 | Court filings | Native file upload skipped (text/case logic only) |
 
+## Claude (optional gated verifier)
+
+| Setting | Value |
+|---|---|
+| `GOTCHA_VERIFY_PROVIDER` | `auto` (default) |
+| `ANTHROPIC_API_KEY` | Set to prefer Claude for gotcha verify only |
+| `CLAUDE_MODEL` | `claude-sonnet-4-5-20250929` |
+
+Claude judges **proposed** claim/evidence pairs behind hard vetoes + four gates. It does not run a free-form “find all lies” pass. Primary quality path remains grounded fact extraction — see `docs/LIE_DETECTOR_TRUST.md`.
+
 Use `.env.example` only as a template — never commit live keys.
 
 ## Optional: HTTP API instead of CLI
