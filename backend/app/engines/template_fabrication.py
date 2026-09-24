@@ -124,8 +124,13 @@ def review_print_scan_ela(
         except (TypeError, ValueError):
             out.append(item)
             continue
-        strong_ela = score >= 40 and blob >= 1000
-        if not leftovers and not strong_ela:
+        strong_ela = score >= 55 and blob >= 2000
+        # Content hook required: leftover template chrome. Strong ELA alone on a
+        # consumer statement is secondary and must not red-score clean decoys.
+        if not leftovers:
+            out.append(item)
+            continue
+        if not strong_ela and not leftovers:
             out.append(item)
             continue
         evidence.pop("scan_heavy", None)

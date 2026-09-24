@@ -672,7 +672,10 @@ def evaluate_template_fabrication() -> dict:
         confidence=32,
         evidence={"ela_score": 44, "largest_blob_px": 1400, "scan_heavy": True},
     )
-    upgraded = review_print_scan_ela([ela], clean, scan_profile="forensic")
+    # Clean statement + soft ELA must NOT upgrade (no template leftover content hook).
+    upgraded_clean = review_print_scan_ela([ela], clean, scan_profile="forensic")
+    # Leftover chrome + ELA may upgrade (bought template print-scan path).
+    upgraded = review_print_scan_ela([ela], bill, scan_profile="forensic")
     buried = review_print_scan_ela([ela], "This indenture made the first day of June.", scan_profile="forensic")
     scan_ela = Finding(
         id="img-ela-page-3",
@@ -694,19 +697,22 @@ def evaluate_template_fabrication() -> dict:
         confidence=60,
         evidence={},
     )
-    return {
+    checks = {
         "leftover_template_flagged": len(hits) == 1 and hits[0].evidence.get("analysis_type") == "template_fabrication",
         "leftover_is_material": bool(hits) and is_material_finding(hits[0]),
         "clean_statement_quiet": clean_hits == [],
         "court_filing_skipped": filing_hits == [],
         "sample_of_notice_quiet": sample_of == [],
         "statement_ela_upgraded": bool(upgraded) and upgraded[0].severity == "medium",
+        "clean_statement_ela_not_upgraded": bool(upgraded_clean)
+        and upgraded_clean[0].severity == "info"
+        and not is_material_finding(upgraded_clean[0]),
         "non_statement_ela_stays_info": bool(buried) and buried[0].severity == "info",
         "scan_heavy_ela_not_material": not is_material_finding(scan_ela),
         "editor_metadata_not_material": not is_material_finding(meta),
         "print_scan_ela_is_material": bool(upgraded) and is_material_finding(upgraded[0]),
-        "all_pass": False,
     }
+    return {**checks, "all_pass": all(checks.values())}
 
 
 def evaluate_statement_dates() -> dict:

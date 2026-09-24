@@ -711,11 +711,41 @@ def _score_pair(left: dict[str, Any], right: dict[str, Any], key: str) -> dict[s
     if kind == "rate":
         a, b = float(left["value"]), float(right["value"])
         delta = abs(a - b)
+        # Documentary note vs sought rate (graph)
+        if key == "stated_interest_rate":
+            from app.fact_graph import facts_compatible as _fc
+
+            if _fc(left, right):
+                return _row(left, right, key, label, "same rate", "Rates match.", False, False, confidence=40)
+            discrepancy = f"{left.get('display')} vs {right.get('display')} ({delta:.3f} points)"
+            materiality = (
+                "Note/contract interest rate cannot both be true with a different rate "
+                "sought in the motion/judgment — damages / credibility interrupt (not ordinary "
+                "default/penalty rate movement)."
+            )
+            row = _row(left, right, key, label, discrepancy, materiality, True, False, confidence=88)
+            row["documentary"] = True
+            row["case_impact_bucket"] = "damages"
+            return row
         over = delta > meta.get("abs", 0.1)
         borderline = (not over) and delta > 0.05
         discrepancy = f"{delta:.3f} percentage points"
         materiality = f"Interest rate flags when it differs by more than {meta.get('abs', 0.1)} points."
         return _row(left, right, key, label, discrepancy, materiality, over, borderline, confidence=88 if over else 58)
+    if kind == "venue":
+        from app.fact_graph import facts_compatible as _fc
+
+        if _fc(left, right):
+            return _row(left, right, key, label, "same venue", "Venues match.", False, False, confidence=40)
+        discrepancy = f"{left.get('display')} vs {right.get('display')}"
+        materiality = (
+            "Same process server executing affidavits for the same case on the same day "
+            "cannot swear both Suffolk and Kings venue — credibility interrupt."
+        )
+        row = _row(left, right, key, label, discrepancy, materiality, True, False, confidence=86)
+        row["documentary"] = True
+        row["case_impact_bucket"] = "credibility"
+        return row
     if kind == "year":
         if str(left.get("value")) == str(right.get("value")):
             return _row(left, right, key, label, "same year", "Years match.", False, False, confidence=40)

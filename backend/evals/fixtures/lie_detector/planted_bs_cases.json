@@ -412,6 +412,267 @@
         }
       ],
       "notes": "Live P0#5 — named employer on service narrative vs employment verification for same person."
+    },
+    {
+      "id": "p0_personal_vs_substitute_same_day",
+      "label": "tp",
+      "shape": "service_attempt_personal_vs_substitute",
+      "mode": "internal_binder",
+      "must_ship": true,
+      "impact_bucket": "credibility",
+      "text": "AFFIDAVIT OF SERVICE\nI, Timothy Jennings, being duly sworn, state:\nOn April 12, 2019, at approximately 10:15 a.m., I personally served Marcus Rivera at 1847 Bedford Avenue, Brooklyn, New York.\nOn April 12, 2019, at approximately 3:45 p.m., I performed substitute service at 1847 Bedford Avenue, Brooklyn, New York because Rivera could not be located personally.\n",
+      "notes": "2026-09-24 #1 — personal + substitute same day/address/server is impossible."
+    },
+    {
+      "id": "p0_multiday_flight_vs_service",
+      "label": "tp",
+      "shape": "presence_on_date_service_vs_alibi",
+      "mode": "aggregate",
+      "must_ship": true,
+      "impact_bucket": "element",
+      "documents": [
+        {
+          "id": "aos",
+          "name": "AOS",
+          "text": "On April 9, 2007, at approximately 10:15 a.m., I served the Summons upon CARLOS RIVERA by delivering a true copy personally at 1247 Bedford Avenue, Brooklyn, New York.\n"
+        },
+        {
+          "id": "aff",
+          "name": "Flight alibi",
+          "text": "AFFIDAVIT OF CARLOS RIVERA\nI, Carlos Rivera, state:\nI departed from JFK Airport on JetBlue Flight 417 on April 7, 2007.\nI returned on JetBlue Flight 822 on April 11, 2007.\nI was in Florida on April 9, 2007.\n"
+        }
+      ],
+      "notes": "2026-09-24 #5 — multi-day trip covering personal-service date."
+    },
+    {
+      "id": "p0_office_appointment_vs_service",
+      "label": "tp",
+      "shape": "presence_on_date_service_vs_alibi",
+      "mode": "aggregate",
+      "must_ship": true,
+      "impact_bucket": "element",
+      "documents": [
+        {
+          "id": "aos",
+          "name": "AOS",
+          "text": "On April 12, 2008, at approximately 10:15 a.m., I served MARCUS CHEN personally at 742 Bedford Avenue, Brooklyn, New York.\n"
+        },
+        {
+          "id": "aff",
+          "name": "Medical office affidavit",
+          "text": "I, Marcus Chen, swear I was at my medical office seeing patients with an appointment with Mrs. Eleanor Vasquez on April 12, 2008 at 10:00 a.m.\n"
+        }
+      ],
+      "notes": "2026-09-24 #7 — personal service vs office appointment same time."
+    },
+    {
+      "id": "p0_contract_rate_vs_sought_rate",
+      "label": "tp",
+      "shape": "stated_interest_rate_note_vs_sought",
+      "mode": "aggregate",
+      "must_ship": true,
+      "impact_bucket": "damages",
+      "documents": [
+        {
+          "id": "note",
+          "name": "Mortgage note",
+          "text": "The original mortgage note executed by Rivera states interest rate of 4.875% per annum; Rivera testified the rate is 4.875% and has never changed.\n"
+        },
+        {
+          "id": "motion",
+          "name": "Plaintiff motion",
+          "text": "Plaintiff's motion seeks interest at 5.125% per annum.\n"
+        }
+      ],
+      "notes": "2026-09-24 #2 — contract note rate vs sought motion rate (loan-status exception)."
+    },
+    {
+      "id": "p0_payment_event_three_dates",
+      "label": "tp",
+      "shape": "loan_payment_date_reconciliation",
+      "mode": "aggregate",
+      "must_ship": true,
+      "impact_bucket": "credibility",
+      "documents": [
+        {
+          "id": "complaint",
+          "name": "Complaint",
+          "text": "Complaint alleges defendants failed to make the payment due February 1, 2024.\n"
+        },
+        {
+          "id": "answer",
+          "name": "Answer",
+          "text": "Answer claims payment made January 30, 2024 with confirmation WT-8847-JLR.\n"
+        },
+        {
+          "id": "bank",
+          "name": "Bank wire",
+          "text": "Bank record Exhibit D shows wire executed January 29, 2024 at 2:34 PM.\n"
+        }
+      ],
+      "notes": "2026-09-24 #8 — three incompatible dates for the same payment event."
+    },
+    {
+      "id": "p0_residence_vs_utility_address",
+      "label": "tp",
+      "shape": "same_person_occupancy_conflict",
+      "mode": "aggregate",
+      "must_ship": true,
+      "impact_bucket": "element",
+      "documents": [
+        {
+          "id": "depo",
+          "name": "Deposition",
+          "text": "Angela Rivera states under oath that she has lived continuously at 87-12 Astoria Boulevard, Apartment 4B since March 2018 and never moved.\n"
+        },
+        {
+          "id": "utility",
+          "name": "National Grid bill",
+          "text": "National Grid\nCustomer: Angela Rivera\nService address: 122 Vernon Boulevard, Apartment 9G\nAccount Statement July 20, 2024\n"
+        }
+      ],
+      "notes": "2026-09-24 #10 — continuous residence vs utility service address."
+    },
+    {
+      "id": "p0_execution_venue_conflict",
+      "label": "tp",
+      "shape": "execution_venue_same_day",
+      "mode": "aggregate",
+      "must_ship": true,
+      "impact_bucket": "credibility",
+      "documents": [
+        {
+          "id": "aos1",
+          "name": "AOS Suffolk",
+          "text": "AFFIDAVIT OF SERVICE\nI, Timothy Brailsford, being duly sworn\nState of New York, County of Suffolk\nSworn on April 9, 2007\n"
+        },
+        {
+          "id": "aos2",
+          "name": "AOS Kings",
+          "text": "AFFIDAVIT OF SERVICE\nI, Timothy Brailsford, being duly sworn\nState of New York, County of Kings\nSworn on April 9, 2007\n"
+        }
+      ],
+      "notes": "2026-09-24 #16 — same server/day conflicting execution venue."
+    },
+    {
+      "id": "calib_marcus_age_vs_janet_wire_quiet",
+      "label": "fp",
+      "shape": "calibration_should_silence",
+      "mode": "aggregate",
+      "must_suppress": true,
+      "documents": [
+        {
+          "id": "aos",
+          "name": "Service affidavit",
+          "text": "Service affidavit describes MARCUS T. REYNOLDS as approximately 48 years of age.\n"
+        },
+        {
+          "id": "wire",
+          "name": "Bank wire",
+          "text": "Wire transfer from JANET L. REYNOLDS made January 29, 2024, account ending 7823.\n"
+        }
+      ],
+      "notes": "2026-09-24 #9 calibration — no identity contradiction."
+    },
+    {
+      "id": "calib_medical_office_corroboration_quiet",
+      "label": "fp",
+      "shape": "calibration_should_silence",
+      "mode": "aggregate",
+      "must_suppress": true,
+      "documents": [
+        {
+          "id": "aff",
+          "name": "Chen affidavit",
+          "text": "Marcus Chen states he has maintained his medical practice at 1840 Ocean Parkway since July 2006.\n"
+        },
+        {
+          "id": "inv",
+          "name": "Investigator",
+          "text": "Occupancy investigator followed Marcus Chen to 1840 Ocean Parkway; building directory indicated medical offices.\n"
+        }
+      ],
+      "notes": "2026-09-24 #19 calibration — corroboration not AGAINST."
+    },
+    {
+      "id": "calib_recording_lag_quiet",
+      "label": "fp",
+      "shape": "calibration_should_silence",
+      "mode": "aggregate",
+      "must_suppress": true,
+      "documents": [
+        {
+          "id": "complaint",
+          "name": "Complaint",
+          "text": "Complaint states mortgage dated March 12, 2019 and recorded on March 19, 2019.\n"
+        },
+        {
+          "id": "mortgage",
+          "name": "Mortgage",
+          "text": "Mortgage executed March 12, 2019. Recorded: March 19, 2019.\n"
+        }
+      ],
+      "notes": "2026-09-24 #23 calibration — ordinary 7-day recording lag."
+    },
+    {
+      "id": "calib_service_time_hedge_quiet",
+      "label": "fp",
+      "shape": "calibration_should_silence",
+      "mode": "aggregate",
+      "must_suppress": true,
+      "documents": [
+        {
+          "id": "aos",
+          "name": "AOS",
+          "text": "Process server's sworn affidavit states service was completed at approximately 10:45 a.m. on February 8, 2025.\n"
+        },
+        {
+          "id": "depo",
+          "name": "Deposition",
+          "text": "Rivera states service occurred around 10:30 or 10:45 on February 8, 2025.\n"
+        }
+      ],
+      "notes": "2026-09-24 #25 soft hedge — compatible with approximately 10:45."
+    },
+    {
+      "id": "calib_occupancy_covenant_consistent_quiet",
+      "label": "fp",
+      "shape": "calibration_should_silence",
+      "mode": "aggregate",
+      "must_suppress": true,
+      "documents": [
+        {
+          "id": "mortgage",
+          "name": "Mortgage",
+          "text": "Mortgage Covenant 5 requires Mortgagor maintain occupancy as primary residence at 1847 Maple Ridge Drive.\n"
+        },
+        {
+          "id": "aos",
+          "name": "AOS",
+          "text": "Affidavit of Service confirms defendants personally served at 1847 Maple Ridge Drive on December 22, 2025 at 10:45 AM.\n"
+        }
+      ],
+      "notes": "2026-09-24 #31 calibration — occupancy covenant consistent with personal service."
+    },
+    {
+      "id": "calib_middle_name_expansion_quiet",
+      "label": "fp",
+      "shape": "calibration_should_silence",
+      "mode": "aggregate",
+      "must_suppress": true,
+      "documents": [
+        {
+          "id": "mortgage",
+          "name": "Mortgage",
+          "text": "Mortgage identifies mortgagor as Angela M. Rivera.\n"
+        },
+        {
+          "id": "depo",
+          "name": "Deposition",
+          "text": "Deposition witness states full name as Angela Maria Rivera.\n"
+        }
+      ],
+      "notes": "2026-09-24 #32 — middle-initial expansion is not a lie."
     }
   ]
 }

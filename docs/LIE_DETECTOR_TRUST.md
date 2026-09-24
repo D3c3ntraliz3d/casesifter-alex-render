@@ -49,29 +49,25 @@ Ship only when all four hold:
 
 Examples of attorney-winning interrupts (same meta-rule, different attributes): identity (DOB), occupancy/residence, income vs tax AGI, employment tenure vs W-2, **presence-on-date / boarding-pass alibi**, **AOS vs process-server daily log**, **balance-on-date**, **servicer vs bank payment dates**, **employer-of-record**, fee/default-date conflicts, exhibit fraud forensics.
 
-## Live blind-eval priority (2026-09-23 full day)
+## Live blind-eval priority (2026-09-24 triage)
 
-Primary buyers = bank / big-corp counsel. Prefer opposing-side BS early; also surface own-packet hazards.
+Primary buyers = bank / big-corp counsel. Prefer opposing BS early; also surface own-packet hazards.
 
-**P0 regression shapes (live 11467 / 702161 packs — not mock fallback):**
+**P0 regression shapes (ship):** personal vs substitute same day; AOS vs server log; multi-day flight covering service; office appointment vs personal service; contract note rate vs sought rate; payment-event three-date cluster; residence vs utility; execution venue Suffolk vs Kings.
 
-1. Personal service vs same-day travel alibi (+ boarding passes)
-2. AOS personal service vs process server’s own daily log (nail-and-mail / other address near claimed time)
-3. Same-date money figure collision (two balances on one named date)
-4. Servicer payment-received dates vs bank debit dates
-5. Employer / identity collision on service narrative (named workplace vs employment verification)
+**Correct silence (must_suppress fixtures):** calibration plants (Marcus age vs Janet wire; medical office corroboration; 7-day recording lag; occupancy covenant consistent; middle-name expansion; soft time hedge). Soft advocacy/inference plants stay quiet.
 
-**Do not burn sprint capacity** on harness mock-template plants (NYC closing vs UA220 next day; 220 Maple vs CA/SF; monthly income vs AGI; DOB 1980 vs 1981) until live generators are richer. Those inflate miss counts without teaching foreclosure-specific logic. Existing unit fixtures for DOB/Maple/income may remain as smoke tests — they are not the live P0 bar.
+**Mock template:** ignore UA220 / Maple / DOB±1 / income-AGI harness fallback.
 
-Keep green the arithmetic / RPAPL / edited-exhibit catches already shipping (arrearage math, distribution schedule, notice-before-assignment, Hauppauge→Brooklyn travel).
+**Track C:** keep tamper interrupts; clean consumer statements must not upgrade soft ELA to material without leftover template chrome (content hook).
 
-Live pack paths (when present in `casesifter-testing` — never load `plants.json`):
+Live pack paths (when present — never load `plants.json`):
 
 ```
-casesifter-testing/test-cases/runs/2026-09-23/<runId>/planted-<seed>/*.txt
+casesifter-testing/test-cases/runs/2026-09-24/<runId>/planted-<seed>/*.txt
 ```
 
-This CaseSifter repo stores **reconstructed foreclosure-shaped fixtures** under `backend/evals/fixtures/lie_detector/planted_bs_cases.json` (`p0_*` ids) because the testing harness packs are not vendored here.
+Reconstructed fixtures: `p0_*` and `calib_*` in `planted_bs_cases.json`.
 
 ## What green means
 

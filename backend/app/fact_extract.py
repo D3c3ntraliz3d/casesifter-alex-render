@@ -107,6 +107,15 @@ FACT_META: dict[str, dict[str, Any]] = {
         "label": "Employer of record",
         "kind": "entity",
     },
+    "stated_interest_rate": {
+        "label": "Stated interest rate",
+        "kind": "rate",
+        "abs": 0.10,
+    },
+    "execution_venue": {
+        "label": "Affidavit execution venue",
+        "kind": "venue",
+    },
 }
 
 # Note rate vs default/penalty rate, remaining principal, and the installment
