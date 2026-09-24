@@ -49,17 +49,17 @@ Ship only when all four hold:
 
 Examples of attorney-winning interrupts (same meta-rule, different attributes): identity (DOB), occupancy/residence, income vs tax AGI, employment tenure vs W-2, **presence-on-date / boarding-pass alibi**, **AOS vs process-server daily log**, **balance-on-date**, **servicer vs bank payment dates**, **employer-of-record**, fee/default-date conflicts, exhibit fraud forensics.
 
-## Live blind-eval priority (2026-09-24 triage)
+## Live blind-eval priority (2026-09-24 / 200110Z triage)
 
 Primary buyers = bank / big-corp counsel. Prefer opposing BS early; also surface own-packet hazards.
 
-**P0 regression shapes (ship):** personal vs substitute same day; AOS vs server log; multi-day flight covering service; office appointment vs personal service; contract note rate vs sought rate; payment-event three-date cluster; residence vs utility; execution venue Suffolk vs Kings.
+**P0 regression shapes (ship):** personal vs substitute; AOS vs server log; multi-day/office presence; contract vs sought rate; payment-event cluster; residence vs utility; execution venue; **occupancy_start** same-person conflicts; occupancy before mortgage; **claimed_arrears drop** with zero payments on servicing history.
 
-**Correct silence (must_suppress fixtures):** calibration plants (Marcus age vs Janet wire; medical office corroboration; 7-day recording lag; occupancy covenant consistent; middle-name expansion; soft time hedge). Soft advocacy/inference plants stay quiet.
+**Correct silence (must_suppress fixtures):** calibration plants (Marcus age vs Janet wire; medical office corroboration; recording lag; occupancy covenant; middle-name expansion; soft time hedge; sole-occupant vs AOS; denial of transfer notice; inspector unknown vs depo; marital decade gap; rental he-said; mortgage covenant vs amended; occupancy vs first utility absence; omitted mod request). Soft advocacy/inference plants stay quiet.
 
 **Mock template:** ignore UA220 / Maple / DOB±1 / income-AGI harness fallback.
 
-**Track C:** keep tamper interrupts; clean consumer statements must not upgrade soft ELA to material without leftover template chrome (content hook).
+**Track C:** keep tamper interrupts; clean consumer statements must not upgrade soft ELA / logo-chrome / math opinions to material without leftover template chrome or a substantive quoted content hook (`exhibit-clean-bank_*.pdf` stays green).
 
 Live pack paths (when present — never load `plants.json`):
 

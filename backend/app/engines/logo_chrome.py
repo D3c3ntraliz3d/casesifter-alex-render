@@ -173,6 +173,7 @@ def run_logo_chrome_check(
     if extras is not None:
         extras["logo_chrome"] = "mismatch"
 
+    has_hook = len(quoted) >= 12 or len(logo_note) >= 12
     return [
         finding(
             fid=fid,
@@ -195,7 +196,7 @@ def run_logo_chrome_check(
                 "crispness_note": crisp or None,
                 "quoted_evidence": quoted or None,
                 "page": page_no,
-                "content_hook": True,
+                "content_hook": has_hook,
             },
             recommended_action=(
                 "Compare the header mark and field typography to a known-authentic statement "

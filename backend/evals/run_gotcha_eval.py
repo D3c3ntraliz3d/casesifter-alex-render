@@ -697,6 +697,35 @@ def evaluate_template_fabrication() -> dict:
         confidence=60,
         evidence={},
     )
+    # Clean-bank decoy: logo/math opinions without substantive quotes stay non-material.
+    from app.finding_policy import is_material_finding as _mat
+
+    logo_weak = Finding(
+        id="ctx-logo-clean",
+        category="contextual",
+        severity="medium",
+        title="Logo / chrome mismatch — Chase",
+        explanation="Issuer looks wrong",
+        why_suspicious="y",
+        confidence=55,
+        evidence={
+            "analysis_type": "logo_chrome_mismatch",
+            "ai_generated": True,
+            "issuer": "Chase",
+            "quoted_evidence": "",
+            "content_hook": False,
+        },
+    )
+    math_weak = Finding(
+        id="ctx-math-clean",
+        category="contextual",
+        severity="high",
+        title="Arithmetic does not reconcile",
+        explanation="Something looks off on the statement",
+        why_suspicious="y",
+        confidence=70,
+        evidence={"analysis_type": "math_error", "ai_generated": True, "quoted_evidence": "no digits here"},
+    )
     checks = {
         "leftover_template_flagged": len(hits) == 1 and hits[0].evidence.get("analysis_type") == "template_fabrication",
         "leftover_is_material": bool(hits) and is_material_finding(hits[0]),
@@ -711,6 +740,8 @@ def evaluate_template_fabrication() -> dict:
         "scan_heavy_ela_not_material": not is_material_finding(scan_ela),
         "editor_metadata_not_material": not is_material_finding(meta),
         "print_scan_ela_is_material": bool(upgraded) and is_material_finding(upgraded[0]),
+        "clean_logo_without_quote_not_material": not _mat(logo_weak),
+        "clean_math_without_digits_not_material": not _mat(math_weak),
     }
     return {**checks, "all_pass": all(checks.values())}
 

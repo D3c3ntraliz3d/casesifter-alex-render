@@ -111,6 +111,33 @@ GRAPH_ATTRIBUTES: dict[str, dict[str, Any]] = {
         "documentary": True,
         "impact": "credibility",
     },
+    "occupancy_start": {
+        "label": "Occupancy start",
+        "kind": "date",
+        "documentary": True,
+        "impact": "credibility",
+        "deadline": True,
+    },
+    "mortgage_origination": {
+        "label": "Mortgage origination date",
+        "kind": "date",
+        "documentary": True,
+        "impact": "credibility",
+    },
+    "claimed_arrears": {
+        "label": "Claimed arrears / unpaid aggregate",
+        "kind": "money_on_date",
+        "documentary": True,
+        "impact": "damages",
+        "abs": 5000.0,
+        "pct": 0.15,
+    },
+    "loan_payment_activity": {
+        "label": "Loan payment activity",
+        "kind": "payment_activity",
+        "documentary": True,
+        "impact": "damages",
+    },
 }
 
 # Attribute keys that participate in gotcha-style case conflict aggregation.
@@ -217,6 +244,26 @@ PERSON_STOP = frozenset(
         "deposition",
         "transcript",
         "continuously",
+        "since",
+        "from",
+        "answer",
+        "january",
+        "february",
+        "march",
+        "april",
+        "may",
+        "june",
+        "july",
+        "august",
+        "september",
+        "october",
+        "november",
+        "december",
+        "defendant",
+        "plaintiff",
+        "property",
+        "investment",
+        "rental",
     }
 )
 
@@ -550,6 +597,57 @@ SOUGHT_RATE_RE = re.compile(
     r"[^\d%]{0,40}(\d{1,2}(?:\.\d{1,4})?)\s*%"
 )
 
+# Occupancy commencement (same person, incompatible starts = credibility)
+OCCUPANCY_START_RE = re.compile(
+    rf"(?i)(?:(?:I\s+have|have|has|Defendant\s+has)\s+)?"
+    rf"(?:continuously\s+)?"
+    rf"(?:occupied|entered\s+into\s+occupancy\s+(?:of\s+)?|resided(?:\s+at)?|"
+    rf"continuously\s+occupied\s+and\s+resided\s+at)"
+    rf".{{0,100}}?(?:as\s+(?:my|an?|the)\s+)?"
+    rf"(?:primary\s+residence|owner[- ]occupant|investment\s+rental(?:\s+property)?)?"
+    rf".{{0,60}}?(?:since|on|beginning|commencing|from)\s+"
+    rf"(?:the\s+date\s+of\s+the\s+[Mm]ortgage\s+in\s+)?"
+    rf"({DATE_TOKEN})"
+)
+
+# Deposition Q/A: "resided at …? A: Since March 2019"
+OCCUPANCY_QA_SINCE_RE = re.compile(
+    rf"(?is)(?:resided|occupied|lived).{{0,200}}?"
+    rf"(?:A\s*[:.]?\s*|Answer\s*[:.]?\s*)"
+    rf"(?:Since|From)\s+({DATE_TOKEN})"
+)
+
+OCCUPANCY_USE_START_RE = re.compile(
+    rf"(?i)occupied.{{0,80}}?as\s+(?:an?\s+)?"
+    rf"(investment\s+rental(?:\s+property)?|primary\s+residence|owner[- ]occupant)"
+    rf".{{0,60}}?since\s+({DATE_TOKEN})"
+)
+
+MORTGAGE_ORIGINATION_RE = re.compile(
+    rf"(?i)(?:(?:mortgage|note).{{0,100}}?(?:executed|dated|originated|made)"
+    rf".{{0,60}}?(?:on\s+or\s+about\s+|on\s+|dated\s+)?"
+    rf"|date\s+of\s+the\s+[Mm]ortgage(?:\s+in)?\s+"
+    rf"|purchased\s+the\s+property\s+with\s+the\s+mortgage.{{0,60}}?"
+    rf"|(?:since|from)\s+the\s+date\s+of\s+the\s+[Mm]ortgage\s+in\s+)"
+    rf"({DATE_TOKEN})"
+)
+
+CLAIMED_ARREARS_RE = re.compile(
+    rf"(?i)(?:as\s+of\s+({DATE_TOKEN})[,.]?\s+)?"
+    rf"(?:(?:Defendant\s+)?owes?\s+(?:Plaintiff\s+)?(?:an\s+)?aggregate\s+of|"
+    rf"owes?\s+(?:Plaintiff\s+)?(?:an\s+)?aggregate\s+of|"
+    rf"aggregate\s+of)"
+    rf"[^\d$]{{0,20}}\$?\s*([\d,]{{3,12}}(?:\.\d{{2}})?)"
+)
+
+ZERO_PAYMENTS_RE = re.compile(
+    r"(?i)(?:zero\s+payments?\s+received|no\s+payments?\s+received|"
+    r"no\s+payment(?:s)?\s+received(?:\s+from|\s+through|\s+during)?|"
+    r"shows?\s+zero\s+payments?|"
+    r"no\s+indication\s+of\s+(?:partial\s+)?payments?|"
+    r"(?:with\s+)?no\s+payments?\s+(?:were\s+)?(?:made|received|posted))"
+)
+
 EXECUTION_VENUE_RE = re.compile(
     r"(?i)(?:(?:state\s+of\s+new\s+york\s*,?\s*)?county\s+of\s+"
     r"(Suffolk|Kings|Queens|New\s+York|Bronx|Nassau|Richmond|Westchester)"
@@ -616,6 +714,10 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
     for match in POSITION_SINCE_RE.finditer(body):
         parsed = _date(match.group(2))
         if not parsed:
+            continue
+        title = (match.group(1) or "").strip().lower()
+        # Occupancy use phrases ("as an investment rental property since …") are not jobs.
+        if re.search(r"(?i)\b(?:property|residence|rental|investment|occupant|mortgage)\b", title):
             continue
         before = body[max(0, match.start() - 320) : match.start()]
         after = body[match.end() : match.end() + 120]
@@ -1725,7 +1827,190 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
         if _add(rec):
             return facts
 
+    # --- occupancy_start (same person incompatible starts) ---
+    for match in OCCUPANCY_USE_START_RE.finditer(body):
+        use_raw = (match.group(1) or "").lower()
+        parsed = _date(match.group(2))
+        if not parsed:
+            continue
+        use = "investment" if "investment" in use_raw or "rental" in use_raw else "primary"
+        person = _occupancy_person(body, match.start())
+        rec = _graph_record(
+            "occupancy_start",
+            str(parsed["value"])[:10],
+            f"{parsed.get('display') or parsed['value']} ({use})",
+            match.group(0)[:220],
+            person=person,
+            extra={
+                "occupancy_use": use,
+                "month_key": parsed.get("month_key"),
+                "year": parsed.get("year"),
+                "month": parsed.get("month"),
+                "day": parsed.get("day"),
+                "impact": "credibility",
+            },
+        )
+        if _add(rec):
+            return facts
+
+    for match in OCCUPANCY_START_RE.finditer(body):
+        parsed = _date(match.group(1))
+        if not parsed:
+            continue
+        quote = match.group(0)[:220]
+        low = quote.lower()
+        if "investment" in low or "rental" in low:
+            use = "investment"
+        elif "primary" in low or "owner" in low:
+            use = "primary"
+        else:
+            use = "unspecified"
+        person = _occupancy_person(body, match.start())
+        rec = _graph_record(
+            "occupancy_start",
+            str(parsed["value"])[:10],
+            f"{parsed.get('display') or parsed['value']} ({use})",
+            quote,
+            person=person,
+            extra={
+                "occupancy_use": use,
+                "month_key": parsed.get("month_key"),
+                "year": parsed.get("year"),
+                "month": parsed.get("month"),
+                "day": parsed.get("day"),
+                "impact": "credibility",
+            },
+        )
+        if _add(rec):
+            return facts
+
+    for match in OCCUPANCY_QA_SINCE_RE.finditer(body):
+        parsed = _date(match.group(1))
+        if not parsed:
+            continue
+        person = _occupancy_person(body, match.start())
+        rec = _graph_record(
+            "occupancy_start",
+            str(parsed["value"])[:10],
+            f"{parsed.get('display') or parsed['value']} (unspecified)",
+            match.group(0)[:220],
+            person=person,
+            extra={
+                "occupancy_use": "unspecified",
+                "month_key": parsed.get("month_key"),
+                "year": parsed.get("year"),
+                "month": parsed.get("month"),
+                "day": parsed.get("day"),
+                "impact": "credibility",
+            },
+        )
+        if _add(rec):
+            return facts
+
+    # --- mortgage origination (occupancy-before-mortgage gate) ---
+    for match in MORTGAGE_ORIGINATION_RE.finditer(body):
+        raw = match.group(1)
+        parsed = _date(raw) if raw else None
+        if not parsed:
+            continue
+        rec = _graph_record(
+            "mortgage_origination",
+            str(parsed["value"])[:10],
+            parsed.get("display") or parsed["value"],
+            match.group(0)[:220],
+            extra={
+                "month_key": parsed.get("month_key"),
+                "year": parsed.get("year"),
+                "month": parsed.get("month"),
+                "day": parsed.get("day"),
+            },
+        )
+        if _add(rec):
+            return facts
+
+    # --- claimed arrears with as-of date ---
+    for match in CLAIMED_ARREARS_RE.finditer(body):
+        parsed = _date(match.group(1)) if match.group(1) else None
+        amount = _parse_money(match.group(2))
+        if amount is None or amount < 1000:
+            continue
+        if not parsed:
+            before = body[max(0, match.start() - 160) : match.start()]
+            dm = re.search(
+                rf"(?i)(?:as\s+of|dated|complaint\s+dated)\s+({DATE_TOKEN})",
+                before + " " + match.group(0),
+            ) or re.search(rf"(?i)Dated\s+({DATE_TOKEN})", body[:500])
+            parsed = _date(dm.group(1)) if dm else None
+        if not parsed:
+            continue
+        rec = _graph_record(
+            "claimed_arrears",
+            round(amount, 2),
+            f"${amount:,.2f} as of {parsed.get('display') or parsed['value']}",
+            match.group(0)[:220],
+            extra={
+                "on_date": str(parsed["value"])[:10],
+                "arrears_role": "complaint",
+            },
+        )
+        if _add(rec):
+            return facts
+
+    # --- zero / no payments on servicing history ---
+    if ZERO_PAYMENTS_RE.search(body) and re.search(
+        r"(?i)(?:loan\s+servicing|payment\s+history|servicing\s+history|"
+        r"no\s+payments?\s+received|zero\s+payments)",
+        body[:500] + body,
+    ):
+        rec = _graph_record(
+            "loan_payment_activity",
+            "none",
+            "no payments received",
+            ZERO_PAYMENTS_RE.search(body).group(0)[:220],
+            extra={"payment_activity": "none"},
+        )
+        if _add(rec):
+            return facts
+
     return facts
+
+
+def _occupancy_person(body: str, at: int) -> str | None:
+    """Affiant / defendant name for an occupancy-start recital."""
+    window = body[max(0, at - 400) : at + 80]
+    m_dep = re.search(
+        r"(?i)\b(?:deposition\s+of|affidavit\s+of)\s+"
+        r"((?:[A-Z][a-z]+(?:\s+[A-Z][a-z']+){1,2}))\b",
+        body[: max(400, at + 20)],
+    )
+    if m_dep:
+        name = m_dep.group(1).strip()
+        return " ".join(p[:1].upper() + p[1:].lower() for p in name.split())
+    m_i = re.search(
+        r"(?i)\bI,\s*((?:[A-Z][a-z]+(?:\s+[A-Z][a-z']+){1,2}))\b",
+        body[: at + 20],
+    )
+    if m_i:
+        return m_i.group(1).strip()
+    m_def = re.search(
+        r"(?i)\b(?:Defendant|Borrower|Deponent)\s+((?:[A-Z][a-z]+(?:\s+[A-Z][a-z']+){1,2}))\b",
+        body[:800],
+    )
+    if m_def:
+        return m_def.group(1).strip()
+    # Caption-style ALL CAPS name near top
+    m_cap = re.search(
+        r"(?i)(?:defendant|against)\s*((?:[A-Z][A-Z'-]+(?:\s+[A-Z][A-Z'-]+){1,2}))",
+        body[:500],
+    )
+    if m_cap:
+        parts = m_cap.group(1).title().split()
+        if len(parts) >= 2 and not any(p.lower() in PERSON_STOP for p in parts):
+            return " ".join(parts)
+    person = _nearest_person(window) or _nearest_person(body[:400])
+    if person and any(p.lower() in PERSON_STOP for p in person.split()):
+        return None
+    return person
 
 
 def _clean_served_name(raw: str | None) -> str | None:
@@ -1869,6 +2154,15 @@ def cluster_key(fact: dict[str, Any]) -> str:
         on_date = str(fact.get("on_date") or "")[:10]
         server = _norm_name(str(fact.get("person") or "")) or "server"
         return f"{key}::{server}|{on_date}"
+    if key == "occupancy_start":
+        person = _norm_name(str(fact.get("person") or "")) or "_"
+        return f"{key}::{person}"
+    if key == "mortgage_origination":
+        return "mortgage_origination::loan"
+    if key == "claimed_arrears":
+        return "claimed_arrears::loan"
+    if key == "loan_payment_activity":
+        return "loan_payment_activity::loan"
     if key == "employer_of_record":
         person = _norm_name(str(fact.get("person") or "")) or "_"
         return f"{key}::{person}"
@@ -1944,6 +2238,16 @@ def entity_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:
         if pa and pb and pa != pb:
             return False
         return True
+    if left.get("key") == "occupancy_start" and right.get("key") == "occupancy_start":
+        pa = _norm_name(str(left.get("person") or ""))
+        pb = _norm_name(str(right.get("person") or ""))
+        if not pa or not pb or pa != pb:
+            return False
+        return True
+    if {left.get("key"), right.get("key")} == {"occupancy_start", "mortgage_origination"}:
+        return True
+    if left.get("key") == "claimed_arrears" and right.get("key") == "claimed_arrears":
+        return True
     if left.get("key") == "employer_of_record" and right.get("key") == "employer_of_record":
         pa = _norm_name(str(left.get("person") or ""))
         pb = _norm_name(str(right.get("person") or ""))
@@ -1979,6 +2283,8 @@ def same_nameable_fact(left: dict[str, Any], right: dict[str, Any]) -> bool:
         return entity_compatible(left, right)
     if keys == {"employment_start", "employment_tax_year"}:
         return entity_compatible(left, right)
+    if keys == {"occupancy_start", "mortgage_origination"}:
+        return entity_compatible(left, right)
     return False
 
 
@@ -1995,11 +2301,18 @@ def facts_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:
         # Cross-attribute documentary rule: W-2 tax year vs later hire date
         if {left.get("key"), right.get("key")} == {"employment_start", "employment_tax_year"}:
             return not _hire_after_w2_year(left, right)
+        if {left.get("key"), right.get("key")} == {"occupancy_start", "mortgage_origination"}:
+            return not _occupancy_before_mortgage(left, right)
         return True
     if key == "employment_start":
         return _same_date_value(left, right)
     if key == "date_of_birth":
         # Any day/year mismatch is identity BS — not soft same-month.
+        return str(left.get("value")) == str(right.get("value"))
+    if key == "occupancy_start":
+        # Occupancy commencement is deadline-like: any day/month mismatch is AGAINST.
+        return str(left.get("value")) == str(right.get("value"))
+    if key == "mortgage_origination":
         return str(left.get("value")) == str(right.get("value"))
     if key == "employment_tax_year":
         return str(left.get("value")) == str(right.get("value"))
@@ -2013,6 +2326,10 @@ def facts_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:
         return _service_attempt_compatible(left, right)
     if key == "balance_on_date":
         return _balance_on_date_compatible(left, right)
+    if key == "claimed_arrears":
+        # Same-date collision only here; unexplained cross-date drop is gated in aggregate
+        # when loan_payment_activity=none is present in the pack.
+        return _claimed_arrears_same_date_compatible(left, right)
     if key == "loan_payment_date":
         return _payment_dates_compatible(left, right)
     if key == "stated_interest_rate":
@@ -2036,6 +2353,8 @@ def facts_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:
         if sources == {"service_narrative"}:
             return False
         return True
+    if key == "loan_payment_activity":
+        return str(left.get("value")) == str(right.get("value"))
     return str(left.get("value")) == str(right.get("value"))
 
 
@@ -2153,6 +2472,70 @@ def _service_attempt_compatible(left: dict[str, Any], right: dict[str, Any]) -> 
         if "personal" in methods and mins is not None and mins <= 120:
             return False
     return True
+
+
+def _occupancy_sort_key(raw: str) -> str:
+    """Normalize YYYY-MM or YYYY-MM-DD to a comparable ISO date string."""
+    s = str(raw or "")[:10]
+    if len(s) == 7 and s[4] == "-":
+        return s + "-01"
+    return s
+
+
+def _occupancy_before_mortgage(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    """True when claimed occupancy begins before mortgage origination (temporal impossibility)."""
+    occ = a if a.get("key") == "occupancy_start" else b
+    mort = b if a.get("key") == "occupancy_start" else a
+    try:
+        from datetime import datetime
+
+        od = datetime.strptime(_occupancy_sort_key(str(occ.get("value"))), "%Y-%m-%d")
+        md = datetime.strptime(_occupancy_sort_key(str(mort.get("value"))), "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return False
+    return od < md
+
+
+def _claimed_arrears_same_date_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    try:
+        a = float(left.get("value"))
+        b = float(right.get("value"))
+    except (TypeError, ValueError):
+        return True
+    da = str(left.get("on_date") or "")[:10]
+    db = str(right.get("on_date") or "")[:10]
+    if da != db:
+        return True  # cross-date handled with payment-activity gate in aggregate
+    delta = abs(a - b)
+    baseline = max(a, b, 1.0)
+    meta = GRAPH_ATTRIBUTES.get("claimed_arrears") or {}
+    return not (
+        delta > float(meta.get("abs") or 5000) or (delta / baseline) > float(meta.get("pct") or 0.15)
+    )
+
+
+def unexplained_arrears_drop(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    """True when claimed arrears fall sharply across named dates (needs zero-payment gate)."""
+    try:
+        a = float(left.get("value"))
+        b = float(right.get("value"))
+    except (TypeError, ValueError):
+        return False
+    da = _occupancy_sort_key(str(left.get("on_date") or ""))
+    db = _occupancy_sort_key(str(right.get("on_date") or ""))
+    try:
+        from datetime import datetime
+
+        d0 = datetime.strptime(da[:10], "%Y-%m-%d")
+        d1 = datetime.strptime(db[:10], "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return False
+    earlier_amt, later_amt = (a, b) if d0 <= d1 else (b, a)
+    if later_amt >= earlier_amt:
+        return False
+    delta = earlier_amt - later_amt
+    baseline = max(earlier_amt, 1.0)
+    return delta >= 5000 and (delta / baseline) >= 0.15
 
 
 def _balance_on_date_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:

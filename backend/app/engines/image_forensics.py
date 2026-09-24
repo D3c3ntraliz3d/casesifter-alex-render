@@ -68,8 +68,8 @@ def _run(
         if ela_score >= 18 and ela_blob >= 450 and 0.004 <= ela_hotspots <= 0.18:
             if scan_heavy:
                 # Scanned pages re-JPEG differently across the sheet; keep as a soft note only
-                # when the signal is extreme.
-                if ela_score >= 48 and ela_blob >= 1200:
+                # when the signal is extreme — clean synthetic decoys must stay quiet.
+                if ela_score >= 62 and ela_blob >= 2200:
                     findings.append(
                         finding(
                             fid=f"img-ela-{prefix}",

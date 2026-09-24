@@ -673,6 +673,255 @@
         }
       ],
       "notes": "2026-09-24 #32 — middle-initial expansion is not a lie."
+    },
+    {
+      "id": "p0_occupancy_start_affidavit_collision",
+      "label": "tp",
+      "shape": "occupancy_start_conflict",
+      "mode": "aggregate",
+      "must_ship": true,
+      "impact_bucket": "credibility",
+      "documents": [
+        {
+          "id": "d22",
+          "name": "Wayne affidavit Sept 2021",
+          "text": "AFFIDAVIT OF WAYNE ALEXANDER\nI, Wayne Alexander, being duly sworn, state:\nI have occupied the Subject Property continuously as my primary residence since April 3, 2019.\n"
+        },
+        {
+          "id": "d69",
+          "name": "Wayne affidavit Aug 2022",
+          "text": "AFFIDAVIT OF WAYNE ALEXANDER\nI, Wayne Alexander, being duly sworn, state:\nI entered into occupancy of the Subject Property on May 17, 2019.\n"
+        }
+      ],
+      "notes": "2026-09-24T200110Z 11467 P001 — same person incompatible occupancy_start."
+    },
+    {
+      "id": "p0_occupancy_start_depo_vs_affidavit",
+      "label": "tp",
+      "shape": "occupancy_start_conflict",
+      "mode": "aggregate",
+      "must_ship": true,
+      "impact_bucket": "credibility",
+      "documents": [
+        {
+          "id": "depo",
+          "name": "Carmichael deposition",
+          "text": "DEPOSITION OF JONATHAN CARMICHAEL\nQ: How long have you resided at that address?\nA: Since March 2019, when I purchased the property with the mortgage from Meridian Capital.\n"
+        },
+        {
+          "id": "aff",
+          "name": "Occupancy affidavit",
+          "text": "OCCUPANCY AFFIDAVIT\nI, Jonathan Carmichael, swear:\nI have continuously occupied and resided at 847 Shore Drive as my primary residence since May 2019.\n"
+        }
+      ],
+      "notes": "2026-09-24T200110Z 702161 P003 — same speaker March vs May occupancy start."
+    },
+    {
+      "id": "p0_occupancy_before_mortgage",
+      "label": "tp",
+      "shape": "occupancy_before_mortgage",
+      "mode": "aggregate",
+      "must_ship": true,
+      "impact_bucket": "credibility",
+      "documents": [
+        {
+          "id": "amended",
+          "name": "Amended Complaint",
+          "text": "AMENDED COMPLAINT\nDefendant Jonathan Carmichael.\nDefendant has occupied the Property as an investment rental property since May 2018. The Property is not Defendant's primary residence.\n"
+        },
+        {
+          "id": "mortgage",
+          "name": "Mortgage",
+          "text": "MORTGAGE\nThe Note and Mortgage are genuine documents executed by Defendant on or about March 15, 2019.\n"
+        }
+      ],
+      "notes": "2026-09-24T200110Z 702161 P001 slice — occupancy before mortgage origination."
+    },
+    {
+      "id": "p0_arrears_drop_without_payments",
+      "label": "tp",
+      "shape": "claimed_arrears_drop_no_pay",
+      "mode": "aggregate",
+      "must_ship": true,
+      "impact_bucket": "damages",
+      "documents": [
+        {
+          "id": "c1",
+          "name": "Original Complaint",
+          "text": "COMPLAINT\nDated July 12, 2023.\nAs of the date of this Complaint, Defendant owes Plaintiff an aggregate of $89,450.00 in unpaid principal, interest, and escrow advances.\n"
+        },
+        {
+          "id": "c2",
+          "name": "Amended Complaint",
+          "text": "AMENDED COMPLAINT\nAs of September 30, 2023, Defendant owes Plaintiff an aggregate of $31,318.65 in unpaid principal, interest, and escrow advances, plus costs and attorneys' fees.\n"
+        },
+        {
+          "id": "hist",
+          "name": "Loan Servicing History",
+          "text": "LOAN SERVICING HISTORY\nThe Loan Servicing History shows zero payments received from October 2022 through July 2023, with no indication of partial payments, modification, or settlement.\n"
+        }
+      ],
+      "notes": "2026-09-24T200110Z 702161 P002 — arrears drop without payments."
+    },
+    {
+      "id": "calib_sole_occupant_vs_aos_quiet",
+      "label": "fp",
+      "shape": "calibration_should_silence",
+      "mode": "aggregate",
+      "must_suppress": true,
+      "documents": [
+        {
+          "id": "aos",
+          "name": "AOS",
+          "text": "Process server Colin Brailsford avers personal service on Marcus Davidson at 742 Nostrand Avenue on June 23, 2021.\n"
+        },
+        {
+          "id": "opp",
+          "name": "Opposition affidavit",
+          "text": "Wayne Alexander states: I am the sole occupant of the Subject Property since April 2, 2019, and no other person has maintained continuous residence there during my ownership.\n"
+        }
+      ],
+      "notes": "2026-09-24T200110Z 11467 P003 — service ≠ continuous residence; soft inference."
+    },
+    {
+      "id": "calib_denial_of_transfer_notice_quiet",
+      "label": "fp",
+      "shape": "calibration_should_silence",
+      "mode": "aggregate",
+      "must_suppress": true,
+      "documents": [
+        {
+          "id": "aff",
+          "name": "Marcus affidavit",
+          "text": "Marcus Davidson states: I have never received any notice that I transferred my ownership interest in the Subject Property to any third party.\n"
+        },
+        {
+          "id": "deed",
+          "name": "Deed",
+          "text": "Deed dated April 2, 2019 conveys title from Marcus Davidson to Wayne Alexander.\n"
+        }
+      ],
+      "notes": "2026-09-24T200110Z 11467 P004 — denial vs opposing papers is advocacy."
+    },
+    {
+      "id": "calib_inspector_unknown_vs_depo_quiet",
+      "label": "fp",
+      "shape": "calibration_should_silence",
+      "mode": "aggregate",
+      "must_suppress": true,
+      "documents": [
+        {
+          "id": "insp",
+          "name": "Inspection affidavit",
+          "text": "The Property is currently and actively occupied by one or more persons whose identity was not confirmed during this inspection.\n"
+        },
+        {
+          "id": "depo",
+          "name": "Feldman deposition",
+          "text": "Marcus J. Feldman: We live there, my wife and I. My daughter visits sometimes, but she does not live there.\n"
+        }
+      ],
+      "notes": "2026-09-24T200110Z 32225 P003 — corroboration / fills gap, not AGAINST."
+    },
+    {
+      "id": "calib_marital_status_decade_gap_quiet",
+      "label": "fp",
+      "shape": "calibration_should_silence",
+      "mode": "aggregate",
+      "must_suppress": true,
+      "documents": [
+        {
+          "id": "mortgage",
+          "name": "Mortgage 2006",
+          "text": "Mortgage dated March 15, 2006 identifies mortgagors as Marcus J. Feldman, a single man, and Diane M. Feldman, a married woman.\n"
+        },
+        {
+          "id": "depo",
+          "name": "Deposition 2016",
+          "text": "Marcus J. Feldman testifies: The house is in both our names, referring to himself and his wife.\n"
+        }
+      ],
+      "notes": "2026-09-24T200110Z 32225 P004 — later marriage is compatible."
+    },
+    {
+      "id": "calib_rental_he_said_quiet",
+      "label": "fp",
+      "shape": "calibration_should_silence",
+      "mode": "aggregate",
+      "must_suppress": true,
+      "documents": [
+        {
+          "id": "depo",
+          "name": "Deposition",
+          "text": "Q: Have you ever rented out the property or used it as an investment property? A: No, never. It has always been my own home.\n"
+        },
+        {
+          "id": "amended",
+          "name": "Amended Complaint",
+          "text": "Amended Complaint alleges Defendant is renting the property to unidentified tenants and collecting rental income while refusing to pay the mortgage.\n"
+        }
+      ],
+      "notes": "2026-09-24T200110Z 702161 P004 — party vs party he-said-she-said."
+    },
+    {
+      "id": "calib_mortgage_covenant_vs_amended_quiet",
+      "label": "fp",
+      "shape": "calibration_should_silence",
+      "mode": "aggregate",
+      "must_suppress": true,
+      "documents": [
+        {
+          "id": "mortgage",
+          "name": "Mortgage",
+          "text": "JONATHAN CARMICHAEL, an individual, residing at 847 Shore Drive. The Mortgagor covenants that the property is the Mortgagor's principal residence and primary dwelling.\n"
+        },
+        {
+          "id": "amended",
+          "name": "Amended Complaint",
+          "text": "Amended Complaint alleges Defendant has occupied the Property as an investment rental property since May 2018.\n"
+        }
+      ],
+      "notes": "2026-09-24T200110Z 702161 P006 — mortgage supports primary residence; advocacy to impeach."
+    },
+    {
+      "id": "calib_occupancy_vs_first_utility_quiet",
+      "label": "fp",
+      "shape": "calibration_should_silence",
+      "mode": "aggregate",
+      "must_suppress": true,
+      "documents": [
+        {
+          "id": "aff",
+          "name": "Wayne affidavit",
+          "text": "Wayne Alexander avers: I have occupied the Subject Property continuously as my primary residence since April 3, 2019.\n"
+        },
+        {
+          "id": "util",
+          "name": "Utility exhibit",
+          "text": "Utility bills for Wayne Alexander at 742 Nostrand Avenue show first billing June 1-30, 2019; first bank transactions dated June 3, 2019.\n"
+        }
+      ],
+      "notes": "2026-09-24T200110Z 11467 P005 — absence of earlier bills is inference, not AGAINST pair."
+    },
+    {
+      "id": "calib_omitted_mod_request_quiet",
+      "label": "fp",
+      "shape": "calibration_should_silence",
+      "mode": "aggregate",
+      "must_suppress": true,
+      "documents": [
+        {
+          "id": "aff",
+          "name": "Hawkins affidavit",
+          "text": "Peter Hawkins affidavit: As of July 12, 2023, the account of Jonathan Carmichael is in default with respect to unpaid payments for the period October 2022 through July 2023.\n"
+        },
+        {
+          "id": "hist",
+          "name": "Servicing history",
+          "text": "Loan Servicing History shows first missed payment October 15, 2022 and a September 28, 2022 telephone modification request.\n"
+        }
+      ],
+      "notes": "2026-09-24T200110Z 702161 P005 — omission / selective narration plant."
     }
   ]
 }

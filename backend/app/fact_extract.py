@@ -116,6 +116,25 @@ FACT_META: dict[str, dict[str, Any]] = {
         "label": "Affidavit execution venue",
         "kind": "venue",
     },
+    "occupancy_start": {
+        "label": "Occupancy start",
+        "kind": "date",
+        "deadline": True,
+    },
+    "mortgage_origination": {
+        "label": "Mortgage origination date",
+        "kind": "date",
+    },
+    "claimed_arrears": {
+        "label": "Claimed arrears / unpaid aggregate",
+        "kind": "money_on_date",
+        "abs": 5000.0,
+        "pct": 0.15,
+    },
+    "loan_payment_activity": {
+        "label": "Loan payment activity",
+        "kind": "payment_activity",
+    },
 }
 
 # Note rate vs default/penalty rate, remaining principal, and the installment

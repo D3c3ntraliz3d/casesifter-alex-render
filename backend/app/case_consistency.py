@@ -496,6 +496,19 @@ def _score_graph_or_meta(left: dict[str, Any], right: dict[str, Any]) -> dict[st
         )
         row["documentary"] = True
         return row
+    if keys == {"occupancy_start", "mortgage_origination"}:
+        occ = left if left.get("key") == "occupancy_start" else right
+        mort = right if left.get("key") == "occupancy_start" else left
+        label = "Occupancy start vs mortgage origination"
+        discrepancy = f"occupancy {occ.get('display')} vs mortgage {mort.get('display')}"
+        materiality = (
+            "Claimed occupancy beginning before mortgage origination is temporally "
+            "impossible — credibility / chronology interrupt on the party's own papers."
+        )
+        row = _row(occ, mort, "occupancy_start", label, discrepancy, materiality, True, False, confidence=88)
+        row["documentary"] = True
+        row["case_impact_bucket"] = "credibility"
+        return row
     key = str(left.get("key") or right.get("key") or "")
     row = _score_pair(left, right, key)
     if row:
@@ -647,13 +660,20 @@ def _score_pair(left: dict[str, Any], right: dict[str, Any], key: str) -> dict[s
             a, b = float(left["value"]), float(right["value"])
             delta = abs(a - b)
             pct = delta / max(a, b, 1.0)
-            discrepancy = f"${delta:,.2f} ({pct:.1%}) on {left.get('on_date')}"
+            discrepancy = f"${delta:,.2f} ({pct:.1%}) on {left.get('on_date') or right.get('on_date')}"
         except (TypeError, ValueError, KeyError):
             discrepancy = f"{left.get('display')} vs {right.get('display')}"
-        materiality = (
-            "Two incompatible balances for the same named date cannot both be operative — "
-            "damages / financial impossibility interrupt."
-        )
+        if key == "claimed_arrears":
+            materiality = (
+                "Claimed arrears that drop sharply across named complaint dates without "
+                "documented payments is a damages / financial impossibility interrupt — "
+                "not ordinary loan-status movement."
+            )
+        else:
+            materiality = (
+                "Two incompatible balances for the same named date cannot both be operative — "
+                "damages / financial impossibility interrupt."
+            )
         row = _row(left, right, key, label, discrepancy, materiality, True, False, confidence=86)
         row["documentary"] = True
         row["case_impact_bucket"] = "damages"
@@ -788,6 +808,11 @@ def _score_pair(left: dict[str, Any], right: dict[str, Any], key: str) -> dict[s
                 "Date of birth cannot differ across the party's own documents — "
                 "identity conflict is a credibility interrupt."
             )
+        elif key == "occupancy_start":
+            materiality = (
+                "Same person with incompatible occupancy-start dates in their own "
+                "affidavits / pleadings is a credibility interrupt."
+            )
         elif left.get("documentary") or right.get("graph") or left.get("graph"):
             materiality = (
                 "Same person/employer with incompatible employment dates in documentary "
@@ -800,6 +825,9 @@ def _score_pair(left: dict[str, Any], right: dict[str, Any], key: str) -> dict[s
         row = _row(left, right, key, label, discrepancy, materiality, over, False, confidence=76 if over else 40)
         if left.get("documentary") or right.get("graph") or left.get("graph") or key == "date_of_birth":
             row["documentary"] = True
+        if key == "occupancy_start" and over:
+            row["documentary"] = True
+            row["case_impact_bucket"] = "credibility"
         return row
     return None
 
@@ -1020,6 +1048,14 @@ def aggregate_fact_conflicts(snapshots: list[dict[str, Any]]) -> list[dict[str, 
         merged[ck] = bucket
 
     out: list[dict[str, Any]] = []
+    # Pack-level gate for unexplained arrears drop (702161 P002).
+    from app.fact_graph import unexplained_arrears_drop
+
+    zero_payment_activity = any(
+        str(f.get("key")) == "loan_payment_activity" and str(f.get("value")) == "none"
+        for snap in snapshots
+        for f in (snap.get("facts") or [])
+    )
     for ck, pairs in merged.items():
         variants: dict[str, dict[str, Any]] = {}
         for snap, fact in pairs:
@@ -1048,12 +1084,42 @@ def aggregate_fact_conflicts(snapshots: list[dict[str, Any]]) -> list[dict[str, 
         key = str(unique_facts[0].get("key") or ck.split("::", 1)[0])
         for idx, left in enumerate(unique_facts):
             for right in unique_facts[idx + 1 :]:
-                if not facts_compatible(left, right):
+                row = None
+                if (
+                    key == "claimed_arrears"
+                    and zero_payment_activity
+                    and unexplained_arrears_drop(left, right)
+                ):
+                    try:
+                        a, b = float(left["value"]), float(right["value"])
+                        delta = abs(a - b)
+                        pct = delta / max(a, b, 1.0)
+                        discrepancy = (
+                            f"${delta:,.2f} ({pct:.1%}) from {left.get('on_date')} "
+                            f"to {right.get('on_date')}"
+                        )
+                    except (TypeError, ValueError, KeyError):
+                        discrepancy = f"{left.get('display')} vs {right.get('display')}"
+                    row = _row(
+                        left,
+                        right,
+                        key,
+                        "Claimed arrears / unpaid aggregate",
+                        discrepancy,
+                        (
+                            "Claimed arrears dropped sharply across named complaint dates while "
+                            "the servicing history shows no payments received — damages interrupt."
+                        ),
+                        True,
+                        False,
+                        confidence=90,
+                    )
+                    row["documentary"] = True
+                    row["case_impact_bucket"] = "damages"
+                elif not facts_compatible(left, right):
                     row = _score_graph_or_meta(left, right)
                 elif left.get("key") == right.get("key"):
                     row = _score_pair(left, right, key)
-                else:
-                    row = None
                 if row and row.get("flag"):
                     flagged = True
                     if row.get("case_impact_bucket"):

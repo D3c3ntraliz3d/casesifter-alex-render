@@ -222,21 +222,26 @@ def is_material_finding(item: Finding) -> bool:
     if analysis in {"text_overlay", "graphic_manipulation"} and evidence.get("scan_heavy"):
         return False
     if analysis == "logo_chrome_mismatch":
-        # Ambiguous chrome opinions without a content hook stay non-material.
-        if not (
-            evidence.get("content_hook")
-            or evidence.get("quoted_evidence")
-            or evidence.get("issuer")
-        ):
+        # Issuer alone is not a content hook — Gemini often names the brand while
+        # hallucinating a mismatch on clean decoy statements.
+        quoted = str(evidence.get("quoted_evidence") or "").strip()
+        logo_note = str(evidence.get("logo_note") or evidence.get("crispness_note") or "").strip()
+        if len(quoted) < 12 and len(logo_note) < 12:
             return False
         return item.severity in {"medium", "high", "critical"}
     if analysis == "date_inconsistency" and item.severity in {"medium", "high", "critical"}:
         return True
+    if analysis == "math_error":
+        # Require an arithmetic quote (digits) so clean synthetics without broken math stay quiet.
+        quoted = str(evidence.get("quoted_evidence") or item.explanation or "")
+        if not re.search(r"\d", quoted):
+            return False
+        return item.severity in {"medium", "high", "critical"}
     if evidence.get("ai_generated"):
         return analysis in MAJOR_AI_TYPES
     if analysis == "template_fabrication" and item.severity in {"medium", "high", "critical"}:
         return True
-    if analysis in {"math_error", "historical_impossibility", "template_fabrication"} and item.severity in {
+    if analysis in {"historical_impossibility", "template_fabrication"} and item.severity in {
         "medium",
         "high",
         "critical",
