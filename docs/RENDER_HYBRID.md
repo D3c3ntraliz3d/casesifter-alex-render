@@ -35,6 +35,12 @@ Scratch disk only if needed for in-flight jobs; do not treat it as permanent cas
 - Publish path: `./marketing`
 - Public download page: `/download.html` (installer URL from `assets/downloads.json` → GitHub Releases)
 
+## Deploy branch
+
+Auto-deploy must track a ref that contains `backend/`, `control_plane/`, `marketing/`, and `render.yaml`. Bare `main` historically lacked `control_plane/` and `marketing/` — blueprint sync or deploys from that tip fail all three services while older instances can still answer health checks. Prefer merging the product branch, then pointing Render at `main`.
+
+Docker images bind `0.0.0.0:$PORT` (Render-injected; defaults 8000 analysis / 8010 control).
+
 ## Local compose hint
 
 ```yaml
