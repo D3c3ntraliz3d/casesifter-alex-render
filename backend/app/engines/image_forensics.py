@@ -153,6 +153,12 @@ def _run(
         crop_finding = _aspect_and_crop_hints(image, label, page_no)
         if crop_finding:
             findings.append(crop_finding)
+
+        overlay_finding = _solid_overlay_finding(
+            image, label=label, page_no=page_no, job_id=job_id, prefix=prefix, out=out, artifacts=artifacts
+        )
+        if overlay_finding:
+            findings.append(overlay_finding)
         image.close()
 
     if analyzed == 0:
@@ -402,6 +408,105 @@ def _aspect_and_crop_hints(image: Image.Image, label: str, page: int | None) -> 
             page=page,
         )
     return None
+
+
+def _solid_overlay_finding(
+    image: Image.Image,
+    *,
+    label: str,
+    page_no: int | None,
+    job_id: str,
+    prefix: str,
+    out: Path,
+    artifacts: list[str],
+) -> Finding | None:
+    """Flag a large near-white solid rectangle pasted over page content.
+
+    Classic ELA is near-zero on PNG/flat synthetic whiteouts. A contiguous *pure*
+    white block (brighter and flatter than the paper background) covering mid-page
+    body is the scan-survivable whiteout / redaction paste signal on utility bills.
+    """
+    cv2 = _cv2()
+    rgb = np.asarray(image.convert("RGB"))
+    h, w = rgb.shape[:2]
+    if h < 120 or w < 120:
+        return None
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    # Whole-page blank / near-blank sheets are not "whiteout over content".
+    if float(np.mean(gray > 245)) > 0.88:
+        return None
+    yi, ya = int(h * 0.10), int(h * 0.92)
+    xi, xa = int(w * 0.06), int(w * 0.94)
+    interior = gray[yi:ya, xi:xa]
+    paper = float(np.median(interior))
+    # Pure paste sits above typical paper gray (often ~240–248) at 253–255.
+    pure = (interior >= max(253, int(paper) + 6)).astype(np.uint8) * 255
+    pure_frac = float(pure.mean()) / 255.0
+    if pure_frac < 0.02 or pure_frac > 0.55:
+        return None
+    closed = cv2.morphologyEx(pure, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    n_labels, _, stats, _ = cv2.connectedComponentsWithStats(closed, connectivity=8)
+    if n_labels <= 1:
+        return None
+    areas = stats[1:, cv2.CC_STAT_AREA]
+    idx = 1 + int(np.argmax(areas))
+    x, y, bw, bh, area = (int(v) for v in stats[idx])
+    interior_area = max(1, interior.size)
+    frac = area / interior_area
+    # Mid-sized body block: too small = a few glyphs; too large = blank page.
+    if frac < 0.03 or frac > 0.45:
+        return None
+    if bw < w * 0.25 or bh < max(18, int(h * 0.025)):
+        return None
+    # Require ink above or below the band so paper margins never fire.
+    above = interior[max(0, y - 16) : y, x : x + bw]
+    below = interior[y + bh : min(interior.shape[0], y + bh + 16), x : x + bw]
+    touch = False
+    for strip in (above, below):
+        if strip.size == 0:
+            continue
+        if float(strip.mean()) < paper - 6 or float(strip.std()) >= 8:
+            touch = True
+            break
+    if not touch:
+        return None
+
+    mask = np.zeros((h, w), dtype=np.uint8)
+    mask[yi + y : yi + y + bh, xi + x : xi + x + bw] = 255
+    overlay = _mask_overlay(image, mask)
+    name = f"{prefix}-solid-overlay.png"
+    overlay.save(out / name)
+    artifacts.append(name)
+    return finding(
+        fid=f"img-solid-overlay-{prefix}",
+        category="image",
+        severity="high",
+        title=f"Solid white overlay covering content on {label}",
+        explanation=(
+            f"A near-uniform pure-white rectangle (~{frac:.0%} of the page body, {bw}×{bh}px) "
+            "sits over darker surrounding print. That pattern matches a whiteout / paste / "
+            "redaction block on a scanned utility or bank statement, not ordinary paper margin."
+        ),
+        why_suspicious=(
+            "Authentic issuer statements are rendered as one job. A flat white slab over "
+            "account lines, amounts, or addresses is the usual way an edited field is hidden "
+            "before print-then-scan."
+        ),
+        confidence=78,
+        page=page_no,
+        evidence={
+            "analysis_type": "graphic_manipulation",
+            "heatmap": f"/api/jobs/{job_id}/artifacts/{name}",
+            "overlay_frac": round(frac, 4),
+            "overlay_box_px": [bw, bh],
+            "print_scan_review": True,
+            "content_hook": True,
+        },
+        recommended_action=(
+            "Open the overlay highlight. Compare the covered band to a known-authentic bill "
+            "from the same issuer — look for missing amounts, account digits, or service address."
+        ),
+    )
 
 
 def _to_heatmap(mag: np.ndarray) -> Image.Image:

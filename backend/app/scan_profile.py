@@ -61,13 +61,18 @@ PLEADING_CAPTION_RE = re.compile(
 
 STATEMENT_HINT_RE = re.compile(
     r"(?i)("
-    r"account\s+(?:number|no\.?)|"
-    r"amount\s+due|"
-    r"statement\s+date|"
-    r"previous\s+balance|"
-    r"invoice\s+(?:number|no\.?)|"
+    # OCR often glues tokens ("Amountdue", "Previousbalance") — allow optional space.
+    r"account\s*(?:number|no\.?)|"
+    r"amount\s*due|"
+    r"statement\s*date|"
+    r"previous\s*balance|"
+    r"invoice\s*(?:number|no\.?)|"
+    r"billing\s*(?:period|date)|"
+    r"service\s*address|"
+    r"meter\s*(?:read|reading|number)|"
     r"kwh|therms|"
-    r"check\s+number"
+    r"check\s*number|"
+    r"national\s*grid|con\s*edison|keyspan|pseg"
     r")"
 )
 

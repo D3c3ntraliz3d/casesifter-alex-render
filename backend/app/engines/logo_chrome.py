@@ -107,11 +107,36 @@ def run_logo_chrome_check(
         return []
     if looks_like_recorded_instrument(text, source, doc_kind):
         return []
-    if not looks_like_consumer_statement(text):
+
+    kind = (doc_kind or "").strip().lower()
+    kind_hint = kind in {
+        "exhibit",
+        "bill",
+        "statement",
+        "invoice",
+        "receipt",
+        "evidence",
+        "photo",
+        "image",
+    }
+    source_hint = bool(
+        re.search(
+            r"(?i)\b(bill|statement|utility|invoice|coned|con\s*edison|national\s*grid|keyspan|pseg)\b",
+            source or "",
+        )
+    )
+    statementish = looks_like_consumer_statement(text)
+    sparse_ocr = len((text or "").strip()) < 80
+    # Image-only / OCR-starved utility scans still need chrome review when the kind
+    # or filename says bill/statement, or when we have a raster and almost no text.
+    if not statementish and not kind_hint and not source_hint and not (sparse_ocr and source_file):
         return []
+
     issuer = extract_issuer(text)
     if not issuer:
-        return []
+        if source_file is None:
+            return []
+        issuer = "unknown — read issuer from image"
     statement_date = extract_statement_date(text) or "unknown"
 
     parts = _chrome_parts(text, source_file, issuer, statement_date)
@@ -153,6 +178,9 @@ def run_logo_chrome_check(
     quoted = str(parsed.get("quoted_evidence") or "").strip()
     logo_note = str(parsed.get("logo_description") or parsed.get("era_note") or "").strip()
     crisp = str(parsed.get("crispness_note") or "").strip()
+    observed = str(parsed.get("issuer_observed") or "").strip()
+    if issuer.startswith("unknown") and observed:
+        issuer = observed
     page = parsed.get("page")
     try:
         page_no = int(page) if page is not None else 1

@@ -221,6 +221,17 @@ def is_material_finding(item: Finding) -> bool:
     analysis = str(evidence.get("analysis_type") or "")
     if analysis in {"text_overlay", "graphic_manipulation"} and evidence.get("scan_heavy"):
         return False
+    # Deterministic whiteout / solid paste on a scanned statement (not AI-capped).
+    if item.id.startswith("img-solid-overlay-"):
+        return item.severity in {"medium", "high", "critical"} and bool(
+            evidence.get("print_scan_review") or evidence.get("content_hook")
+        )
+    if (
+        analysis == "graphic_manipulation"
+        and evidence.get("print_scan_review")
+        and item.severity in {"medium", "high", "critical"}
+    ):
+        return True
     if analysis == "logo_chrome_mismatch":
         # Issuer alone is not a content hook — Gemini often names the brand while
         # hallucinating a mismatch on clean decoy statements.

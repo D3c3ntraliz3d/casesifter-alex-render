@@ -150,7 +150,11 @@ def run_pipeline(
         if court_filing
         else "Checking entities and exhibit fraud indicators…",
     )
-    doc_meta = (metadata.extras.get("metadata") or {}).get("document") or {}
+    doc_meta = dict((metadata.extras.get("metadata") or {}).get("document") or {})
+    # Logo/chrome and statement gates need the UI kind + display name — PDF metadata alone
+    # rarely carries "bill" / "National Grid statement.png".
+    doc_meta["doc_kind"] = doc_kind
+    doc_meta["filename"] = display_name or source.name
     contextual = analyze_contextual(
         full_text,
         doc_meta,
