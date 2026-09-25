@@ -70,6 +70,7 @@ def run_pipeline(
     document_id: str | None = None,
     display_name: str | None = None,
     doc_kind: str | None = None,
+    prior_snapshots: list[dict[str, Any]] | None = None,
 ) -> Report:
     started = time.monotonic()
     size_bytes = None
@@ -188,6 +189,7 @@ def run_pipeline(
     fingerprint = text_fingerprint(full_text)
     hashes = excerpt_hashes(full_text)
     fact_matrix: list[dict[str, Any]] = []
+    peer_priors = [snap for snap in (prior_snapshots or []) if isinstance(snap, dict)]
 
     if case_id and document_id:
         update_job(
@@ -272,6 +274,47 @@ def run_pipeline(
             "verify_provider": (gotcha_log or {}).get("verify_provider"),
             "verify_candidate_count": (gotcha_log or {}).get("verify_candidate_count"),
             "verify_ambiguous_count": (gotcha_log or {}).get("verify_ambiguous_count"),
+        }
+    elif peer_priors:
+        # Desktop ephemeral /v1/jobs omit case_id. Peers arrive as a client packet so
+        # occupancy_start and other documentary conflicts still enter the report score.
+        update_job(
+            job_id,
+            stage="case_consistency",
+            percent=92,
+            message="Comparing labeled facts against other files in this desktop case…",
+        )
+        name = display_name or source.name
+        ephemeral_id = document_id or f"ephemeral-{job_id[:12]}"
+        consistency, fact_matrix = compare_to_case(
+            new_document_id=ephemeral_id,
+            new_display_name=name,
+            new_entities=entities,
+            new_amounts=amounts,
+            new_fingerprint=fingerprint,
+            prior_snapshots=peer_priors,
+            new_doc_kind=doc_kind,
+            new_facts=facts,
+            new_text=full_text,
+            case_documents=[
+                {
+                    "id": snap.get("document_id"),
+                    "display_name": snap.get("display_name") or snap.get("original_filename"),
+                    "original_filename": snap.get("original_filename"),
+                    "doc_kind": snap.get("doc_kind"),
+                }
+                for snap in peer_priors
+            ],
+        )
+        findings.extend(consistency)
+        contextual.extras["case_consistency"] = {
+            "prior_documents": len(peer_priors),
+            "alerts": len(consistency),
+            "gotchas": 0,
+            "gotcha_log": {"ephemeral_peers": True},
+            "facts": facts,
+            "fact_matrix": fact_matrix,
+            "ephemeral_peers": True,
         }
 
     findings = triage_findings(findings, profile)

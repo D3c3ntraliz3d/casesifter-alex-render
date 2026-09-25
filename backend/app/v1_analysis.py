@@ -84,6 +84,7 @@ async def create_ephemeral_job(
     submitted_by: str = Form(default="desktop-client"),
     display_name: str | None = Form(default=None),
     doc_kind: str | None = Form(default=None),
+    peer_snapshots: str | None = Form(default=None),
     _auth: dict = Depends(_require_analysis_auth),
 ):
     ensure_sweeper()
@@ -93,6 +94,18 @@ async def create_ephemeral_job(
     suffix = Path(file.filename).suffix.lower()
     if suffix not in settings.allowed_extensions:
         raise HTTPException(400, f"Unsupported file type '{suffix}'.")
+
+    peers: list[dict] = []
+    if peer_snapshots and peer_snapshots.strip():
+        import json
+
+        try:
+            raw = json.loads(peer_snapshots)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(400, "peer_snapshots must be JSON.") from exc
+        if not isinstance(raw, list):
+            raise HTTPException(400, "peer_snapshots must be a JSON list.")
+        peers = [row for row in raw[:80] if isinstance(row, dict)]
 
     job_id = uuid.uuid4().hex
     dest_dir = job_dir(job_id)
@@ -117,7 +130,7 @@ async def create_ephemeral_job(
     update_job(job_id, message="Queued for ephemeral analysis.")
     thread = threading.Thread(
         target=_run_ephemeral,
-        args=(job_id, dest, submitted_by, display_name, doc_kind),
+        args=(job_id, dest, submitted_by, display_name, doc_kind, peers),
         daemon=True,
         name=f"ephemeral-{job_id[:8]}",
     )
@@ -131,6 +144,7 @@ def _run_ephemeral(
     submitted_by: str,
     display_name: str | None,
     doc_kind: str | None,
+    prior_snapshots: list[dict] | None = None,
 ) -> None:
     if not acquire_scan_slot(job_id, timeout=600):
         emit_scan_failed(
@@ -156,6 +170,7 @@ def _run_ephemeral(
             submitted_by=submitted_by,
             display_name=display_name,
             doc_kind=doc_kind,
+            prior_snapshots=prior_snapshots or None,
         )
     except Exception as exc:
         emit_scan_failed(job_id=job_id, stage="failed", error_message=str(exc))

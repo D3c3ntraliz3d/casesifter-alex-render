@@ -1,9 +1,9 @@
 {
   "windows": {
-    "version": "1.0.2",
+    "version": "1.0.3",
     "label": "Download for Windows",
-    "url": "https://github.com/johnnyg123456/court-exhibit-scanner/releases/latest/download/CaseSifter-Setup-1.0.2.exe",
-    "filename": "CaseSifter-Setup-1.0.2.exe",
-    "notes": "Unsigned builds may show a SmartScreen warning until code signing is enabled. Includes desktop fact-conflict surface for cross-doc gotchas."
+    "url": "https://github.com/johnnyg123456/court-exhibit-scanner/releases/latest/download/CaseSifter-Setup-1.0.3.exe",
+    "filename": "CaseSifter-Setup-1.0.3.exe",
+    "notes": "Unsigned builds may show a SmartScreen warning until code signing is enabled. Elevates document risk from cross-doc fact conflicts (Wayne occupancy path)."
   }
 }

@@ -237,6 +237,94 @@ function buildFactConflictPacket(root, caseId) {
   return { case: caseData, documents: docs };
 }
 
+/** Peer snapshots for ephemeral /v1/jobs so compare_to_case can score this file. */
+function buildPeerSnapshots(root, caseId, excludeDocumentId) {
+  const packet = buildFactConflictPacket(root, caseId);
+  if (!packet) return [];
+  return (packet.documents || [])
+    .filter((d) => d.document_id && d.document_id !== excludeDocumentId)
+    .slice(0, 80)
+    .map((d) => ({
+      document_id: d.document_id,
+      display_name: d.display_name,
+      original_filename: d.original_filename,
+      doc_kind: d.doc_kind,
+      text_excerpt: d.text_excerpt,
+      facts: d.facts || [],
+    }));
+}
+
+const RISK_RANK = { green: 0, yellow: 1, red: 2 };
+
+/**
+ * Elevate involved documents when case-level fact conflicts are high/medium.
+ * Ephemeral single-file scores stay green until peers exist; this syncs the
+ * board + "Reports by risk" after packet aggregate (and after each scan).
+ */
+function applyFactConflictRisks(root, caseId, conflicts) {
+  let elevated = 0;
+  for (const conflict of conflicts || []) {
+    const sev = String(conflict.severity || "");
+    if (!["medium", "high", "critical"].includes(sev)) continue;
+    const target = sev === "medium" ? "yellow" : "red";
+    const minScore = target === "red" ? 70 : 35;
+    const ids = new Set();
+    for (const variant of conflict.variants || []) {
+      for (const doc of variant.documents || []) {
+        if (doc?.document_id) ids.add(String(doc.document_id));
+      }
+    }
+    for (const doc of conflict.related_documents || []) {
+      const id = doc?.document_id || doc?.id;
+      if (id) ids.add(String(id));
+    }
+    for (const documentId of ids) {
+      const caseData = getCase(root, caseId);
+      const live = (caseData?.documents || []).find((d) => d.id === documentId);
+      if (!live) continue;
+      const curRank = RISK_RANK[live.risk_level] ?? -1;
+      if (curRank < RISK_RANK[target]) {
+        updateDocument(root, caseId, documentId, { risk_level: target });
+        elevated += 1;
+      }
+      const report = loadReport(root, caseId, documentId);
+      if (!report) continue;
+      const fid = `case-fact-${conflict.id || conflict.field || "x"}`;
+      report.findings = Array.isArray(report.findings) ? report.findings : [];
+      if (!report.findings.some((f) => f && f.id === fid)) {
+        report.findings.unshift({
+          id: fid,
+          category: "case_consistency",
+          severity: sev === "critical" ? "critical" : sev === "medium" ? "medium" : "high",
+          title: conflict.title || "Case fact conflict",
+          explanation: conflict.attorney_why || conflict.gotcha_level || "Cross-document fact conflict.",
+          why_suspicious: conflict.attorney_why || "Same nameable fact with incompatible values across this case.",
+          confidence: Number(conflict.confidence) || 76,
+          evidence: {
+            case_consistency: true,
+            documentary: true,
+            analysis_type: "fact_conflict",
+            contradiction_type: "factual_contradiction",
+            case_impact: true,
+            case_impact_bucket: conflict.case_impact_bucket || "credibility",
+            field: conflict.field,
+            material: true,
+            case_fact_conflict: true,
+            variants: conflict.variants || [],
+          },
+          recommended_action: "Reconcile the conflicting exhibits before relying on either.",
+        });
+      }
+      if ((RISK_RANK[report.risk_level] ?? -1) < RISK_RANK[target]) {
+        report.risk_level = target;
+        report.risk_score = Math.max(Number(report.risk_score) || 0, minScore);
+      }
+      saveReport(root, caseId, documentId, report);
+    }
+  }
+  return elevated;
+}
+
 function loadReport(root, caseId, documentId) {
   const dest = path.join(root, "cases", caseId, "reports", `${documentId}.json`);
   if (!fs.existsSync(dest)) return null;
@@ -313,4 +401,6 @@ module.exports = {
   addCaseMessage,
   buildChatPacket,
   buildFactConflictPacket,
+  buildPeerSnapshots,
+  applyFactConflictRisks,
 };

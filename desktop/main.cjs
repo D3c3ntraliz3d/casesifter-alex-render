@@ -364,6 +364,10 @@ ipcMain.handle("cs:analyze", async (_e, caseId, documentId) => {
     form.append("submitted_by", "desktop-client");
     form.append("display_name", doc.display_name || doc.original_filename);
     if (doc.doc_kind) form.append("doc_kind", doc.doc_kind);
+    const peers = store.buildPeerSnapshots(root, caseId, documentId);
+    if (peers.length) {
+      form.append("peer_snapshots", JSON.stringify(peers));
+    }
 
     let sizeBytes = 0;
     try {
@@ -422,9 +426,27 @@ ipcMain.handle("cs:analyze", async (_e, caseId, documentId) => {
           last_error: null,
           last_scanned_at: (report.audit && report.audit.scanned_at) || new Date().toISOString(),
         });
+        // Elevate peers + this file from case-level conflicts (covers scan order).
+        try {
+          const packet = store.buildFactConflictPacket(root, caseId);
+          if ((packet?.documents || []).length >= 2) {
+            const packed = await remoteJson(
+              `${cfg.analysisApiUrl.replace(/\/$/, "")}/api/v1/fact-conflicts`,
+              {
+                method: "POST",
+                headers: { ...authHeaders(cfg), "Content-Type": "application/json" },
+                body: JSON.stringify({ documents: packet.documents }),
+              }
+            );
+            store.applyFactConflictRisks(root, caseId, packed.fact_conflicts || []);
+          }
+        } catch {
+          /* board refresh still available via listCaseFactConflicts */
+        }
         track(cfg, "scan_completed", {
           job_id: jobId.slice(0, 32),
-          risk_level: report.risk_level || "unknown",
+          risk_level: (store.getCase(root, caseId)?.documents || []).find((d) => d.id === documentId)
+            ?.risk_level || report.risk_level || "unknown",
         });
         try {
           await remoteJson(`${cfg.analysisApiUrl.replace(/\/$/, "")}/api/v1/jobs/${jobId}`, {
@@ -549,7 +571,9 @@ ipcMain.handle("cs:case-fact-conflicts", async (_e, caseId) => {
       headers: { ...authHeaders(cfg), "Content-Type": "application/json" },
       body: JSON.stringify({ documents }),
     });
-    return { fact_conflicts: data.fact_conflicts || [] };
+    const conflicts = data.fact_conflicts || [];
+    const elevated = store.applyFactConflictRisks(root, caseId, conflicts);
+    return { fact_conflicts: conflicts, elevated };
   } catch (err) {
     throw new Error(
       err.message ||

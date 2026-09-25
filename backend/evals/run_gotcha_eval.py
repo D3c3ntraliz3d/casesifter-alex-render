@@ -1373,14 +1373,49 @@ def evaluate_desktop_fact_packet() -> dict:
             "material": True,
         },
     )
+
+    # Ephemeral peer path: compare_to_case findings must yellow/red the file score.
+    from app.case_consistency import compare_to_case
+    from app.fact_extract import extract_facts
+    from app.report.scoring import score_risk
+
+    peer_facts = extract_facts(d22)
+    new_facts = extract_facts(d69)
+    consistency, _matrix = compare_to_case(
+        new_document_id="d69",
+        new_display_name="Wayne affidavit Aug 2022",
+        new_entities={},
+        new_amounts=[],
+        new_fingerprint="x",
+        prior_snapshots=[
+            {
+                "document_id": "d22",
+                "display_name": "Wayne affidavit Sept 2021",
+                "facts": peer_facts,
+                "text_excerpt": d22,
+                "doc_kind": "affidavit",
+            }
+        ],
+        new_doc_kind="affidavit",
+        new_facts=new_facts,
+        new_text=d69,
+        case_documents=[],
+    )
+    peer_risk, peer_score = score_risk(consistency)
+
     return {
         "wayne_packet_ships": len(occupancy) >= 1,
         "wayne_severity_high": bool(occupancy) and occupancy[0].get("severity") == "high",
         "documentary_pairwise_stays_material": is_material_finding(pairwise),
+        "ephemeral_peer_compare_hits": len(consistency) >= 1,
+        "ephemeral_peer_risk_not_green": peer_risk in {"yellow", "red"} and peer_score >= 35,
         "all_pass": len(occupancy) >= 1
         and bool(occupancy)
         and occupancy[0].get("severity") == "high"
-        and is_material_finding(pairwise),
+        and is_material_finding(pairwise)
+        and len(consistency) >= 1
+        and peer_risk in {"yellow", "red"}
+        and peer_score >= 35,
     }
 
 

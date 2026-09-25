@@ -1,6 +1,6 @@
 {
   "name": "casesifter-desktop",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "private": true,
   "description": "CaseSifter thin desktop client — local case files, remote ephemeral analysis",
   "main": "main.cjs",

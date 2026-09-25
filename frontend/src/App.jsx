@@ -1469,7 +1469,12 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
         onOpenReport={onOpenReport}
       />
 
-      <CaseGotchaBoard caseId={caseData.id} documents={docs} onOpenReport={onOpenReport} />
+      <CaseGotchaBoard
+        caseId={caseData.id}
+        documents={docs}
+        onOpenReport={onOpenReport}
+        onRisksElevated={onRefresh}
+      />
 
       <CaseChat
         caseId={caseData.id}
@@ -1681,7 +1686,7 @@ function relatedDocs(item, documents) {
   return fallback ? [fallback] : [];
 }
 
-function CaseGotchaBoard({ caseId, documents, onOpenReport }) {
+function CaseGotchaBoard({ caseId, documents, onOpenReport, onRisksElevated }) {
   const [gotchas, setGotchas] = useState([]);
   const [factConflicts, setFactConflicts] = useState([]);
   const [caseImpact, setCaseImpact] = useState(null);
@@ -1695,6 +1700,9 @@ function CaseGotchaBoard({ caseId, documents, onOpenReport }) {
         setGotchas(data.gotchas || []);
         setFactConflicts(data.factConflicts || []);
         setCaseImpact(data.caseImpact || null);
+        if (data.risksElevated && typeof onRisksElevated === "function") {
+          onRisksElevated();
+        }
       })
       .catch(() => {
         if (cancelled) return;
@@ -1705,7 +1713,7 @@ function CaseGotchaBoard({ caseId, documents, onOpenReport }) {
     return () => {
       cancelled = true;
     };
-  }, [caseId, documents]);
+  }, [caseId, documents, onRisksElevated]);
 
   const materialGotchas = gotchas.filter(
     (item) => item.case_impact !== "noise" && item.severity !== "info",

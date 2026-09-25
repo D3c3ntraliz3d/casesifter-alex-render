@@ -223,10 +223,12 @@ export async function listCaseGotchas(caseId) {
       return ta - tb;
     });
     let factConflicts = [];
+    let risksElevated = 0;
     try {
       if (typeof cs.listCaseFactConflicts === "function") {
         const packed = await callDesktop(cs.listCaseFactConflicts(caseId));
         factConflicts = packed?.fact_conflicts || packed?.factConflicts || [];
+        risksElevated = Number(packed?.elevated) || 0;
       }
     } catch {
       factConflicts = [];
@@ -234,6 +236,7 @@ export async function listCaseGotchas(caseId) {
     return {
       gotchas,
       factConflicts,
+      risksElevated,
       caseImpact: summarizeCaseImpact(allFindings),
     };
   }
