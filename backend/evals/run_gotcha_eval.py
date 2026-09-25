@@ -591,11 +591,13 @@ def evaluate_doc_kinds() -> dict:
         ok = ok and hit
         rows.append({"file": filename, "kind": kind, "expected": expected, "ok": hit})
     unknown = scan_profile_for_kind(None)
+    empty_peek = resolve_scan_profile("", "")
     blank_resolve = resolve_scan_profile("", "NYSCEF DOC. NO. 10 FILED: KINGS COUNTY")
     return {
         "rows": rows,
         "kinds_ok": all(row["ok"] for row in rows),
-        "unknown_kind_is_not_forensic": unknown == PROFILE_COURT_FILING,
+        "empty_peek_blank_kind_is_forensic": empty_peek == PROFILE_FORENSIC,
+        "unknown_kind_defaults_forensic": unknown == PROFILE_FORENSIC,
         "blank_efiling_is_court_filing": blank_resolve == PROFILE_COURT_FILING,
         "exhibit_stays_forensic": scan_profile_for_kind("exhibit") == PROFILE_FORENSIC,
         "all_pass": False,

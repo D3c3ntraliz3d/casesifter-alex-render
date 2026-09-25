@@ -100,7 +100,9 @@ const COURT_FILING_KINDS = new Set([
 ]);
 
 function profileForKind(kind) {
-  if (!kind) return "Set a kind";
+  if (!kind) {
+    return "Blank kind → exhibit forensic (unless the file looks like a pleading)";
+  }
   return COURT_FILING_KINDS.has((kind || "").toLowerCase()) ? "Court filing" : "Exhibit forensic";
 }
 

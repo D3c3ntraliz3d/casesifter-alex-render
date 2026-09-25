@@ -1,9 +1,13 @@
 """Route documents to forensic vs court-filing scan profiles.
 
-Exhibits (and unknown evidence packets) get the full alteration / whiteout / page-fraud
+Exhibits and untyped scanned packets get the full alteration / whiteout / page-fraud
 pipeline. Complaints, motions, and other pleadings are content + case-consistency only:
 their packaging (AcroForm, mixed page size, e-filing stamps) is ordinary court workflow,
 not exhibit forgery evidence.
+
+Blank kind with no usable peek text defaults to forensic — image-only fraud exhibits
+must not silently skip ELA. Explicit court-filing kinds and NYSCEF/pleading peeks
+still take the fast court-filing path.
 """
 
 from __future__ import annotations
@@ -96,9 +100,9 @@ def scan_profile_for_kind(doc_kind: str | None) -> str:
         return PROFILE_COURT_FILING
     if kind in EXHIBIT_KINDS:
         return PROFILE_FORENSIC
-    # Unknown is not a risk signal. Do not send administrative NYSCEF forms
-    # through exhibit forensics just because the kind dropdown is blank.
-    return PROFILE_COURT_FILING
+    # Blank/unknown without peek: forensic so scanned fraud packets still pause on ELA.
+    # resolve_scan_profile routes NYSCEF/pleading text peeks to court_filing.
+    return PROFILE_FORENSIC
 
 
 def is_court_filing(doc_kind: str | None) -> bool:
@@ -122,14 +126,19 @@ def infer_profile_from_text(text: str) -> str | None:
 
 
 def resolve_scan_profile(doc_kind: str | None, peek_text: str = "") -> str:
-    """Honor an explicit kind; otherwise infer from caption / e-filing furniture."""
+    """Honor an explicit kind; otherwise infer from caption / e-filing furniture.
+
+    Empty peek (image-only PDF extract) with blank kind → forensic, not court_filing.
+    """
     kind = (doc_kind or "").strip().lower()
     if kind in COURT_FILING_KINDS:
         return PROFILE_COURT_FILING
     if kind in EXHIBIT_KINDS:
         return PROFILE_FORENSIC
     inferred = infer_profile_from_text(peek_text)
-    return inferred or PROFILE_COURT_FILING
+    if inferred:
+        return inferred
+    return PROFILE_FORENSIC
 
 
 def peek_pdf_text(path: Path, max_pages: int = 2) -> str:
