@@ -5,7 +5,10 @@ services:
     runtime: docker
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
+    # Override CMD so Render's injected PORT is always honored at start.
+    dockerCommand: "uvicorn app.main:app --host 0.0.0.0 --port $PORT"
     plan: starter
+    region: oregon
     healthCheckPath: /api/health
     envVars:
       - key: EPHEMERAL_JOBS
@@ -36,14 +39,19 @@ services:
       - key: SENTRY_ENVIRONMENT
         value: production
 
+  # Native Python — no Docker/Tesseract needed; avoids Oregon Docker deploy failures.
   - type: web
     name: casesifter-control
-    runtime: docker
-    dockerfilePath: ./control_plane/Dockerfile
-    dockerContext: ./control_plane
+    runtime: python
+    rootDir: control_plane
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uvicorn main:app --host 0.0.0.0 --port $PORT"
     plan: starter
+    region: oregon
     healthCheckPath: /health
     envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.3"
       - key: STRIPE_SECRET_KEY
         sync: false
       - key: STRIPE_WEBHOOK_SECRET

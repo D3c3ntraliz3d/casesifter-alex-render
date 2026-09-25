@@ -25,6 +25,7 @@ Scratch disk only if needed for in-flight jobs; do not treat it as permanent cas
 
 ### control (Python from `control_plane/`)
 
+- Render: **native Python** (`rootDir: control_plane`) — no Docker
 - `POST /v1/signup`, `/v1/login`, `GET /v1/entitlement`
 - `POST /v1/checkout`, `POST /v1/webhooks/stripe`
 - `POST /v1/trial` (admin), `POST /v1/dms/webhook` (phase-2 stub)
