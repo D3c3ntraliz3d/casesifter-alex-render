@@ -23,9 +23,9 @@ Scratch disk only if needed for in-flight jobs; do not treat it as permanent cas
 
 **AI split (do not confuse with consumer “lie detectors”):** Gemini reads native PDF/images for alteration/historical chrome. Claude (when keyed) only **judges already-proposed claim/evidence pairs** behind hard vetoes and four gates — it does not open a free-form deception pass.
 
-### control (Python from `control_plane/`)
+### control (Docker from `control_plane/`)
 
-- Render: **native Python** (`rootDir: control_plane`) — no Docker
+- Runtime matches the existing Oregon Docker service (Blueprint cannot flip Docker → native Python on an already-created service).
 - `POST /v1/signup`, `/v1/login`, `GET /v1/entitlement`
 - `POST /v1/checkout`, `POST /v1/webhooks/stripe`
 - `POST /v1/trial` (admin), `POST /v1/dms/webhook` (phase-2 stub)
@@ -40,7 +40,7 @@ Scratch disk only if needed for in-flight jobs; do not treat it as permanent cas
 
 Auto-deploy must track a ref that contains `backend/`, `control_plane/`, `marketing/`, and `render.yaml`. Bare `main` historically lacked `control_plane/` and `marketing/` — blueprint sync or deploys from that tip fail all three services while older instances can still answer health checks. Prefer merging the product branch, then pointing Render at `main`.
 
-Docker images listen on `0.0.0.0:$PORT` (Render-injected; defaults 8000 analysis / 8010 control). Analysis installs `libglib2.0-0` / `libgomp1` alongside Tesseract so OpenCV headless wheels import cleanly on `python:3.12-slim`.
+Docker images listen on `0.0.0.0:$PORT` via `sh -c` CMD (Render-injected; defaults 8000 analysis / 8010 control). Do not replace that with a hardcoded port or a `dockerCommand` that skips `/bin/sh -c` — health checks hit Render's injected PORT, not 8000. OpenCV is lazy-imported at forensic time so a bad wheel cannot block `/api/health`.
 
 ## Local compose hint
 

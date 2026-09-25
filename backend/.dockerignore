@@ -1,0 +1,10 @@
+data
+.venv
+__pycache__
+**/__pycache__
+*.pyc
+.pytest_cache
+evals
+*.md
+.env
+.env.*

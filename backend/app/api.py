@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shutil
 import threading
@@ -54,7 +55,12 @@ SAFE_ID = re.compile(r"^[a-f0-9]{16,64}$")
 @router.get("/health")
 def health():
     ensure_watchdog()
-    return {"status": "ok", "name": settings.app_name, "version": settings.app_version}
+    # RENDER_GIT_COMMIT is injected by Render — use it to confirm which SHA is live.
+    git_commit = (os.environ.get("RENDER_GIT_COMMIT") or "").strip() or None
+    payload = {"status": "ok", "name": settings.app_name, "version": settings.app_version}
+    if git_commit:
+        payload["git_commit"] = git_commit[:12]
+    return payload
 
 
 # --- Entitlement / hybrid billing stubs -------------------------------------------------
