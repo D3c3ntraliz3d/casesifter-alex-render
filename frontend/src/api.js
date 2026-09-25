@@ -245,6 +245,7 @@ export async function listCaseGotchas(caseId) {
   return {
     gotchas: data.gotchas || [],
     factConflicts: data.fact_conflicts || [],
+    risksElevated: Number(data.risks_elevated) || 0,
     caseImpact: data.case_impact || null,
   };
 }

@@ -581,6 +581,45 @@ def list_case_fact_conflicts(case_id: str) -> list[dict[str, Any]]:
     return aggregate_fact_conflicts(list_case_snapshots(case_id))
 
 
+_RISK_RANK = {"green": 0, "yellow": 1, "red": 2}
+
+
+def elevate_documents_for_fact_conflicts(case_id: str) -> int:
+    """Bump risk_level on every document involved in a material case fact conflict.
+
+    Vault scans only attach pairwise findings to the *new* file, so the earlier
+    affidavit can stay green in Reports-by-risk even when occupancy_start collides.
+    Call after scan and when the gotcha board loads so :5173 matches the interrupt.
+    """
+    conflicts = list_case_fact_conflicts(case_id)
+    elevated = 0
+    for conflict in conflicts:
+        sev = str(conflict.get("severity") or "")
+        if sev not in {"medium", "high", "critical"}:
+            continue
+        target = "yellow" if sev == "medium" else "red"
+        ids: set[str] = set()
+        for variant in conflict.get("variants") or []:
+            for doc in variant.get("documents") or []:
+                doc_id = doc.get("document_id")
+                if doc_id:
+                    ids.add(str(doc_id))
+        for doc in conflict.get("related_documents") or []:
+            doc_id = doc.get("document_id") or doc.get("id")
+            if doc_id:
+                ids.add(str(doc_id))
+        for document_id in ids:
+            row = get_document(document_id)
+            if not row or row.get("case_id") != case_id:
+                continue
+            cur = str(row.get("risk_level") or "")
+            if _RISK_RANK.get(cur, -1) >= _RISK_RANK[target]:
+                continue
+            update_document(document_id, risk_level=target)
+            elevated += 1
+    return elevated
+
+
 def list_case_snapshots(case_id: str) -> list[dict[str, Any]]:
     with connect() as conn:
         rows = conn.execute(

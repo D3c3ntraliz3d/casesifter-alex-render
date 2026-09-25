@@ -424,6 +424,8 @@ def run_pipeline(
             text_excerpt=full_text[:24000],
             facts=facts,
         )
+        if case_id:
+            cases_db.elevate_documents_for_fact_conflicts(case_id)
         emit_scan_outcomes(doc_kind=doc_kind, findings=findings, risk_level=risk_level)
 
     duration_ms = int((time.monotonic() - started) * 1000)

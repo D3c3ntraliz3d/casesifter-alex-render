@@ -236,6 +236,7 @@ def api_list_case_gotchas(case_id: str):
     _validate_id(case_id)
     if cases_db.get_case(case_id) is None:
         raise HTTPException(404, "Unknown case.")
+    elevated = cases_db.elevate_documents_for_fact_conflicts(case_id)
     docs = {doc["id"]: doc for doc in cases_db.list_documents(case_id)}
     items = []
     for item in cases_db.list_case_gotchas(case_id):
@@ -251,6 +252,7 @@ def api_list_case_gotchas(case_id: str):
         "gotchas": items,
         "fact_conflicts": cases_db.list_case_fact_conflicts(case_id),
         "case_impact": cases_db.list_case_impact(case_id),
+        "risks_elevated": elevated,
     }
 
 
