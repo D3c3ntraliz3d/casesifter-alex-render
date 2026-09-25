@@ -1001,6 +1001,47 @@ def dedupe_gotchas(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [grouped[key] for key in order]
 
 
+def fact_conflicts_from_packet(documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Aggregate conflicts from a client-supplied packet (desktop ephemeral scans).
+
+    Desktop posts each file to /api/v1/jobs with no case_id, so compare_to_case never
+    runs at scan time. Reports still carry comparison.facts / text_excerpt — rebuild
+    snapshots here so occupancy_start and peers surface on the case board.
+    """
+    from app.fact_extract import extract_facts
+
+    snaps: list[dict[str, Any]] = []
+    for doc in documents or []:
+        if not isinstance(doc, dict):
+            continue
+        doc_id = str(doc.get("document_id") or doc.get("id") or "").strip()
+        if not doc_id:
+            continue
+        name = (
+            doc.get("display_name")
+            or doc.get("original_filename")
+            or doc.get("name")
+            or "document"
+        )
+        text = str(doc.get("text_excerpt") or doc.get("text") or "")
+        facts = list(doc.get("facts") or [])
+        if not facts and text.strip():
+            facts = extract_facts(text)
+        if not facts:
+            continue
+        snaps.append(
+            {
+                "document_id": doc_id,
+                "display_name": name,
+                "original_filename": doc.get("original_filename") or name,
+                "doc_kind": doc.get("doc_kind"),
+                "facts": facts,
+                "text_excerpt": text[:24000],
+            }
+        )
+    return aggregate_fact_conflicts(snaps)
+
+
 def aggregate_fact_conflicts(snapshots: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """One conflict per labeled fact, listing every file and value."""
     # Same recording-number scoping as compare_to_case: a bundled exhibit

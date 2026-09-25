@@ -57,6 +57,8 @@ Primary buyers = bank / big-corp counsel. Prefer opposing BS early; also surface
 
 **Correct silence (must_suppress fixtures):** calibration plants (Marcus age vs Janet wire; medical office corroboration; recording lag; occupancy covenant; middle-name expansion; soft time hedge; sole-occupant vs AOS; denial of transfer notice; inspector unknown vs depo; marital decade gap; rental he-said; mortgage covenant vs amended; occupancy vs first utility absence; omitted mod request). Soft advocacy/inference plants stay quiet.
 
+**Desktop board:** ephemeral `/api/v1/jobs` scans omit `case_id`, so cross-doc conflicts are rebuilt from cached report facts via `POST /api/v1/fact-conflicts` (see `fact_conflicts_from_packet`). Do not treat an empty desktop gotcha list as proof the packet is clean until that aggregate has run.
+
 **Mock template:** ignore UA220 / Maple / DOB±1 / income-AGI harness fallback.
 
 **Track C:** keep tamper interrupts; clean consumer statements must not upgrade soft ELA / logo-chrome / math opinions to material without leftover template chrome or a substantive quoted content hook (`exhibit-clean-bank_*.pdf` stays green).

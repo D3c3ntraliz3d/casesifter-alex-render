@@ -1712,7 +1712,8 @@ function CaseGotchaBoard({ caseId, documents, onOpenReport }) {
   );
   const total = materialGotchas.length + factConflicts.length;
   const impact = caseImpact || {};
-  const materialCount = impact.material_count ?? total;
+  // case_impact summary is findings-only; factConflicts are case-level aggregate cards.
+  const materialCount = (impact.material_count ?? materialGotchas.length) + factConflicts.length;
   const noiseCount = impact.noise_collapsed ?? impact.noise_count ?? 0;
   const fraudCount = impact.fraud_count ?? 0;
 

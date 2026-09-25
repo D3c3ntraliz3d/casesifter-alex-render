@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld("casesifter", {
   listCaseChat: (caseId) => ipcRenderer.invoke("cs:list-chat", caseId),
   askCaseChat: (caseId, question, focusDocumentId) =>
     ipcRenderer.invoke("cs:case-chat", caseId, question, focusDocumentId),
+  listCaseFactConflicts: (caseId) => ipcRenderer.invoke("cs:case-fact-conflicts", caseId),
   openDocument: (caseId, documentId) => ipcRenderer.invoke("cs:open-doc", caseId, documentId),
   login: (email, password) => ipcRenderer.invoke("cs:login", email, password),
   signup: (email, password, name, acceptedTerms, inviteCode) =>

@@ -202,7 +202,8 @@ export async function patchDocument(caseId, documentId, payload) {
 export async function listCaseGotchas(caseId) {
   const cs = desktop();
   if (cs) {
-    // Gotchas live inside cached reports for now.
+    // Gotchas live inside cached reports; case-level fact conflicts need a packet
+    // aggregate because ephemeral /v1/jobs scans never receive case_id.
     const data = await cs.getCase(caseId);
     const gotchas = [];
     const allFindings = [];
@@ -221,9 +222,18 @@ export async function listCaseGotchas(caseId) {
       const tb = b.evidence?.tainted_support || b.tainted_support ? 0 : 1;
       return ta - tb;
     });
+    let factConflicts = [];
+    try {
+      if (typeof cs.listCaseFactConflicts === "function") {
+        const packed = await callDesktop(cs.listCaseFactConflicts(caseId));
+        factConflicts = packed?.fact_conflicts || packed?.factConflicts || [];
+      }
+    } catch {
+      factConflicts = [];
+    }
     return {
       gotchas,
-      factConflicts: [],
+      factConflicts,
       caseImpact: summarizeCaseImpact(allFindings),
     };
   }
@@ -258,6 +268,8 @@ function summarizeCaseImpact(findings) {
       (f.category === "gotcha" ||
         ev.gotcha ||
         fraudTypes.has(ev.analysis_type) ||
+        ev.analysis_type === "fact_conflict" ||
+        (f.category === "case_consistency" && ev.documentary && ev.case_impact) ||
         ev.tainted_support);
     if (isMaterial) {
       const row = {

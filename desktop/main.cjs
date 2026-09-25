@@ -533,6 +533,30 @@ ipcMain.handle("cs:case-chat", async (_e, caseId, question, focusDocumentId) => 
     used_model: Boolean(data.used_model),
   };
 });
+
+ipcMain.handle("cs:case-fact-conflicts", async (_e, caseId) => {
+  const cfg = loadConfig();
+  await ensureAnalyzeAllowed(cfg);
+  const packet = store.buildFactConflictPacket(root, caseId);
+  if (!packet) throw new Error("Unknown case.");
+  const documents = (packet.documents || []).slice(0, 80);
+  if (documents.length < 2) {
+    return { fact_conflicts: [] };
+  }
+  try {
+    const data = await remoteJson(`${cfg.analysisApiUrl.replace(/\/$/, "")}/api/v1/fact-conflicts`, {
+      method: "POST",
+      headers: { ...authHeaders(cfg), "Content-Type": "application/json" },
+      body: JSON.stringify({ documents }),
+    });
+    return { fact_conflicts: data.fact_conflicts || [] };
+  } catch (err) {
+    throw new Error(
+      err.message ||
+        `Fact-conflict check unreachable at ${cfg.analysisApiUrl}. Start the analysis service and reopen the case.`
+    );
+  }
+});
 ipcMain.handle("cs:open-doc", async (_e, caseId, documentId) => {
   const caseData = store.getCase(root, caseId);
   const doc = (caseData?.documents || []).find((d) => d.id === documentId);

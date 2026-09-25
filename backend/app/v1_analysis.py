@@ -42,6 +42,19 @@ class CaseChatPacketBody(BaseModel):
     documents: list[CaseChatPacketDoc] = Field(default_factory=list, max_length=80)
 
 
+class FactConflictPacketDoc(BaseModel):
+    document_id: str = Field(min_length=1, max_length=80)
+    display_name: str | None = None
+    original_filename: str | None = None
+    doc_kind: str | None = None
+    text_excerpt: str = ""
+    facts: list[dict] | None = None
+
+
+class FactConflictPacketBody(BaseModel):
+    documents: list[FactConflictPacketDoc] = Field(default_factory=list, max_length=80)
+
+
 def _require_analysis_auth(
     authorization: str | None = Header(default=None),
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
@@ -225,6 +238,30 @@ def ephemeral_case_chat(
         "used_model": bool(result.get("used_model")),
         "ephemeral": True,
     }
+
+
+@v1.post("/fact-conflicts")
+def ephemeral_fact_conflicts(
+    body: FactConflictPacketBody,
+    _auth: dict = Depends(_require_analysis_auth),
+):
+    """Case-level labeled-fact conflicts from a desktop report packet (no vault).
+
+    Ephemeral /v1/jobs scans omit case_id, so occupancy_start and peers never
+    enter compare_to_case at scan time. The thin client posts cached
+    comparison.facts / text_excerpt here to rebuild the case board.
+    """
+    from app.case_consistency import fact_conflicts_from_packet
+
+    docs = [item.model_dump() for item in body.documents]
+    total = sum(len(d.get("text_excerpt") or "") for d in docs)
+    if total > 600_000:
+        raise HTTPException(413, "Excerpt packet too large. Rescan fewer documents or shorten excerpts.")
+    if len(docs) < 2:
+        return {"fact_conflicts": [], "ephemeral": True}
+    conflicts = fact_conflicts_from_packet(docs)
+    material = [row for row in conflicts if row.get("severity") in {"high", "medium"}]
+    return {"fact_conflicts": material, "ephemeral": True}
 
 
 @v1.post("/sweep")

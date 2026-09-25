@@ -256,9 +256,18 @@ def is_material_finding(item: Finding) -> bool:
             "critical",
         }
     if item.category == "case_consistency":
-        # Exhibit letter mismatches and cross-doc labeled facts are not file scores.
+        # Exhibit letter mismatches are not file scores. Documentary graph conflicts
+        # (occupancy_start, presence-on-date, etc.) stay material — otherwise triage
+        # demotes them to info and every exhibit risks green while the case board
+        # alone holds the interrupt (desktop ephemeral scans never even reach the board).
         if str(evidence.get("field") or "") == "missing_exhibit":
             return False
+        if (
+            evidence.get("documentary")
+            and evidence.get("case_impact")
+            and item.severity in {"medium", "high", "critical"}
+        ):
+            return True
         if evidence.get("prior_document_id"):
             return False
         return bool(evidence.get("material")) and item.severity in {"medium", "high", "critical"}

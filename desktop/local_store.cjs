@@ -208,6 +208,35 @@ function buildChatPacket(root, caseId) {
   return { case: caseData, documents: docs };
 }
 
+/** Facts + excerpts from cached reports for case-level conflict aggregation. */
+function buildFactConflictPacket(root, caseId) {
+  const caseData = getCase(root, caseId);
+  if (!caseData) return null;
+  const docs = [];
+  for (const doc of caseData.documents || []) {
+    if (doc.status !== "complete") continue;
+    const report = loadReport(root, caseId, doc.id);
+    if (!report) continue;
+    const comparison = report.comparison || {};
+    const excerpt =
+      comparison.text_excerpt ||
+      report.text_excerpt ||
+      doc.text_excerpt ||
+      "";
+    const facts = Array.isArray(comparison.facts) ? comparison.facts : [];
+    if (!facts.length && !String(excerpt || "").trim()) continue;
+    docs.push({
+      document_id: doc.id,
+      display_name: doc.display_name || doc.original_filename,
+      original_filename: doc.original_filename,
+      doc_kind: doc.doc_kind,
+      text_excerpt: String(excerpt || "").slice(0, 24000),
+      facts,
+    });
+  }
+  return { case: caseData, documents: docs };
+}
+
 function loadReport(root, caseId, documentId) {
   const dest = path.join(root, "cases", caseId, "reports", `${documentId}.json`);
   if (!fs.existsSync(dest)) return null;
@@ -283,4 +312,5 @@ module.exports = {
   listCaseMessages,
   addCaseMessage,
   buildChatPacket,
+  buildFactConflictPacket,
 };

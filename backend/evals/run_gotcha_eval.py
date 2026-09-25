@@ -1308,6 +1308,82 @@ def evaluate_lie_detector() -> dict:
     }
 
 
+def evaluate_desktop_fact_packet() -> dict:
+    """Wayne occupancy must ship via the desktop ephemeral packet path.
+
+    Desktop /v1/jobs scans omit case_id; the board rebuilds conflicts from a
+    client-supplied facts/text packet. This is the regression that quieted
+    case-name “waynes” / 11467 P001 on the thin client.
+    """
+    from app.case_consistency import fact_conflicts_from_packet
+    from app.finding_policy import is_material_finding
+    from app.models import Finding
+
+    d22 = (
+        "AFFIDAVIT OF WAYNE ALEXANDER\n"
+        "I, Wayne Alexander, being duly sworn, state:\n"
+        "I have occupied the Subject Property continuously as my primary residence "
+        "since April 3, 2019.\n"
+    )
+    d69 = (
+        "AFFIDAVIT OF WAYNE ALEXANDER\n"
+        "I, Wayne Alexander, being duly sworn, state:\n"
+        "I entered into occupancy of the Subject Property on May 17, 2019.\n"
+    )
+    hits = fact_conflicts_from_packet(
+        [
+            {
+                "document_id": "d22",
+                "display_name": "Wayne affidavit Sept 2021",
+                "text_excerpt": d22,
+            },
+            {
+                "document_id": "d69",
+                "display_name": "Wayne affidavit Aug 2022",
+                "text_excerpt": d69,
+            },
+        ]
+    )
+    material = [row for row in hits if row.get("severity") in {"high", "medium"}]
+    occupancy = [
+        row
+        for row in material
+        if row.get("field") == "occupancy_start" or "Occupancy start" in str(row.get("title") or "")
+    ]
+
+    # Pairwise documentary case_consistency must stay material for risk scoring
+    # (otherwise both exhibits risk green even when the board has the card).
+    pairwise = Finding(
+        id="ctx-case-occ",
+        category="case_consistency",
+        severity="high",
+        title="Occupancy start does not match prior affidavit",
+        explanation="April 3 vs May 17",
+        why_suspicious="same person incompatible occupancy_start",
+        confidence=88,
+        evidence={
+            "case_consistency": True,
+            "prior_document_id": "d22",
+            "prior_display_name": "Wayne affidavit Sept 2021",
+            "field": "occupancy_start",
+            "documentary": True,
+            "analysis_type": "fact_conflict",
+            "case_impact": True,
+            "case_impact_bucket": "credibility",
+            "material": True,
+        },
+    )
+    return {
+        "wayne_packet_ships": len(occupancy) >= 1,
+        "wayne_severity_high": bool(occupancy) and occupancy[0].get("severity") == "high",
+        "documentary_pairwise_stays_material": is_material_finding(pairwise),
+        "all_pass": len(occupancy) >= 1
+        and bool(occupancy)
+        and occupancy[0].get("severity") == "high"
+        and is_material_finding(pairwise),
+    }
+
+
 def evaluate() -> dict:
     dedupe = evaluate_dedupe()
     dedupe["all_pass"] = all(dedupe[key] for key in dedupe if key != "all_pass")
@@ -1328,6 +1404,7 @@ def evaluate() -> dict:
     case_impact = evaluate_case_impact()
     case_impact["all_pass"] = all(case_impact[key] for key in case_impact if key != "all_pass")
     lie_detector = evaluate_lie_detector()
+    desktop_packet = evaluate_desktop_fact_packet()
     return {
         "pairs": evaluate_pairs(),
         "pipeline": evaluate_pipeline(),
@@ -1342,6 +1419,7 @@ def evaluate() -> dict:
         "statement_dates": statement_dates,
         "case_impact": case_impact,
         "lie_detector": lie_detector,
+        "desktop_fact_packet": desktop_packet,
     }
 
 
@@ -1369,6 +1447,7 @@ def main() -> None:
     print("STATEMENT DATES", result["statement_dates"])
     print("CASE IMPACT", result["case_impact"])
     print("LIE DETECTOR", result["lie_detector"])
+    print("DESKTOP FACT PACKET", result["desktop_fact_packet"])
     failed = bool(
         misses
         or pipe["misses"]
@@ -1382,6 +1461,7 @@ def main() -> None:
         or not result["statement_dates"]["all_pass"]
         or not result["case_impact"]["all_pass"]
         or not result["lie_detector"]["all_pass"]
+        or not result["desktop_fact_packet"]["all_pass"]
     )
     if not result["score_independence"]["title_does_not_matter"]:
         failed = True
