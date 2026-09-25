@@ -4,7 +4,6 @@ import io
 from pathlib import Path
 from typing import Any
 
-import cv2
 import numpy as np
 from PIL import Image
 
@@ -13,6 +12,14 @@ from app.engines import finding, timed_module
 from app.ingestion import extract_embedded_images, iter_pdf_pages, load_image
 from app.models import Finding, ModuleResult
 from app.storage import artifact_dir
+
+
+def _cv2():
+    """Lazy import — keep analysis API bootable if OpenCV wheels misbehave on slim images."""
+    import cv2
+
+    return cv2
+
 
 def analyze_image_forensics(
     path: Path,
@@ -263,6 +270,7 @@ def _collect_images(path: Path):
 
 
 def error_level_analysis(image: Image.Image, quality: int | None = None, amplify: int | None = None) -> tuple[Image.Image, float, float, int]:
+    cv2 = _cv2()
     quality = quality or settings.ela_quality
     amplify = amplify or settings.ela_scale
     working = image.convert("RGB")
@@ -297,6 +305,7 @@ def error_level_analysis(image: Image.Image, quality: int | None = None, amplify
 
 
 def detect_copy_move(image: Image.Image, max_side: int = 640, block: int = 16, stride: int = 12):
+    cv2 = _cv2()
     rgb = np.array(image.convert("RGB"))
     h0, w0 = rgb.shape[:2]
     scale = min(1.0, max_side / max(h0, w0))
@@ -396,6 +405,7 @@ def _aspect_and_crop_hints(image: Image.Image, label: str, page: int | None) -> 
 
 
 def _to_heatmap(mag: np.ndarray) -> Image.Image:
+    cv2 = _cv2()
     norm = mag.copy()
     p99 = np.percentile(norm, 99) or 1.0
     norm = np.clip(norm / p99 * 255.0, 0, 255).astype(np.uint8)
@@ -405,6 +415,7 @@ def _to_heatmap(mag: np.ndarray) -> Image.Image:
 
 
 def _mask_overlay(image: Image.Image, mask: np.ndarray) -> Image.Image:
+    cv2 = _cv2()
     base = np.asarray(image.convert("RGB")).copy()
     if mask.shape[:2] != base.shape[:2]:
         mask = cv2.resize(mask, (base.shape[1], base.shape[0]), interpolation=cv2.INTER_NEAREST)
