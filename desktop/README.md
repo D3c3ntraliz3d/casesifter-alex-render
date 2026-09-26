@@ -79,26 +79,36 @@ No smoke-test throw remains in the tree — after end-to-end verification, produ
 4. Point marketing at the asset in [`marketing/assets/downloads.json`](../marketing/assets/downloads.json) (update `url` / `version` / `filename` to match the release).
 5. Confirm [`marketing/download.html`](../marketing/download.html) shows the button (loads that JSON).
 
-### Windows SmartScreen / “suspicious download”
+### Windows SmartScreen — required before you sell downloads
 
-Browsers and Windows block **unsigned** `.exe` installers from unknown publishers. That is expected until Authenticode signing is on.
+You **cannot** sell a normal Windows download without Authenticode signing. Browsers and SmartScreen will keep blocking unsigned `.exe` files; “Keep anyway” is only for internal testers.
 
-**Proper fix — code sign the NSIS installer**
+Pick **one** path, then ship a new `desktop-v*` tag:
 
-1. Buy an **OV code signing certificate** (DigiCert, Sectigo, SSL.com, …) issued to your company legal name. Export a `.pfx` (or use [Azure Trusted Signing](https://learn.microsoft.com/en-us/azure/trusted-signing/)).
-2. In the GitHub repo → Settings → Secrets:
-   - `CSC_LINK` — base64 of the `.pfx` (`base64 -w0 cert.pfx` on Linux / `certutil -encode` on Windows)
-   - `CSC_KEY_PASSWORD` — PFX password
-3. Bump `desktop/package.json` version, tag `desktop-vX.Y.Z`, push the tag. The [desktop-release](../.github/workflows/desktop-release.yml) workflow signs with electron-builder when those secrets are present.
-4. Update [`marketing/assets/downloads.json`](../marketing/assets/downloads.json) to the new `CaseSifter-Setup-X.Y.Z.exe` and redeploy marketing.
+#### Option A (recommended): Azure Trusted Signing
 
-New publishers still see occasional SmartScreen prompts until download reputation builds; signing removes the “Unknown publisher” / dangerous-file block that unsigned builds always hit.
+Cloud signing, no USB token. Good fit for GitHub Actions.
 
-**Override for a tester machine (unsigned build only)**
+1. In Azure: create a Trusted Signing account + identity validation + certificate profile ([docs](https://learn.microsoft.com/en-us/azure/trusted-signing/)).
+2. Create an App registration; grant it **Trusted Signing Certificate Profile Signer** on that account; create a client secret.
+3. GitHub → Settings → Secrets and variables → Actions — add:
+   - `AZURE_TRUSTED_SIGNING_ENDPOINT` — region URI (e.g. `https://eus.codesigning.azure.net`)
+   - `AZURE_TRUSTED_SIGNING_ACCOUNT` — account name
+   - `AZURE_TRUSTED_SIGNING_PROFILE` — certificate profile name
+   - `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`
+4. Optional repo **variable** `REQUIRE_SIGNED_DESKTOP=true` so CI fails if a release is still unsigned.
+5. Bump version, `git tag desktop-vX.Y.Z && git push origin desktop-vX.Y.Z`.
+6. Point [`marketing/assets/downloads.json`](../marketing/assets/downloads.json) at the new signed `CaseSifter-Setup-X.Y.Z.exe`.
 
-- **Edge/Chrome download bar:** ⋯ → Keep → Show more → Keep anyway  
-- **SmartScreen after run:** More info → Run anyway  
-- Or: right-click the `.exe` → Properties → Unblock → OK, then run
+#### Option B: OV code signing `.pfx` (DigiCert / Sectigo / SSL.com)
+
+1. Buy an **organization-validated** code signing cert in your legal entity name; export `.pfx`.
+2. Secrets: `CSC_LINK` = base64 of the PFX (`[Convert]::ToBase64String([IO.File]::ReadAllBytes('cert.pfx'))` in PowerShell), `CSC_KEY_PASSWORD` = PFX password.
+3. Same tag → release → update `downloads.json` as above.
+
+New publisher reputation still settles over the first wave of downloads after signing; unsigned builds never become “normal.”
+
+**Internal tester override only (do not tell customers this):** Edge/Chrome → Keep anyway; or Properties → Unblock; or SmartScreen → More info → Run anyway.
 
 Trial / Subscribe still happens **in-app** (Account), not at download time.
 

@@ -8,8 +8,8 @@
     "start": "electron .",
     "prepare-ui": "node scripts/prepare-ui.cjs",
     "pack": "npm run prepare-ui && electron-builder --dir",
-    "dist": "npm run prepare-ui && electron-builder --win nsis",
-    "dist:win": "npm run dist"
+    "dist": "node scripts/dist-win.cjs",
+    "dist:win": "node scripts/dist-win.cjs"
   },
   "build": {
     "appId": "com.casesifter.app",

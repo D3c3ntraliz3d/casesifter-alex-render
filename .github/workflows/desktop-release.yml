@@ -32,23 +32,44 @@ jobs:
         working-directory: desktop
         run: npm ci
 
-      - name: Build NSIS installer
+      - name: Build NSIS installer (signed when secrets present)
         working-directory: desktop
         env:
           CASESIFTER_ANALYSIS_URL: ${{ vars.CASESIFTER_ANALYSIS_URL }}
           CASESIFTER_CONTROL_URL: ${{ vars.CASESIFTER_CONTROL_URL }}
-          # Real project DSN — bake into Vite UI + Electron main at pack time.
           VITE_SENTRY_DSN: ${{ secrets.VITE_SENTRY_DSN }}
           CASESIFTER_SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
           VITE_SENTRY_ENVIRONMENT: production
           CASESIFTER_SENTRY_ENV: production
-          # Authenticode: set CSC_LINK (base64 .pfx) + CSC_KEY_PASSWORD in repo secrets.
-          # When unset, electron-builder ships an unsigned installer (SmartScreen warning).
+          # Preferred for selling: Azure Trusted Signing (cloud, no USB token).
+          AZURE_TRUSTED_SIGNING_ENDPOINT: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          AZURE_TRUSTED_SIGNING_ACCOUNT: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT }}
+          AZURE_TRUSTED_SIGNING_PROFILE: ${{ secrets.AZURE_TRUSTED_SIGNING_PROFILE }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          # Alternative: traditional OV .pfx (base64) from DigiCert/Sectigo/SSL.com.
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
-          # Only skip auto-discovery when no signing secrets are configured.
-          CSC_IDENTITY_AUTO_DISCOVERY: ${{ secrets.CSC_LINK == '' && 'false' || 'true' }}
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: npm run dist:win
+
+      - name: Fail if customer build is still unsigned
+        working-directory: desktop
+        shell: pwsh
+        env:
+          REQUIRE_SIGNED: ${{ vars.REQUIRE_SIGNED_DESKTOP }}
+        run: |
+          $exe = Get-ChildItem dist/CaseSifter-Setup-*.exe | Select-Object -First 1
+          if (-not $exe) { throw "No installer produced" }
+          $sig = Get-AuthenticodeSignature $exe.FullName
+          Write-Host ("Signature status: {0}  Signer: {1}" -f $sig.Status, $sig.SignerCertificate.Subject)
+          if ($env:REQUIRE_SIGNED -eq "true" -and $sig.Status -ne "Valid") {
+            throw "REQUIRE_SIGNED_DESKTOP=true but installer is not Authenticode-signed. Add Azure Trusted Signing or CSC_LINK secrets."
+          }
+          if ($sig.Status -ne "Valid") {
+            Write-Warning "UNSIGNED installer — do not point marketing downloads at this build for paying customers."
+          }
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
