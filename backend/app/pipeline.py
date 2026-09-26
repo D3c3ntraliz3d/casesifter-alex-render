@@ -21,7 +21,7 @@ from app.engines.contextual_logic import analyze_contextual
 from app.engines.image_forensics import analyze_image_forensics
 from app.engines.metadata import analyze_metadata
 from app.engines.ocr_text import analyze_ocr_text
-from app.engines.pdf_integrity import analyze_pdf_integrity
+from app.engines.pdf_integrity import analyze_pdf_integrity, pdf_origin_guess
 from app.engines.structural import analyze_structural
 from app.ingestion import sha256_file, sniff_type
 from app.models import AuditTrail, Finding, FontUsage, ModuleResult, PageDimension, Report, TimelineEvent
@@ -30,7 +30,12 @@ from app.engines.template_fabrication import find_template_leftovers, review_pri
 from app.finding_policy import triage_findings
 from app.impact_judge import apply_case_impact_judge
 from app.report import executive_summary, pick_top_findings, recommended_actions, render_html, render_pdf, score_risk
-from app.scan_profile import PROFILE_COURT_FILING, peek_pdf_text, resolve_scan_profile
+from app.scan_profile import (
+    PROFILE_COURT_FILING,
+    apply_media_override,
+    peek_pdf_text,
+    resolve_scan_profile,
+)
 from app.storage import job_dir, update_job
 from app.product_events import emit_scan_completed, emit_scan_started, finding_count_summary
 from app.telemetry import emit_scan_outcomes
@@ -80,6 +85,13 @@ def run_pipeline(
         pass
     peek_text = peek_pdf_text(source) if not (doc_kind or "").strip() else ""
     profile = resolve_scan_profile(doc_kind, peek_text)
+    # Scan always wins: images / scan-heavy PDFs stay on the forgery lane even
+    # when kind or caption inference said court_filing.
+    origin_for_profile: dict[str, Any] = {}
+    suffix = source.suffix.lower()
+    if suffix == ".pdf" and profile == PROFILE_COURT_FILING:
+        origin_for_profile = pdf_origin_guess(source)
+    profile = apply_media_override(profile, suffix=suffix, origin=origin_for_profile)
     court_filing = profile == PROFILE_COURT_FILING
 
     emit_scan_started(
@@ -130,7 +142,7 @@ def run_pipeline(
         images = analyze_image_forensics(
             source,
             job_id,
-            origin=(pdf.extras or {}).get("origin_guess") or {},
+            origin=(pdf.extras or {}).get("origin_guess") or origin_for_profile or {},
         )
 
     update_job(

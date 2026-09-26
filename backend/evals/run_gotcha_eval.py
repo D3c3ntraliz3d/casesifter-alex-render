@@ -13,7 +13,13 @@ from app.case_consistency import (
     dedupe_gotchas,
     _internal_fact_conflicts,
 )
-from app.scan_profile import PROFILE_COURT_FILING, PROFILE_FORENSIC, resolve_scan_profile, scan_profile_for_kind
+from app.scan_profile import (
+    PROFILE_COURT_FILING,
+    PROFILE_FORENSIC,
+    apply_media_override,
+    resolve_scan_profile,
+    scan_profile_for_kind,
+)
 from app.evidence_tier import classify_tier, evidence_is_probative, find_internal_evidence_defects
 from app.gotcha import (
     RETIRED_TYPES,
@@ -592,14 +598,52 @@ def evaluate_doc_kinds() -> dict:
         rows.append({"file": filename, "kind": kind, "expected": expected, "ok": hit})
     unknown = scan_profile_for_kind(None)
     empty_peek = resolve_scan_profile("", "")
-    blank_resolve = resolve_scan_profile("", "NYSCEF DOC. NO. 10 FILED: KINGS COUNTY")
+    # National: e-filing stamp chrome alone must not choose court_filing.
+    blank_stamp = resolve_scan_profile("", "NYSCEF DOC. NO. 10 FILED: KINGS COUNTY INDEX NO. 123")
+    blank_stamp_statement = resolve_scan_profile(
+        "",
+        "FILED: KINGS COUNTY CLERK 01/15/2024 INDEX NO. 533445/2023\n"
+        "NYSCEF DOC. NO. 41\n"
+        "Account number 987654321\n"
+        "Statement date 01/01/2020\n"
+        "Previous balance $100.00\n"
+        "Amount due $130.00\n"
+        "National Grid",
+    )
+    pleading_caption = resolve_scan_profile(
+        "",
+        "SUPREME COURT OF THE STATE OF NEW YORK COUNTY OF KINGS\n"
+        "Specialized Loan Servicing LLC, Plaintiff,\n"
+        "Plaintiffs - against -\n"
+        "WHEREFORE plaintiff demands judgment against the defendants.",
+    )
+    # Images / scan-heavy PDFs force forensic even when kind said affidavit.
+    image_override = apply_media_override(
+        PROFILE_COURT_FILING, suffix=".png", origin=None
+    )
+    scan_heavy_override = apply_media_override(
+        PROFILE_COURT_FILING,
+        suffix=".pdf",
+        origin={"guess": "image-only", "scan_heavy": True},
+    )
+    native_filing_stays = apply_media_override(
+        PROFILE_COURT_FILING,
+        suffix=".pdf",
+        origin={"guess": "native-text", "scan_heavy": False},
+    )
     return {
         "rows": rows,
         "kinds_ok": all(row["ok"] for row in rows),
         "empty_peek_blank_kind_is_forensic": empty_peek == PROFILE_FORENSIC,
         "unknown_kind_defaults_forensic": unknown == PROFILE_FORENSIC,
-        "blank_efiling_is_court_filing": blank_resolve == PROFILE_COURT_FILING,
+        "blank_efiling_is_forensic": blank_stamp == PROFILE_FORENSIC,
+        "blank_stamp_statement_is_forensic": blank_stamp_statement == PROFILE_FORENSIC,
+        "pleading_caption_blank_is_court_filing": pleading_caption == PROFILE_COURT_FILING,
+        "image_forces_forensic": image_override == PROFILE_FORENSIC,
+        "scan_heavy_forces_forensic": scan_heavy_override == PROFILE_FORENSIC,
+        "native_filing_keeps_court_filing": native_filing_stays == PROFILE_COURT_FILING,
         "exhibit_stays_forensic": scan_profile_for_kind("exhibit") == PROFILE_FORENSIC,
+        "affidavit_kind_is_court_filing": scan_profile_for_kind("affidavit") == PROFILE_COURT_FILING,
         "all_pass": False,
     }
 

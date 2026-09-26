@@ -393,6 +393,17 @@ def _annotations(reader) -> dict[str, Any]:
     return dict(summary)
 
 
+def pdf_origin_guess(path: Path) -> dict[str, Any]:
+    """Cheap native-vs-scan signal for scan-profile override. Failures → {}."""
+    if path.suffix.lower() != ".pdf":
+        return {}
+    try:
+        reader = open_pdf_reader(path)
+        return _native_or_image_pdf(reader)
+    except Exception:
+        return {}
+
+
 def _native_or_image_pdf(reader) -> dict[str, Any]:
     image_pages = 0
     text_pages = 0

@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from app import cases_db
 from app.auto_title import propose_document_title
 from app.config import settings
+from app.scan_profile import COURT_FILING_KINDS
 from app.entitlement import (
     cloud_login,
     cloud_logout,
@@ -62,7 +63,7 @@ def health():
         "name": settings.app_name,
         "version": settings.app_version,
         # Bumped when blank-kind forensic + PORT CMD restore ships — proves live SHA without dashboard.
-        "build": "blank-forensic-port",
+        "build": "scan-first-two-lanes",
     }
     if git_commit:
         payload["git_commit"] = git_commit[:12]
@@ -342,7 +343,16 @@ async def api_upload_document(
     except Exception:
         proposed_name, proposed_kind = Path(safe_name).stem.replace("_", " "), None
     final_name = (display_name or "").strip() or proposed_name
-    final_kind = (doc_kind or "").strip() or proposed_kind
+    # Display name may come from auto-title; court-filing kinds must not be
+    # silently written into blank doc_kind — that forced the packaging fast path
+    # and skipped forgery review on real scanned uploads.
+    user_kind = (doc_kind or "").strip()
+    if user_kind:
+        final_kind = user_kind
+    elif proposed_kind and proposed_kind.strip().lower() not in COURT_FILING_KINDS:
+        final_kind = proposed_kind
+    else:
+        final_kind = None
     should_scan = str(auto_scan).strip().lower() in {"1", "true", "yes", "on"}
 
     doc = cases_db.add_document(

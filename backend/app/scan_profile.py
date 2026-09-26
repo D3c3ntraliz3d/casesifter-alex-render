@@ -1,19 +1,23 @@
 """Route documents to forensic vs court-filing scan profiles.
 
-Exhibits and untyped scanned packets get the full alteration / whiteout / page-fraud
-pipeline. Complaints, motions, and other pleadings are content + case-consistency only:
-their packaging (AcroForm, mixed page size, e-filing stamps) is ordinary court workflow,
-not exhibit forgery evidence.
+Two lanes:
+- Scanned PDFs / images (bills, statements, photo exhibits) → forensic forgery
+  review plus OCR facts for the cross-doc case table.
+- Native pleadings (motions, affidavits, transcripts) → gotcha / fact lanes;
+  packaging noise (AcroForm, mixed page size, e-filing stamps) is skipped.
 
-Blank kind with no usable peek text defaults to forensic — image-only fraud exhibits
-must not silently skip ELA. Explicit court-filing kinds and NYSCEF/pleading peeks
-still take the fast court-filing path.
+Blank kind with no usable peek text defaults to forensic so image-only fraud
+exhibits do not silently skip ELA. E-filing stamp chrome alone never chooses
+the court-filing profile — that is national, not NYSCEF-specific. Strong
+pleading captions on blank kind may suggest court_filing; scan-heavy / image
+media always override back to forensic in the pipeline.
 """
 
 from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Any
 
 # Pleadings and procedural filings — extract facts, compare across the case.
 COURT_FILING_KINDS = frozenset(
@@ -76,10 +80,6 @@ STATEMENT_HINT_RE = re.compile(
     r")"
 )
 
-EFILING_HEADER_RE = re.compile(
-    r"(?i)\b(?:NYSCEF|FILED:\s|INDEX\s+NO\.?|RECEIVED\s+NYSCEF)\b"
-)
-
 # Evidence packets — full fraudulent-document forensics.
 EXHIBIT_KINDS = frozenset(
     {
@@ -95,6 +95,12 @@ EXHIBIT_KINDS = frozenset(
     }
 )
 
+IMAGE_SUFFIXES = frozenset(
+    {".jpg", ".jpeg", ".png", ".gif", ".tif", ".tiff", ".webp", ".bmp"}
+)
+
+SCAN_HEAVY_GUESSES = frozenset({"image-only", "mostly-scanned", "scanned"})
+
 PROFILE_FORENSIC = "forensic"
 PROFILE_COURT_FILING = "court_filing"
 
@@ -106,7 +112,6 @@ def scan_profile_for_kind(doc_kind: str | None) -> str:
     if kind in EXHIBIT_KINDS:
         return PROFILE_FORENSIC
     # Blank/unknown without peek: forensic so scanned fraud packets still pause on ELA.
-    # resolve_scan_profile routes NYSCEF/pleading text peeks to court_filing.
     return PROFILE_FORENSIC
 
 
@@ -115,25 +120,29 @@ def is_court_filing(doc_kind: str | None) -> bool:
 
 
 def infer_profile_from_text(text: str) -> str | None:
-    """When the user left kind blank, guess pleading vs exhibit from the first pages."""
+    """When the user left kind blank, guess pleading vs exhibit from the first pages.
+
+    Statement-like content → forensic. Strong pleading caption only → court_filing.
+    E-filing stamp chrome alone never selects court_filing.
+    """
     head = (text or "")[:8000]
     if not head.strip():
         return None
     looks_like_statement = bool(STATEMENT_HINT_RE.search(head))
     looks_like_pleading = bool(PLEADING_CAPTION_RE.search(head))
-    if looks_like_statement and not looks_like_pleading:
+    # Scanned bills/statements win the forgery lane even when stamp chrome is present.
+    if looks_like_statement:
         return PROFILE_FORENSIC
     if looks_like_pleading:
-        return PROFILE_COURT_FILING
-    if EFILING_HEADER_RE.search(head) and not looks_like_statement:
         return PROFILE_COURT_FILING
     return None
 
 
 def resolve_scan_profile(doc_kind: str | None, peek_text: str = "") -> str:
-    """Honor an explicit kind; otherwise infer from caption / e-filing furniture.
+    """Honor an explicit kind; otherwise infer from caption / statement hints.
 
     Empty peek (image-only PDF extract) with blank kind → forensic, not court_filing.
+    Stamp-only peek with blank kind → forensic (national; no e-file routing).
     """
     kind = (doc_kind or "").strip().lower()
     if kind in COURT_FILING_KINDS:
@@ -144,6 +153,30 @@ def resolve_scan_profile(doc_kind: str | None, peek_text: str = "") -> str:
     if inferred:
         return inferred
     return PROFILE_FORENSIC
+
+
+def apply_media_override(
+    profile: str,
+    *,
+    suffix: str = "",
+    origin: dict[str, Any] | None = None,
+) -> str:
+    """Images and scan-heavy PDFs always take the forensic forgery lane.
+
+    Explicit court-filing kind / caption inference lose to scan media so real
+    uploads of printed-then-scanned exhibits are not skipped.
+    """
+    ext = (suffix or "").lower()
+    if ext and not ext.startswith("."):
+        ext = f".{ext}"
+    if ext in IMAGE_SUFFIXES:
+        return PROFILE_FORENSIC
+    if ext == ".pdf" and profile == PROFILE_COURT_FILING:
+        origin = origin or {}
+        guess = str(origin.get("guess") or "")
+        if origin.get("scan_heavy") or guess in SCAN_HEAVY_GUESSES:
+            return PROFILE_FORENSIC
+    return profile
 
 
 def peek_pdf_text(path: Path, max_pages: int = 2) -> str:
