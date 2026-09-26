@@ -154,9 +154,19 @@ def _run(
         if crop_finding:
             findings.append(crop_finding)
 
-        overlay_finding = _solid_overlay_finding(
-            image, label=label, page_no=page_no, job_id=job_id, prefix=prefix, out=out, artifacts=artifacts
-        )
+        try:
+            overlay_finding = _solid_overlay_finding(
+                image,
+                label=label,
+                page_no=page_no,
+                job_id=job_id,
+                prefix=prefix,
+                out=out,
+                artifacts=artifacts,
+            )
+        except Exception as exc:
+            extras.setdefault("solid_overlay_errors", []).append(f"{label}: {exc}")
+            overlay_finding = None
         if overlay_finding:
             findings.append(overlay_finding)
         image.close()
@@ -427,25 +437,30 @@ def _solid_overlay_finding(
     body is the scan-survivable whiteout / redaction paste signal on utility bills.
     """
     cv2 = _cv2()
-    rgb = np.asarray(image.convert("RGB"))
+    # Contiguous copies — OpenCV morphology/CC on sliced views can SIGSEGV on some pages.
+    rgb = np.ascontiguousarray(np.asarray(image.convert("RGB")))
     h, w = rgb.shape[:2]
     if h < 120 or w < 120:
         return None
-    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    gray = np.ascontiguousarray(cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY))
     # Whole-page blank / near-blank sheets are not "whiteout over content".
     if float(np.mean(gray > 245)) > 0.88:
         return None
     yi, ya = int(h * 0.10), int(h * 0.92)
     xi, xa = int(w * 0.06), int(w * 0.94)
-    interior = gray[yi:ya, xi:xa]
+    interior = np.ascontiguousarray(gray[yi:ya, xi:xa])
     paper = float(np.median(interior))
     # Pure paste sits above typical paper gray (often ~240–248) at 253–255.
-    pure = (interior >= max(253, int(paper) + 6)).astype(np.uint8) * 255
+    # Clamp to 255 — paper already at 253 made thr=259 and confused uint8 compares.
+    thr = min(255, max(253, int(paper) + 6))
+    pure = np.ascontiguousarray((interior >= thr).astype(np.uint8) * 255)
     pure_frac = float(pure.mean()) / 255.0
     if pure_frac < 0.02 or pure_frac > 0.55:
         return None
     closed = cv2.morphologyEx(pure, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
-    n_labels, _, stats, _ = cv2.connectedComponentsWithStats(closed, connectivity=8)
+    n_labels, _, stats, _ = cv2.connectedComponentsWithStats(
+        np.ascontiguousarray(closed), connectivity=8
+    )
     if n_labels <= 1:
         return None
     areas = stats[1:, cv2.CC_STAT_AREA]

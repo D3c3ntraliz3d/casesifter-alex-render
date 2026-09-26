@@ -155,11 +155,22 @@ def run_pipeline(
         structural = analyze_structural(source)
 
         update_job(job_id, stage="image_forensics", percent=60, message="Running image manipulation detection…")
-        images = analyze_image_forensics(
-            source,
-            job_id,
-            origin=(pdf.extras or {}).get("origin_guess") or origin_for_profile or {},
-        )
+        try:
+            images = analyze_image_forensics(
+                source,
+                job_id,
+                origin=(pdf.extras or {}).get("origin_guess") or origin_for_profile or {},
+            )
+        except Exception as exc:
+            # Soft-fail so Gemini multimodal still runs when ELA/OpenCV misbehaves.
+            images = ModuleResult(
+                name="image_forensics",
+                status="error",
+                duration_ms=0,
+                summary=f"Image forensics failed ({exc}); continuing with multimodal review.",
+                findings=[],
+                extras={"error": str(exc)[:400]},
+            )
 
     update_job(
         job_id,

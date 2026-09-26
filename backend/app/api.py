@@ -63,7 +63,7 @@ def health():
         "name": settings.app_name,
         "version": settings.app_version,
         # Bumped when blank-kind forensic + PORT CMD restore ships — proves live SHA without dashboard.
-        "build": "gemini-blank-forensic",
+        "build": "s41-whiteout-segfault-fix",
     }
     if git_commit:
         payload["git_commit"] = git_commit[:12]
