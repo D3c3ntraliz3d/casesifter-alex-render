@@ -6,11 +6,11 @@ Two lanes:
 - Native pleadings (motions, affidavits, transcripts) → gotcha / fact lanes;
   packaging noise (AcroForm, mixed page size, e-filing stamps) is skipped.
 
-Blank kind with no usable peek text defaults to forensic so image-only fraud
-exhibits do not silently skip ELA. E-filing stamp chrome alone never chooses
-the court-filing profile — that is national, not NYSCEF-specific. Strong
-pleading captions on blank kind may suggest court_filing; scan-heavy / image
-media always override back to forensic in the pipeline.
+Blank kind defaults forensic. E-filing stamp chrome alone never chooses
+court_filing. A pleading caption may promote to court_filing only after the
+pipeline confirms the PDF is native-text (not scan-heavy). Images and
+scan-heavy PDFs always stay forensic — that is what broke real-matter uploads
+when caption/stamp text forced the packaging fast path.
 """
 
 from __future__ import annotations
@@ -119,30 +119,34 @@ def is_court_filing(doc_kind: str | None) -> bool:
     return scan_profile_for_kind(doc_kind) == PROFILE_COURT_FILING
 
 
-def infer_profile_from_text(text: str) -> str | None:
-    """When the user left kind blank, guess pleading vs exhibit from the first pages.
+def looks_like_statement_text(text: str) -> bool:
+    return bool(STATEMENT_HINT_RE.search((text or "")[:8000]))
 
-    Statement-like content → forensic. Strong pleading caption only → court_filing.
-    E-filing stamp chrome alone never selects court_filing.
+
+def looks_like_pleading_caption(text: str) -> bool:
+    return bool(PLEADING_CAPTION_RE.search((text or "")[:8000]))
+
+
+def infer_profile_from_text(text: str) -> str | None:
+    """Text-only hints for blank kind.
+
+    Statement-like → forensic. Caption alone does *not* select court_filing —
+    that requires native-text confirmation in finalize_scan_profile. Stamp chrome
+    alone never selects a profile.
     """
     head = (text or "")[:8000]
     if not head.strip():
         return None
-    looks_like_statement = bool(STATEMENT_HINT_RE.search(head))
-    looks_like_pleading = bool(PLEADING_CAPTION_RE.search(head))
-    # Scanned bills/statements win the forgery lane even when stamp chrome is present.
-    if looks_like_statement:
+    if looks_like_statement_text(head):
         return PROFILE_FORENSIC
-    if looks_like_pleading:
-        return PROFILE_COURT_FILING
     return None
 
 
 def resolve_scan_profile(doc_kind: str | None, peek_text: str = "") -> str:
-    """Honor an explicit kind; otherwise infer from caption / statement hints.
+    """Honor an explicit kind; statement peeks force forensic; blank defaults forensic.
 
-    Empty peek (image-only PDF extract) with blank kind → forensic, not court_filing.
-    Stamp-only peek with blank kind → forensic (national; no e-file routing).
+    Caption-only peeks stay forensic here. finalize_scan_profile may promote a
+    blank-kind native-text PDF with a pleading caption to court_filing.
     """
     kind = (doc_kind or "").strip().lower()
     if kind in COURT_FILING_KINDS:
@@ -155,28 +159,86 @@ def resolve_scan_profile(doc_kind: str | None, peek_text: str = "") -> str:
     return PROFILE_FORENSIC
 
 
+def _norm_suffix(suffix: str) -> str:
+    ext = (suffix or "").lower()
+    if ext and not ext.startswith("."):
+        return f".{ext}"
+    return ext
+
+
+def is_scan_media(suffix: str = "", origin: dict[str, Any] | None = None) -> bool:
+    """True for images and scan-heavy / image-only PDFs."""
+    ext = _norm_suffix(suffix)
+    if ext in IMAGE_SUFFIXES:
+        return True
+    if ext != ".pdf":
+        return False
+    origin = origin or {}
+    guess = str(origin.get("guess") or "")
+    return bool(origin.get("scan_heavy") or guess in SCAN_HEAVY_GUESSES)
+
+
+def is_native_text_pdf(origin: dict[str, Any] | None = None) -> bool:
+    origin = origin or {}
+    return str(origin.get("guess") or "") == "native-text" and not origin.get("scan_heavy")
+
+
 def apply_media_override(
     profile: str,
     *,
     suffix: str = "",
     origin: dict[str, Any] | None = None,
 ) -> str:
-    """Images and scan-heavy PDFs always take the forensic forgery lane.
-
-    Explicit court-filing kind / caption inference lose to scan media so real
-    uploads of printed-then-scanned exhibits are not skipped.
-    """
-    ext = (suffix or "").lower()
-    if ext and not ext.startswith("."):
-        ext = f".{ext}"
-    if ext in IMAGE_SUFFIXES:
+    """Images and scan-heavy PDFs always take the forensic forgery lane."""
+    if is_scan_media(suffix, origin):
         return PROFILE_FORENSIC
-    if ext == ".pdf" and profile == PROFILE_COURT_FILING:
-        origin = origin or {}
-        guess = str(origin.get("guess") or "")
-        if origin.get("scan_heavy") or guess in SCAN_HEAVY_GUESSES:
-            return PROFILE_FORENSIC
     return profile
+
+
+def finalize_scan_profile(
+    profile: str,
+    *,
+    doc_kind: str | None = None,
+    peek_text: str = "",
+    suffix: str = "",
+    origin: dict[str, Any] | None = None,
+) -> str:
+    """Final lane after origin guess.
+
+    Order:
+    1. Scan media (image / scan-heavy PDF) → forensic — always.
+    2. Explicit court-filing kind on native media → court_filing.
+    3. Blank kind + pleading caption + native-text PDF → court_filing.
+    4. Otherwise keep / default forensic.
+    """
+    origin = origin or {}
+    if is_scan_media(suffix, origin):
+        return PROFILE_FORENSIC
+
+    kind = (doc_kind or "").strip().lower()
+    if kind in COURT_FILING_KINDS:
+        return PROFILE_COURT_FILING
+    if kind in EXHIBIT_KINDS:
+        return PROFILE_FORENSIC
+
+    # Blank kind: only native-text pleadings get the packaging skip.
+    if (
+        _norm_suffix(suffix) in {"", ".pdf", ".txt"}
+        and is_native_text_pdf(origin)
+        and looks_like_pleading_caption(peek_text)
+        and not looks_like_statement_text(peek_text)
+    ):
+        return PROFILE_COURT_FILING
+
+    # .txt / non-PDF with caption and no origin: treat as native pleading text.
+    if (
+        _norm_suffix(suffix) in {".txt", ".text"}
+        and looks_like_pleading_caption(peek_text)
+        and not looks_like_statement_text(peek_text)
+    ):
+        return PROFILE_COURT_FILING
+
+    return apply_media_override(profile, suffix=suffix, origin=origin)
 
 
 def peek_pdf_text(path: Path, max_pages: int = 2) -> str:

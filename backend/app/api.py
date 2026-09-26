@@ -63,7 +63,7 @@ def health():
         "name": settings.app_name,
         "version": settings.app_version,
         # Bumped when blank-kind forensic + PORT CMD restore ships — proves live SHA without dashboard.
-        "build": "scan-first-two-lanes",
+        "build": "native-caption-lanes",
     }
     if git_commit:
         payload["git_commit"] = git_commit[:12]

@@ -17,6 +17,7 @@ from app.scan_profile import (
     PROFILE_COURT_FILING,
     PROFILE_FORENSIC,
     apply_media_override,
+    finalize_scan_profile,
     resolve_scan_profile,
     scan_profile_for_kind,
 )
@@ -610,12 +611,37 @@ def evaluate_doc_kinds() -> dict:
         "Amount due $130.00\n"
         "National Grid",
     )
-    pleading_caption = resolve_scan_profile(
-        "",
+    caption = (
         "SUPREME COURT OF THE STATE OF NEW YORK COUNTY OF KINGS\n"
         "Specialized Loan Servicing LLC, Plaintiff,\n"
         "Plaintiffs - against -\n"
-        "WHEREFORE plaintiff demands judgment against the defendants.",
+        "WHEREFORE plaintiff demands judgment against the defendants."
+    )
+    # Caption alone (no origin yet) must stay forensic — real NYSCEF scans have captions.
+    pleading_caption_resolve = resolve_scan_profile("", caption)
+    # Caption + native-text PDF → court_filing (pleadings lane).
+    caption_native = finalize_scan_profile(
+        PROFILE_FORENSIC,
+        doc_kind="",
+        peek_text=caption,
+        suffix=".pdf",
+        origin={"guess": "native-text", "scan_heavy": False},
+    )
+    # Caption + scan-heavy PDF → forensic (forgery lane). This is the fly-through fix.
+    caption_scan_heavy = finalize_scan_profile(
+        PROFILE_COURT_FILING,
+        doc_kind="",
+        peek_text=caption,
+        suffix=".pdf",
+        origin={"guess": "hybrid", "scan_heavy": True},
+    )
+    # Explicit affidavit kind on scan-heavy still forensic.
+    affidavit_scan_heavy = finalize_scan_profile(
+        PROFILE_COURT_FILING,
+        doc_kind="affidavit",
+        peek_text=caption,
+        suffix=".pdf",
+        origin={"guess": "image-only", "scan_heavy": True},
     )
     # Images / scan-heavy PDFs force forensic even when kind said affidavit.
     image_override = apply_media_override(
@@ -638,7 +664,10 @@ def evaluate_doc_kinds() -> dict:
         "unknown_kind_defaults_forensic": unknown == PROFILE_FORENSIC,
         "blank_efiling_is_forensic": blank_stamp == PROFILE_FORENSIC,
         "blank_stamp_statement_is_forensic": blank_stamp_statement == PROFILE_FORENSIC,
-        "pleading_caption_blank_is_court_filing": pleading_caption == PROFILE_COURT_FILING,
+        "pleading_caption_resolve_stays_forensic": pleading_caption_resolve == PROFILE_FORENSIC,
+        "pleading_caption_native_is_court_filing": caption_native == PROFILE_COURT_FILING,
+        "pleading_caption_scan_heavy_is_forensic": caption_scan_heavy == PROFILE_FORENSIC,
+        "affidavit_kind_scan_heavy_is_forensic": affidavit_scan_heavy == PROFILE_FORENSIC,
         "image_forces_forensic": image_override == PROFILE_FORENSIC,
         "scan_heavy_forces_forensic": scan_heavy_override == PROFILE_FORENSIC,
         "native_filing_keeps_court_filing": native_filing_stays == PROFILE_COURT_FILING,

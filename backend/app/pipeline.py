@@ -32,7 +32,7 @@ from app.impact_judge import apply_case_impact_judge
 from app.report import executive_summary, pick_top_findings, recommended_actions, render_html, render_pdf, score_risk
 from app.scan_profile import (
     PROFILE_COURT_FILING,
-    apply_media_override,
+    finalize_scan_profile,
     peek_pdf_text,
     resolve_scan_profile,
 )
@@ -83,15 +83,29 @@ def run_pipeline(
         size_bytes = source.stat().st_size
     except OSError:
         pass
-    peek_text = peek_pdf_text(source) if not (doc_kind or "").strip() else ""
-    profile = resolve_scan_profile(doc_kind, peek_text)
-    # Scan always wins: images / scan-heavy PDFs stay on the forgery lane even
-    # when kind or caption inference said court_filing.
-    origin_for_profile: dict[str, Any] = {}
+    # Peek text for blank kind (and for blank-kind caption promotion after origin).
     suffix = source.suffix.lower()
-    if suffix == ".pdf" and profile == PROFILE_COURT_FILING:
+    peek_text = ""
+    if not (doc_kind or "").strip():
+        if suffix == ".pdf":
+            peek_text = peek_pdf_text(source)
+        elif suffix in {".txt", ".text"}:
+            try:
+                peek_text = source.read_text(encoding="utf-8", errors="ignore")[:8000]
+            except OSError:
+                peek_text = ""
+    profile = resolve_scan_profile(doc_kind, peek_text)
+    # Origin before lane finalize: caption alone must not skip forensics on scans.
+    origin_for_profile: dict[str, Any] = {}
+    if suffix == ".pdf":
         origin_for_profile = pdf_origin_guess(source)
-    profile = apply_media_override(profile, suffix=suffix, origin=origin_for_profile)
+    profile = finalize_scan_profile(
+        profile,
+        doc_kind=doc_kind,
+        peek_text=peek_text,
+        suffix=suffix,
+        origin=origin_for_profile,
+    )
     court_filing = profile == PROFILE_COURT_FILING
 
     emit_scan_started(
