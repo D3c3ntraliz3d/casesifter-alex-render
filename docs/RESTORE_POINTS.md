@@ -28,4 +28,6 @@ Do **not** use `desktop-v1.0.0` as a stand-in for 9-22 — that tag is already 9
 | --- | --- | --- |
 | `EXHIBIT_*` / kind=exhibit bill | forensic | forensic |
 | Caption + scan-heavy NYSCEF PDF | court_filing (miss) | forensic |
+| Blank + caption + native-text PDF | court_filing (skips Gemini) | forensic (Gemini runs) |
+| Explicit `affidavit` kind, native-text | court_filing | court_filing |
 | Wayne occupancy peers | lie detector / consistency | fact conflict + risk elevate |

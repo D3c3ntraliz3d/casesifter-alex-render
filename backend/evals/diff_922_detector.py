@@ -125,6 +125,7 @@ def evaluate() -> dict:
         head_must_win=True,
     )
 
+    # Blank + caption + native: 9-22 court_filing skipped Gemini; HEAD keeps forensic.
     row(
         "blank_caption_native",
         old.resolve_scan_profile("", caption),
@@ -135,6 +136,7 @@ def evaluate() -> dict:
             suffix=".pdf",
             origin=origin_native,
         ),
+        head_must_win=True,
     )
 
     row(

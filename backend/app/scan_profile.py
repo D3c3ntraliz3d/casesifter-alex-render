@@ -6,11 +6,10 @@ Two lanes:
 - Native pleadings (motions, affidavits, transcripts) → gotcha / fact lanes;
   packaging noise (AcroForm, mixed page size, e-filing stamps) is skipped.
 
-Blank kind defaults forensic. E-filing stamp chrome alone never chooses
-court_filing. A pleading caption may promote to court_filing only after the
-pipeline confirms the PDF is native-text (not scan-heavy). Images and
-scan-heavy PDFs always stay forensic — that is what broke real-matter uploads
-when caption/stamp text forced the packaging fast path.
+Blank kind defaults forensic so Gemini multimodal always runs on real uploads
+(the UI leaves kind blank). E-filing stamp / caption chrome alone never chooses
+court_filing. Only an explicit court-filing kind on native media takes the
+packaging skip. Images and scan-heavy PDFs always stay forensic.
 """
 
 from __future__ import annotations
@@ -206,11 +205,17 @@ def finalize_scan_profile(
     """Final lane after origin guess.
 
     Order:
-    1. Scan media (image / scan-heavy PDF) → forensic — always.
-    2. Explicit court-filing kind on native media → court_filing.
-    3. Blank kind + pleading caption + native-text PDF → court_filing.
-    4. Otherwise keep / default forensic.
+    1. Scan media (image / scan-heavy PDF) → forensic — always (Gemini + ELA).
+    2. Explicit court-filing kind on native media → court_filing (packaging skip).
+    3. Explicit exhibit kind → forensic.
+    4. Blank kind → forensic — caption/stamp alone must not skip Gemini. Real
+       NYSCEF uploads are blank-kind by default; promoting them to court_filing
+       cleared whole matters in under a second with document_analysis skipped.
+
+    ``peek_text`` is reserved for callers / statement hints already applied in
+    ``resolve_scan_profile``.
     """
+    del peek_text  # statement hints handled in resolve_scan_profile
     origin = origin or {}
     if is_scan_media(suffix, origin):
         return PROFILE_FORENSIC
@@ -220,23 +225,6 @@ def finalize_scan_profile(
         return PROFILE_COURT_FILING
     if kind in EXHIBIT_KINDS:
         return PROFILE_FORENSIC
-
-    # Blank kind: only native-text pleadings get the packaging skip.
-    if (
-        _norm_suffix(suffix) in {"", ".pdf", ".txt"}
-        and is_native_text_pdf(origin)
-        and looks_like_pleading_caption(peek_text)
-        and not looks_like_statement_text(peek_text)
-    ):
-        return PROFILE_COURT_FILING
-
-    # .txt / non-PDF with caption and no origin: treat as native pleading text.
-    if (
-        _norm_suffix(suffix) in {".txt", ".text"}
-        and looks_like_pleading_caption(peek_text)
-        and not looks_like_statement_text(peek_text)
-    ):
-        return PROFILE_COURT_FILING
 
     return apply_media_override(profile, suffix=suffix, origin=origin)
 

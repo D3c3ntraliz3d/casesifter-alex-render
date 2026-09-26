@@ -42,13 +42,15 @@ from app.telemetry import emit_scan_outcomes
 
 
 def _source_for_contextual(source: Path, profile: str) -> Path | None:
-    """Native PDF upload for tier-3 fraud review — exhibits only."""
+    """Native file upload for tier-3 Gemini fraud review — forensic lane only."""
     if profile == PROFILE_COURT_FILING:
         return None
     if not (settings.contextual_multimodal and settings.gemini_api_key):
         return None
     try:
-        if source.stat().st_size > 8 * 1024 * 1024:
+        # Match contextual_logic inline limit (default 15 MB), not a tighter hardcode.
+        limit = settings.contextual_max_upload_mb * 1024 * 1024
+        if source.stat().st_size > limit:
             return None
     except OSError:
         return None

@@ -619,10 +619,18 @@ def evaluate_doc_kinds() -> dict:
     )
     # Caption alone (no origin yet) must stay forensic — real NYSCEF scans have captions.
     pleading_caption_resolve = resolve_scan_profile("", caption)
-    # Caption + native-text PDF → court_filing (pleadings lane).
+    # Blank + caption + native-text → still forensic so Gemini runs on real uploads.
     caption_native = finalize_scan_profile(
         PROFILE_FORENSIC,
         doc_kind="",
+        peek_text=caption,
+        suffix=".pdf",
+        origin={"guess": "native-text", "scan_heavy": False},
+    )
+    # Explicit affidavit kind on native-text → court_filing (packaging skip).
+    affidavit_native = finalize_scan_profile(
+        PROFILE_COURT_FILING,
+        doc_kind="affidavit",
         peek_text=caption,
         suffix=".pdf",
         origin={"guess": "native-text", "scan_heavy": False},
@@ -665,7 +673,8 @@ def evaluate_doc_kinds() -> dict:
         "blank_efiling_is_forensic": blank_stamp == PROFILE_FORENSIC,
         "blank_stamp_statement_is_forensic": blank_stamp_statement == PROFILE_FORENSIC,
         "pleading_caption_resolve_stays_forensic": pleading_caption_resolve == PROFILE_FORENSIC,
-        "pleading_caption_native_is_court_filing": caption_native == PROFILE_COURT_FILING,
+        "blank_caption_native_stays_forensic": caption_native == PROFILE_FORENSIC,
+        "explicit_affidavit_native_is_court_filing": affidavit_native == PROFILE_COURT_FILING,
         "pleading_caption_scan_heavy_is_forensic": caption_scan_heavy == PROFILE_FORENSIC,
         "affidavit_kind_scan_heavy_is_forensic": affidavit_scan_heavy == PROFILE_FORENSIC,
         "image_forces_forensic": image_override == PROFILE_FORENSIC,
