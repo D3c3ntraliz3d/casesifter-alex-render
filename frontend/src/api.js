@@ -199,6 +199,11 @@ export async function patchDocument(caseId, documentId, payload) {
   return readJson(res);
 }
 
+export async function retitleCaseDocuments(caseId) {
+  const res = await fetch(`/api/cases/${caseId}/retitle`, { method: "POST" });
+  return readJson(res);
+}
+
 export async function listCaseGotchas(caseId) {
   const cs = desktop();
   if (cs) {

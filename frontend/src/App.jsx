@@ -25,6 +25,7 @@ import {
   getDesktopReport,
   isDesktopApp,
   rescanCase,
+  retitleCaseDocuments,
   saveLicense,
   scanDocument,
   sendFindingFeedback,
@@ -101,7 +102,7 @@ const COURT_FILING_KINDS = new Set([
 
 function profileForKind(kind) {
   if (!kind) {
-    return "Blank kind → exhibit forensic (unless the file looks like a pleading)";
+    return "Needs review — kind not set (not a risk score)";
   }
   return COURT_FILING_KINDS.has((kind || "").toLowerCase()) ? "Court filing" : "Exhibit forensic";
 }
@@ -1506,9 +1507,35 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
             placeholder="Filter by name, kind, or risk…"
           />
           {!caseData.archived_at && (
+          <>
+          <button
+            className="btn secondary"
+            type="button"
+            disabled={busy || docs.length === 0}
+            title="Set Exhibit kind from EXHIBIT(S) / EXHIBIT_S filenames"
+            onClick={async () => {
+              setBusy(true);
+              try {
+                const result = await retitleCaseDocuments(caseData.id);
+                setUploadNote(
+                  result?.changed
+                    ? `Updated ${result.changed} name/kind${result.changed === 1 ? "" : "s"} from filenames.`
+                    : "No filename retitles needed."
+                );
+                await onRefresh();
+              } catch (err) {
+                onError(err.message || "Retitle failed.");
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            Fix kinds from names
+          </button>
           <button className="btn secondary" type="button" disabled={busy} onClick={() => inputRef.current?.click()}>
             Upload
           </button>
+          </>
           )}
         </div>
         {docs.length === 0 && <p className="empty-copy">Drop complaints, motions, and exhibits as the matter progresses.</p>}
@@ -1635,7 +1662,7 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
                       }
                     }}
                   >
-                    <option value="">Needs review</option>
+                    <option value="">Unknown — needs review</option>
                     {DOC_KIND_OPTIONS.map(([value, label]) => (
                       <option key={value} value={value}>{label}</option>
                     ))}

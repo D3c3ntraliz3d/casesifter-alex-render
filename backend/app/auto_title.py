@@ -132,6 +132,10 @@ def propose_document_title(
 
 def exhibit_title_from_filename(filename: str) -> str | None:
     stem = _stem(filename)
+    # Leading NYSCEF doc number: "104 - EXHIBIT(S).pdf" → Exhibit 104
+    leading = re.match(r"^(\d{1,4})\s*[\-–—]\s*", stem or "")
+    lead_no = leading.group(1) if leading else None
+
     match = EXHIBIT_FILE_RE.search(stem)
     if match:
         tag = match.group(1).upper()
@@ -149,6 +153,8 @@ def exhibit_title_from_filename(filename: str) -> str | None:
         return f"Exhibit {tag}_{number}"
     if tag:
         return f"Exhibit {tag}"
+    if lead_no:
+        return f"Exhibit {lead_no}"
     return "Exhibit"
 
 

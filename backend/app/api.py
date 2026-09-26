@@ -14,7 +14,11 @@ from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 
 from app import cases_db
-from app.auto_title import looks_like_exhibit_filename, propose_document_title
+from app.auto_title import (
+    looks_like_exhibit_filename,
+    propose_document_title,
+    retitle_case_documents,
+)
 from app.config import settings
 from app.scan_profile import COURT_FILING_KINDS
 from app.entitlement import (
@@ -63,7 +67,7 @@ def health():
         "name": settings.app_name,
         "version": settings.app_version,
         # Bumped when blank-kind forensic + PORT CMD restore ships — proves live SHA without dashboard.
-        "build": "exhibit-parens-order-forensic-fix",
+        "build": "exhibit-parens-kind-retitle",
     }
     if git_commit:
         payload["git_commit"] = git_commit[:12]
@@ -419,6 +423,18 @@ def api_patch_document(case_id: str, document_id: str, body: DocumentUpdate):
         doc_kind=body.doc_kind,
     )
     return updated
+
+
+@router.post("/cases/{case_id}/retitle")
+def api_retitle_case_documents(case_id: str):
+    """Rebuild display names / kinds from filenames (e.g. EXHIBIT(S) → exhibit)."""
+    _ensure_entitled()
+    _validate_id(case_id)
+    case = cases_db.get_case(case_id)
+    if case is None:
+        raise HTTPException(404, "Unknown case.")
+    changes = retitle_case_documents(case_id)
+    return {"case_id": case_id, "changed": len(changes), "changes": changes}
 
 
 @router.delete("/cases/{case_id}/documents/{document_id}")
