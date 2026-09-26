@@ -79,7 +79,28 @@ No smoke-test throw remains in the tree — after end-to-end verification, produ
 4. Point marketing at the asset in [`marketing/assets/downloads.json`](../marketing/assets/downloads.json) (update `url` / `version` / `filename` to match the release).
 5. Confirm [`marketing/download.html`](../marketing/download.html) shows the button (loads that JSON).
 
-Unsigned builds may trigger Windows SmartScreen until code signing is configured (`CSC_*` secrets). Trial / Subscribe still happens **in-app** (Account), not at download time.
+### Windows SmartScreen / “suspicious download”
+
+Browsers and Windows block **unsigned** `.exe` installers from unknown publishers. That is expected until Authenticode signing is on.
+
+**Proper fix — code sign the NSIS installer**
+
+1. Buy an **OV code signing certificate** (DigiCert, Sectigo, SSL.com, …) issued to your company legal name. Export a `.pfx` (or use [Azure Trusted Signing](https://learn.microsoft.com/en-us/azure/trusted-signing/)).
+2. In the GitHub repo → Settings → Secrets:
+   - `CSC_LINK` — base64 of the `.pfx` (`base64 -w0 cert.pfx` on Linux / `certutil -encode` on Windows)
+   - `CSC_KEY_PASSWORD` — PFX password
+3. Bump `desktop/package.json` version, tag `desktop-vX.Y.Z`, push the tag. The [desktop-release](../.github/workflows/desktop-release.yml) workflow signs with electron-builder when those secrets are present.
+4. Update [`marketing/assets/downloads.json`](../marketing/assets/downloads.json) to the new `CaseSifter-Setup-X.Y.Z.exe` and redeploy marketing.
+
+New publishers still see occasional SmartScreen prompts until download reputation builds; signing removes the “Unknown publisher” / dangerous-file block that unsigned builds always hit.
+
+**Override for a tester machine (unsigned build only)**
+
+- **Edge/Chrome download bar:** ⋯ → Keep → Show more → Keep anyway  
+- **SmartScreen after run:** More info → Run anyway  
+- Or: right-click the `.exe` → Properties → Unblock → OK, then run
+
+Trial / Subscribe still happens **in-app** (Account), not at download time.
 
 ## Config (userData `casesifter-config.json`)
 

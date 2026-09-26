@@ -25,10 +25,16 @@
       "renderer/**/*"
     ],
     "artifactName": "CaseSifter-Setup-${version}.${ext}",
-    "win": { "target": ["nsis"] },
+    "win": {
+      "target": ["nsis"],
+      "publisherName": "CaseSifter",
+      "signingHashAlgorithms": ["sha256"]
+    },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "shortcutName": "CaseSifter",
+      "uninstallDisplayName": "CaseSifter"
     }
   },
   "dependencies": {

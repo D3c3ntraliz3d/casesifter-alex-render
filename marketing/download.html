@@ -82,6 +82,23 @@
       </div>
     </section>
 
+    <section class="block">
+      <div class="card">
+        <h3 style="margin-top: 0;">If Windows or your browser blocks the download</h3>
+        <p class="plan-note">
+          Current installs are not yet Authenticode-signed, so Edge/Chrome Safe Browsing and
+          Windows SmartScreen may label the file “suspicious” or “unknown publisher.” That is a
+          missing code-signing certificate, not malware. We sign releases once an OV (or Azure
+          Trusted Signing) certificate is configured in CI.
+        </p>
+        <ul>
+          <li><strong>Chrome / Edge:</strong> on the download chip, open ⋯ → Keep → Show more → Keep anyway.</li>
+          <li><strong>SmartScreen on run:</strong> More info → Run anyway.</li>
+          <li><strong>File Properties:</strong> right-click the <code>.exe</code> → Properties → check Unblock → OK, then run.</li>
+        </ul>
+      </div>
+    </section>
+
     <section class="cta-band">
       <h2>Prefer a walkthrough?</h2>
       <p>We can run a short demo against a real matter structure — no vault, files stay with you.</p>
