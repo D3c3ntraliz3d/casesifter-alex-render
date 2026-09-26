@@ -208,3 +208,9 @@ Loan-status movement (note vs default rate, remaining principal **increases**, i
 - Summers and paystub-vs-W-2 pass as instances of that rule  
 - Real cases may stay green when seeded flips still interrupt  
 - CaseSifter finds **documentary BS in the story**, not “we listed every fraud motif” and not “an AI polygraph scored the witness”
+
+## Historical restore point
+
+The 2026-09-22 detector tip (lie detector ship + EXHIBIT forensic path) is tagged
+`restore-2026-09-22-detector` → `3c41141`. See [RESTORE_POINTS.md](RESTORE_POINTS.md)
+for checkout commands and how current scan-first HEAD compares.
