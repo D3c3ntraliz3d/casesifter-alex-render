@@ -14,7 +14,7 @@ from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 
 from app import cases_db
-from app.auto_title import propose_document_title
+from app.auto_title import looks_like_exhibit_filename, propose_document_title
 from app.config import settings
 from app.scan_profile import COURT_FILING_KINDS
 from app.entitlement import (
@@ -63,7 +63,7 @@ def health():
         "name": settings.app_name,
         "version": settings.app_version,
         # Bumped when blank-kind forensic + PORT CMD restore ships — proves live SHA without dashboard.
-        "build": "s41-whiteout-segfault-fix",
+        "build": "exhibit-parens-order-forensic-fix",
     }
     if git_commit:
         payload["git_commit"] = git_commit[:12]
@@ -346,8 +346,12 @@ async def api_upload_document(
     # Display name may come from auto-title; court-filing kinds must not be
     # silently written into blank doc_kind — that forced the packaging fast path
     # and skipped forgery review on real scanned uploads.
+    # Exhibit-shaped NYSCEF names (EXHIBIT_S__41 / EXHIBIT(S)) always stay exhibit
+    # so a body phrase like "in order to" cannot park the file on court_filing.
     user_kind = (doc_kind or "").strip()
-    if user_kind:
+    if looks_like_exhibit_filename(safe_name) or looks_like_exhibit_filename(final_name):
+        final_kind = "exhibit"
+    elif user_kind:
         final_kind = user_kind
     elif proposed_kind and proposed_kind.strip().lower() not in COURT_FILING_KINDS:
         final_kind = proposed_kind

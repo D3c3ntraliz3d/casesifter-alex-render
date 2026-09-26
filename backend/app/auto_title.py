@@ -20,7 +20,10 @@ FILENAME_KIND_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("notice_of_pendency", re.compile(r"(?i)\bnotice\s+of\s+pendency\b")),
     ("calendar", re.compile(r"(?i)\b(appearance\s+detail|court\s+appearance|calendar)\b")),
     ("notice", re.compile(r"(?i)\bnotice\s+of\s+(?:entry|appearance|rejection|cross|mortgage)\b")),
-    ("order", re.compile(r"(?i)\b(proposed\s+)?order\b|decision\s+and\s+order")),
+    # Filename only: allow "Order" / "Proposed Order", but not "in order to" / "money order".
+    ("order", re.compile(
+        r"(?i)(?<!in )(?<!money )\b(?:proposed\s+)?order\b|\bdecision\s+and\s+order\b"
+    )),
     ("affidavit", re.compile(r"(?i)\baffidavit\b")),
     ("affirmation", re.compile(r"(?i)\baffirmation\b")),
     ("letter", re.compile(r"(?i)\b(cover\s+)?letter\b")),
@@ -32,9 +35,20 @@ FILENAME_KIND_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("answer", re.compile(r"(?i)\banswer\b")),
 ]
 
+# Body "order" must be a court order, not "in order to" / "money order" in bank text.
+_ORDER_BODY_RE = re.compile(
+    r"(?i)("
+    r"\bproposed\s+order\b|"
+    r"\bdecision\s+and\s+order\b|"
+    r"\border\s+to\s+show\s+cause\b|"
+    r"\bordered\s+that\b|"
+    r"\bit\s+is\s+(?:hereby\s+)?ordered\b"
+    r")"
+)
+
 # Body peek: specific types only. Never complaint/answer — those words live in every caption.
 BODY_KIND_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    pair
+    ("order", _ORDER_BODY_RE) if pair[0] == "order" else pair
     for pair in FILENAME_KIND_PATTERNS
     if pair[0]
     in {
@@ -56,6 +70,13 @@ EXHIBIT_FILE_RE = re.compile(
     r"([A-Za-z0-9]{1,4}(?:-[A-Za-z0-9]{1,3})?)"
     r"(?:[\s_\-]+(\d{1,4}))?"
     r"(?=$|[\s_\-.(])"
+)
+
+# NYSCEF type label EXHIBIT(S) — plural marker, optional letter / docket number after.
+EXHIBIT_PARENS_S_RE = re.compile(
+    r"(?i)(?:^|[\s_\-])exhibit\s*\(\s*s\s*\)"
+    r"(?:[\s_\-]+([A-Za-z0-9]{1,4}))?"
+    r"(?:[\s_\-]+(\d{1,4}))?"
 )
 
 
@@ -112,13 +133,36 @@ def propose_document_title(
 def exhibit_title_from_filename(filename: str) -> str | None:
     stem = _stem(filename)
     match = EXHIBIT_FILE_RE.search(stem)
-    if not match:
+    if match:
+        tag = match.group(1).upper()
+        number = match.group(2)
+        if number:
+            return f"Exhibit {tag}_{number}"
+        return f"Exhibit {tag}"
+    # NYSCEF "EXHIBIT(S)" packets — do not let body "in order to" retitle these as Order.
+    parens = EXHIBIT_PARENS_S_RE.search(stem)
+    if not parens:
         return None
-    tag = match.group(1).upper()
-    number = match.group(2)
-    if number:
+    tag = (parens.group(1) or "").upper()
+    number = parens.group(2)
+    if tag and number:
         return f"Exhibit {tag}_{number}"
-    return f"Exhibit {tag}"
+    if tag:
+        return f"Exhibit {tag}"
+    return "Exhibit"
+
+
+def looks_like_exhibit_filename(name: str) -> bool:
+    """True when the upload name is an exhibit packet (EXHIBIT_S__41 / EXHIBIT(S) / Exhibit A)."""
+    text = name or ""
+    if exhibit_title_from_filename(text):
+        return True
+    return bool(
+        re.search(
+            r"(?i)(?:^|[\s_\-./])exhibit(?:\s*\(\s*s\s*\))?(?:$|[\s_\-./(])",
+            text,
+        )
+    )
 
 
 def uniquify_display_name(

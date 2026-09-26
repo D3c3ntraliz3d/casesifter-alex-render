@@ -107,6 +107,8 @@ def run_pipeline(
         peek_text=peek_text,
         suffix=suffix,
         origin=origin_for_profile,
+        filename=source.name,
+        display_name=display_name or "",
     )
     court_filing = profile == PROFILE_COURT_FILING
 

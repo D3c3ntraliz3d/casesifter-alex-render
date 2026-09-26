@@ -18,6 +18,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from app.auto_title import looks_like_exhibit_filename
+
 # Pleadings and procedural filings — extract facts, compare across the case.
 COURT_FILING_KINDS = frozenset(
     {
@@ -201,14 +203,18 @@ def finalize_scan_profile(
     peek_text: str = "",
     suffix: str = "",
     origin: dict[str, Any] | None = None,
+    filename: str = "",
+    display_name: str = "",
 ) -> str:
     """Final lane after origin guess.
 
     Order:
     1. Scan media (image / scan-heavy PDF) → forensic — always (Gemini + ELA).
-    2. Explicit court-filing kind on native media → court_filing (packaging skip).
-    3. Explicit exhibit kind → forensic.
-    4. Blank kind → forensic — caption/stamp alone must not skip Gemini. Real
+    2. Exhibit-shaped filename / display (EXHIBIT_S__41, EXHIBIT(S), …) → forensic
+       even when kind was mis-set to Order from body text like "in order to".
+    3. Explicit court-filing kind on native media → court_filing (packaging skip).
+    4. Explicit exhibit kind → forensic.
+    5. Blank kind → forensic — caption/stamp alone must not skip Gemini. Real
        NYSCEF uploads are blank-kind by default; promoting them to court_filing
        cleared whole matters in under a second with document_analysis skipped.
 
@@ -218,6 +224,8 @@ def finalize_scan_profile(
     del peek_text  # statement hints handled in resolve_scan_profile
     origin = origin or {}
     if is_scan_media(suffix, origin):
+        return PROFILE_FORENSIC
+    if looks_like_exhibit_filename(filename) or looks_like_exhibit_filename(display_name):
         return PROFILE_FORENSIC
 
     kind = (doc_kind or "").strip().lower()

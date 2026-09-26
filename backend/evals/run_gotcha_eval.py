@@ -575,6 +575,16 @@ def evaluate_doc_kinds() -> dict:
             "exhibit",
         ),
         (
+            "41 - EXHIBIT(S) - S Bank Staatment.pdf",
+            "In order to process this payment please remit the money order.",
+            "exhibit",
+        ),
+        (
+            "Proposed Order.pdf",
+            "IT IS HEREBY ORDERED that the motion is granted.",
+            "order",
+        ),
+        (
             "533445_2023_Specialized_Loan_Servi_AFFIRMATION_AFFIDAV_17.pdf",
             caption + " On 12/14/2023 I served the within SUMMONS; COMPLAINT.",
             "proof_of_service",
@@ -665,6 +675,16 @@ def evaluate_doc_kinds() -> dict:
         suffix=".pdf",
         origin={"guess": "native-text", "scan_heavy": False},
     )
+    # Mis-labeled Order on an EXHIBIT(S) native PDF must still take forgery lane.
+    exhibit_parens_order = finalize_scan_profile(
+        PROFILE_COURT_FILING,
+        doc_kind="order",
+        peek_text="In order to process this payment please remit.",
+        suffix=".pdf",
+        origin={"guess": "native-text", "scan_heavy": False},
+        filename="41 - EXHIBIT(S) - S Bank Staatment.pdf",
+        display_name="41 EXHIBIT(S) S Bank Staatment",
+    )
     return {
         "rows": rows,
         "kinds_ok": all(row["ok"] for row in rows),
@@ -680,6 +700,7 @@ def evaluate_doc_kinds() -> dict:
         "image_forces_forensic": image_override == PROFILE_FORENSIC,
         "scan_heavy_forces_forensic": scan_heavy_override == PROFILE_FORENSIC,
         "native_filing_keeps_court_filing": native_filing_stays == PROFILE_COURT_FILING,
+        "exhibit_parens_order_kind_is_forensic": exhibit_parens_order == PROFILE_FORENSIC,
         "exhibit_stays_forensic": scan_profile_for_kind("exhibit") == PROFILE_FORENSIC,
         "affidavit_kind_is_court_filing": scan_profile_for_kind("affidavit") == PROFILE_COURT_FILING,
         "all_pass": False,
