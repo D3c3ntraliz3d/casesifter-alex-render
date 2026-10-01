@@ -10,6 +10,10 @@ from app.engines import finding, timed_module
 from app.ingestion import load_image, open_pdf_reader, render_pdf_pages
 from app.models import Finding, FontUsage, ModuleResult
 from app.config import settings
+from app.page_anchors import build_page_offsets, char_to_page
+
+# Re-export for callers that import from ocr_text.
+__all__ = ["analyze_ocr_text", "char_to_page", "build_page_offsets"]
 
 DATE_PATTERNS = [
     re.compile(r"\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b"),
@@ -78,6 +82,7 @@ def _run(
         )
         findings.extend(ocr_findings)
 
+    page_offsets = build_page_offsets(extracted_pages)
     extras: dict[str, Any] = {
         "pages": [
             {
@@ -88,6 +93,7 @@ def _run(
             }
             for p in extracted_pages
         ],
+        "page_offsets": page_offsets,
         "fonts": [f.model_dump() for f in fonts],
         "char_count": len(full_text),
         "full_text": full_text,

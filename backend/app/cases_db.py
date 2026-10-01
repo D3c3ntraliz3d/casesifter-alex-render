@@ -157,6 +157,8 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE scan_snapshots ADD COLUMN text_excerpt TEXT")
     if "facts_json" not in snap_cols:
         conn.execute("ALTER TABLE scan_snapshots ADD COLUMN facts_json TEXT")
+    if "page_offsets_json" not in snap_cols:
+        conn.execute("ALTER TABLE scan_snapshots ADD COLUMN page_offsets_json TEXT")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS case_messages (
@@ -452,6 +454,7 @@ def save_scan_snapshot(
     amounts: list[dict[str, Any]],
     text_excerpt: str | None = None,
     facts: list[dict[str, Any]] | None = None,
+    page_offsets: list[dict[str, int]] | None = None,
 ) -> dict[str, Any]:
     snap_id = uuid.uuid4().hex
     now = utcnow_iso()
@@ -462,8 +465,8 @@ def save_scan_snapshot(
             INSERT INTO scan_snapshots (
                 id, document_id, case_id, entities_json, findings_summary_json,
                 text_fingerprint, excerpt_hashes_json, amounts_json, text_excerpt,
-                facts_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                facts_json, page_offsets_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 snap_id,
@@ -476,6 +479,7 @@ def save_scan_snapshot(
                 json.dumps(amounts),
                 (text_excerpt or "")[:24000] or None,
                 json.dumps(facts or []),
+                json.dumps(page_offsets or []),
                 now,
             ),
         )
@@ -489,6 +493,11 @@ def _decode_snapshot(row: sqlite3.Row) -> dict[str, Any]:
     data["excerpt_hashes"] = json.loads(data.pop("excerpt_hashes_json") or "[]")
     data["amounts"] = json.loads(data.pop("amounts_json") or "[]")
     data["facts"] = json.loads(data.pop("facts_json") or "[]")
+    raw_offsets = data.pop("page_offsets_json", None)
+    try:
+        data["page_offsets"] = json.loads(raw_offsets or "[]")
+    except (TypeError, json.JSONDecodeError):
+        data["page_offsets"] = []
     data["text_excerpt"] = data.get("text_excerpt") or ""
     return data
 
@@ -508,7 +517,7 @@ def list_prior_snapshots(case_id: str, exclude_document_id: str) -> list[dict[st
     with connect() as conn:
         rows = conn.execute(
             """
-            SELECT s.*, d.display_name, d.doc_kind, d.original_filename
+            SELECT s.*, d.display_name, d.doc_kind, d.original_filename, d.sha256
             FROM scan_snapshots s
             JOIN documents d ON d.id = s.document_id
             WHERE s.case_id = ? AND s.document_id != ?
@@ -624,7 +633,7 @@ def list_case_snapshots(case_id: str) -> list[dict[str, Any]]:
     with connect() as conn:
         rows = conn.execute(
             """
-            SELECT s.*, d.display_name, d.doc_kind, d.original_filename, d.stored_path
+            SELECT s.*, d.display_name, d.doc_kind, d.original_filename, d.stored_path, d.sha256
             FROM scan_snapshots s
             JOIN documents d ON d.id = s.document_id
             WHERE s.case_id = ?

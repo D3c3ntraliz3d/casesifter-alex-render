@@ -259,7 +259,11 @@ NAME_ALIASES = {
 }
 
 
-def extract_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
+def extract_facts(
+    text: str,
+    limit: int = 40,
+    page_offsets: list[dict[str, int]] | None = None,
+) -> list[dict[str, Any]]:
     body = text or ""
     facts: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
@@ -268,14 +272,14 @@ def extract_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
     try:
         from app.fact_graph import extract_grounded_facts
 
-        for rec in extract_grounded_facts(body, limit=limit):
+        for rec in extract_grounded_facts(body, limit=limit, page_offsets=page_offsets):
             token = (rec["key"], f"{rec.get('entity_key')}|{rec['display']}")
             if token in seen:
                 continue
             seen.add(token)
             facts.append(rec)
             if len(facts) >= limit:
-                return facts
+                return _finalize_facts(facts, body, page_offsets)
     except Exception:
         pass
 
@@ -296,7 +300,13 @@ def extract_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             value = _money(raw)
             if value is None:
                 continue
-            rec = _record(key, value, f"{value:,.2f}", match.group(0))
+            rec = _record(
+                key,
+                value,
+                f"{value:,.2f}",
+                match.group(0),
+                extra={"char_start": match.start(), "char_end": match.end()},
+            )
             if rec["display"] in key_values:
                 continue
             key_values.add(rec["display"])
@@ -310,34 +320,51 @@ def extract_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             seen.add(token)
             facts.append(rec)
             if len(facts) >= limit:
-                return facts
+                return _finalize_facts(facts, body, page_offsets)
 
     for match in RATE_RE.finditer(body):
         value = float(match.group(1))
-        rec = _record("interest_rate", value, f"{value}%", match.group(0))
+        rec = _record(
+            "interest_rate",
+            value,
+            f"{value}%",
+            match.group(0),
+            extra={"char_start": match.start(), "char_end": match.end()},
+        )
         token = ("interest_rate", rec["display"])
         if token in seen:
             continue
         seen.add(token)
         facts.append(rec)
         if len(facts) >= limit:
-            return facts
+            return _finalize_facts(facts, body, page_offsets)
 
     for key, pattern in DATE_PATTERNS:
         for match in pattern.finditer(body):
             parsed = _date(match.group(1))
             if not parsed:
                 continue
-            rec = _record(key, parsed["value"], parsed["display"], match.group(0), extra=parsed)
+            extra = {**parsed, "char_start": match.start(), "char_end": match.end()}
+            rec = _record(key, parsed["value"], parsed["display"], match.group(0), extra=extra)
             token = (key, rec["display"])
             if token in seen:
                 continue
             seen.add(token)
             facts.append(rec)
             if len(facts) >= limit:
-                return facts
+                return _finalize_facts(facts, body, page_offsets)
 
-    return facts
+    return _finalize_facts(facts, body, page_offsets)
+
+
+def _finalize_facts(
+    facts: list[dict[str, Any]],
+    text: str,
+    page_offsets: list[dict[str, int]] | None,
+) -> list[dict[str, Any]]:
+    from app.page_anchors import enrich_fact_anchors
+
+    return enrich_fact_anchors(facts, text, page_offsets)
 
 
 def referenced_exhibits(text: str) -> list[str]:

@@ -52,36 +52,47 @@ from app.storage import artifact_dir, create_job, job_dir, load_progress, load_r
 from app.telemetry import flush_to_cloud, record_finding_feedback
 
 router = APIRouter()
+# Analysis mode mounts only this router (+ /api/v1). Vault mode mounts `router`.
+public_router = APIRouter()
 logger = logging.getLogger(__name__)
 SAFE_ARTIFACT = re.compile(r"^[A-Za-z0-9._\-]+$")
 SAFE_ID = re.compile(r"^[a-f0-9]{16,64}$")
 
 
-@router.get("/health")
-def health():
+def _health_payload() -> dict:
     ensure_watchdog()
     # RENDER_GIT_COMMIT is injected by Render — use it to confirm which SHA is live.
     git_commit = (os.environ.get("RENDER_GIT_COMMIT") or "").strip() or None
+    mode = (settings.app_mode or "vault").strip().lower()
     payload = {
         "status": "ok",
         "name": settings.app_name,
         "version": settings.app_version,
+        "app_mode": mode,
         # Bumped when blank-kind forensic + PORT CMD restore ships — proves live SHA without dashboard.
-        "build": "exhibit-parens-kind-retitle",
+        "build": "app-mode-page-anchors",
     }
     if git_commit:
         payload["git_commit"] = git_commit[:12]
     return payload
 
 
+@public_router.get("/health")
+@router.get("/health")
+def health():
+    return _health_payload()
+
+
 # --- Entitlement / hybrid billing stubs -------------------------------------------------
 
 
+@public_router.get("/entitlement")
 @router.get("/entitlement")
 def get_entitlement():
     return entitlement_status()
 
 
+@public_router.post("/entitlement/license")
 @router.post("/entitlement/license")
 def post_license(body: LicenseBody):
     return save_license_key(body.license_key)

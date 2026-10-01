@@ -66,12 +66,19 @@ def _require_analysis_auth(
     elif x_api_key:
         token = x_api_key.strip()
 
+    mode = (settings.app_mode or "vault").strip().lower()
+    # Hosted analysis: API key required (no open-entitlement bypass).
+    if mode == "analysis":
+        if not keys or not token or token not in keys:
+            raise HTTPException(401, "Valid analysis API key required.")
+        return {"auth": "api_key"}
+
     if keys:
         if not token or token not in keys:
             raise HTTPException(401, "Valid analysis API key required.")
         return {"auth": "api_key"}
 
-    # Fall back to product entitlement (cloud/license/open).
+    # Local vault: fall back to product entitlement (cloud/license/open).
     try:
         return require_scan_allowed()
     except PermissionError as exc:

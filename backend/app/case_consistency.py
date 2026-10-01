@@ -165,6 +165,8 @@ def compare_to_case(
     new_facts: list[dict[str, Any]] | None = None,
     new_text: str | None = None,
     case_documents: list[dict[str, Any]] | None = None,
+    new_sha256: str | None = None,
+    new_page_offsets: list[dict[str, int]] | None = None,
 ) -> tuple[list[Finding], list[dict[str, Any]]]:
     """Return (findings, fact matrix rows) for the newly scanned document."""
     del new_amounts  # unlabeled dollar dumps are too noisy; labeled facts only
@@ -173,7 +175,7 @@ def compare_to_case(
     matrix: list[dict[str, Any]] = []
     facts = list(new_facts or [])
     if not facts and new_text:
-        facts = extract_facts(new_text)
+        facts = extract_facts(new_text, page_offsets=new_page_offsets)
 
     # The recording number(s) the Complaint itself cites are what this case's
     # loan/monthly-payment/balance facts are actually "operative" for. An
@@ -288,6 +290,8 @@ def compare_to_case(
                 )
                 # Stamp credibility / documentary gates onto the finding evidence.
                 if findings and isinstance(findings[-1].evidence, dict):
+                    from app.page_anchors import make_ref
+
                     findings[-1].evidence.update(
                         {
                             "documentary": True,
@@ -302,6 +306,26 @@ def compare_to_case(
                             "claim_quote": row.get("this_quote"),
                             "evidence_quote": row.get("prior_quote"),
                             "fact_named": row.get("label"),
+                            "refs": [
+                                make_ref(
+                                    document_id=new_document_id,
+                                    sha256=new_sha256,
+                                    page=row.get("this_page"),
+                                    char_start=row.get("this_char_start"),
+                                    char_end=row.get("this_char_end"),
+                                    quote=row.get("this_quote"),
+                                    display_name=new_display_name,
+                                ),
+                                make_ref(
+                                    document_id=prior_id,
+                                    sha256=prior.get("sha256"),
+                                    page=row.get("prior_page"),
+                                    char_start=row.get("prior_char_start"),
+                                    char_end=row.get("prior_char_end"),
+                                    quote=row.get("prior_quote"),
+                                    display_name=prior_name,
+                                ),
+                            ],
                         }
                     )
             # Other cross-document fact mismatches stay case-level via aggregate_fact_conflicts.
@@ -431,6 +455,8 @@ def _internal_fact_conflicts(doc_name: str, facts: list[dict[str, Any]]) -> list
             row = _score_graph_or_meta(left, right)
             if not row or not row.get("flag"):
                 continue
+            from app.page_anchors import make_ref
+
             evidence_extra = {
                 "case_consistency": True,
                 "analysis_type": "fact_conflict",
@@ -447,6 +473,24 @@ def _internal_fact_conflicts(doc_name: str, facts: list[dict[str, Any]]) -> list
                 "evidence_quote": row["prior_quote"],
                 "fact_named": row.get("label"),
                 "attorney_why": row.get("materiality"),
+                "refs": [
+                    make_ref(
+                        document_id=None,
+                        page=row.get("this_page"),
+                        char_start=row.get("this_char_start"),
+                        char_end=row.get("this_char_end"),
+                        quote=row.get("this_quote"),
+                        display_name=doc_name,
+                    ),
+                    make_ref(
+                        document_id=None,
+                        page=row.get("prior_page"),
+                        char_start=row.get("prior_char_start"),
+                        char_end=row.get("prior_char_end"),
+                        quote=row.get("prior_quote"),
+                        display_name=doc_name,
+                    ),
+                ],
             }
             finding_obj = _case_finding(
                 prior_id=None,
@@ -856,6 +900,14 @@ def _row(
         "prior_display": right.get("display"),
         "this_quote": left.get("quote") or left.get("display"),
         "prior_quote": right.get("quote") or right.get("display"),
+        "this_page": left.get("page"),
+        "prior_page": right.get("page"),
+        "this_char_start": left.get("char_start"),
+        "this_char_end": left.get("char_end"),
+        "prior_char_start": right.get("char_start"),
+        "prior_char_end": right.get("char_end"),
+        "this_fact": left,
+        "prior_fact": right,
         "discrepancy": discrepancy,
         "materiality": materiality,
         "flag": flag,

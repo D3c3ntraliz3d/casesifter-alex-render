@@ -489,7 +489,7 @@ def find_gotchas(
     if text:
         text_by_doc[str(document_id)] = text
     findings = [
-        _to_finding(item, case_docs=docs)
+        _to_finding(item, case_docs=docs, snaps=snaps)
         for item in accepted[:8]
         if _shippable(item, docs) and gotcha_quotes_attest(item, text_by_doc)
     ]
@@ -1510,7 +1510,11 @@ def _ask_verify(candidates: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
         first_fail=_first_fail,
     )
 
-def _to_finding(item: dict[str, Any], case_docs: list[dict[str, Any]] | None = None) -> Finding:
+def _to_finding(
+    item: dict[str, Any],
+    case_docs: list[dict[str, Any]] | None = None,
+    snaps: dict[str, dict[str, Any]] | None = None,
+) -> Finding:
     vtype = _canonical_type(item.get("contradiction_type"), item.get("verification") or {}) or "factual_contradiction"
     verify = item.get("verification") or {}
     seed = f"gotcha|{item.get('claim_quote')}|{item.get('evidence_quote')}"
@@ -1571,6 +1575,48 @@ def _to_finding(item: dict[str, Any], case_docs: list[dict[str, Any]] | None = N
             f"{ev_label.upper()} ({item.get('evidence_source') or 'record'}): “{item.get('evidence_quote')}”"
         )
         why_suspicious = attorney_why or direction_reason
+    refs = _gotcha_refs(item, case_docs, snaps=snaps)
+    evidence = {
+        "gotcha": True,
+        "verified": True,
+        "gotcha_level": title,
+        "contradiction_type": vtype,
+        "analysis_type": "gotcha",
+        "claim_quote": item.get("claim_quote") or None,
+        "claim_source": item.get("claim_source") or None,
+        "evidence_quote": item.get("evidence_quote"),
+        "evidence_source": item.get("evidence_source"),
+        "evidence_label": ev_label,
+        "evidence_tier": ev_tier,
+        "claim_tier": c_tier,
+        "self_undercut": self_hit,
+        "tainted_support": tainted_hit,
+        "document_id": item.get("document_id"),
+        "fact_named": None if (tainted_hit and not item.get("claim_quote")) else fact_named,
+        "direction_reason": None if (tainted_hit and not item.get("claim_quote")) else direction_reason,
+        "materiality_reason": None if (tainted_hit and not item.get("claim_quote")) else material_reason,
+        "attorney_why": attorney_why,
+        "verification": verify,
+        "material": True,
+        "prior_display_name": item.get("evidence_source"),
+        "case_impact": "case_winning" if tainted_hit else None,
+        "case_impact_bucket": "credibility" if tainted_hit else None,
+        "refs": refs,
+    }
+    # Backward-compatible page/sha256 on quote sides.
+    if refs:
+        claim_ref = next(
+            (r for r in refs if r.get("document_id") == item.get("claim_document_id")),
+            refs[0],
+        )
+        ev_ref = next(
+            (r for r in refs if r.get("document_id") == item.get("document_id")),
+            refs[-1],
+        )
+        evidence["claim_page"] = claim_ref.get("page")
+        evidence["claim_sha256"] = claim_ref.get("sha256")
+        evidence["evidence_page"] = ev_ref.get("page")
+        evidence["evidence_sha256"] = ev_ref.get("sha256")
     return finding(
         fid=fid,
         category="gotcha",
@@ -1579,32 +1625,7 @@ def _to_finding(item: dict[str, Any], case_docs: list[dict[str, Any]] | None = N
         explanation=explanation,
         why_suspicious=why_suspicious,
         confidence=confidence,
-        evidence={
-            "gotcha": True,
-            "verified": True,
-            "gotcha_level": title,
-            "contradiction_type": vtype,
-            "analysis_type": "gotcha",
-            "claim_quote": item.get("claim_quote") or None,
-            "claim_source": item.get("claim_source") or None,
-            "evidence_quote": item.get("evidence_quote"),
-            "evidence_source": item.get("evidence_source"),
-            "evidence_label": ev_label,
-            "evidence_tier": ev_tier,
-            "claim_tier": c_tier,
-            "self_undercut": self_hit,
-            "tainted_support": tainted_hit,
-            "document_id": item.get("document_id"),
-            "fact_named": None if (tainted_hit and not item.get("claim_quote")) else fact_named,
-            "direction_reason": None if (tainted_hit and not item.get("claim_quote")) else direction_reason,
-            "materiality_reason": None if (tainted_hit and not item.get("claim_quote")) else material_reason,
-            "attorney_why": attorney_why,
-            "verification": verify,
-            "material": True,
-            "prior_display_name": item.get("evidence_source"),
-            "case_impact": "case_winning" if tainted_hit else None,
-            "case_impact_bucket": "credibility" if tainted_hit else None,
-        },
+        evidence=evidence,
         recommended_action=(
             "Open the scan report and review each flagged item before treating this exhibit as proof."
             if tainted_hit
@@ -1614,6 +1635,47 @@ def _to_finding(item: dict[str, Any], case_docs: list[dict[str, Any]] | None = N
             )
         ),
     )
+
+
+def _gotcha_refs(
+    item: dict[str, Any],
+    case_docs: list[dict[str, Any]] | None,
+    snaps: dict[str, dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    from app.page_anchors import ref_from_quote
+
+    docs_by_id = {str(d.get("id")): d for d in (case_docs or []) if d.get("id")}
+    snap_map = {str(k): v for k, v in (snaps or {}).items()}
+
+    refs: list[dict[str, Any]] = []
+    claim_id = item.get("claim_document_id")
+    ev_id = item.get("document_id")
+    for doc_id, quote, source_key in (
+        (claim_id, item.get("claim_quote"), "claim_source"),
+        (ev_id, item.get("evidence_quote"), "evidence_source"),
+    ):
+        if not doc_id and not quote:
+            continue
+        key = str(doc_id) if doc_id else ""
+        doc = docs_by_id.get(key) or {}
+        snap = snap_map.get(key) or {}
+        refs.append(
+            ref_from_quote(
+                document_id=key or None,
+                quote=str(quote or "") or None,
+                sha256=doc.get("sha256") or snap.get("sha256"),
+                text=str(snap.get("text_excerpt") or ""),
+                page_offsets=snap.get("page_offsets") or None,
+                display_name=str(
+                    item.get(source_key)
+                    or doc.get("display_name")
+                    or doc.get("original_filename")
+                    or ""
+                )
+                or None,
+            )
+        )
+    return refs
 
 
 def _attorney_why(

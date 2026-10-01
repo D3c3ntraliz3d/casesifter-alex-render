@@ -11,6 +11,11 @@ class Settings(BaseSettings):
 
     app_name: str = "CaseSifter"
     app_version: str = "1.0.0"
+    # vault = local John testing (full /api/cases). analysis = Render hybrid (v1 only).
+    app_mode: str = "vault"
+    app_env: str = "development"
+    # Comma-separated origins. Use * only for local vault; analysis mode rejects *.
+    cors_allow_origins: str = "*"
     max_file_mb: int = 100
     data_dir: Path = Path(__file__).resolve().parent.parent / "data"
     allowed_extensions: set[str] = {
@@ -96,6 +101,12 @@ class Settings(BaseSettings):
 
     def analysis_api_key_set(self) -> set[str]:
         return {part.strip() for part in (self.analysis_api_keys or "").split(",") if part.strip()}
+
+    def cors_origin_list(self) -> list[str]:
+        raw = (self.cors_allow_origins or "").strip()
+        if not raw:
+            return ["http://127.0.0.1:5173", "http://localhost:5173"]
+        return [part.strip() for part in raw.split(",") if part.strip()]
 
 
 settings = Settings()

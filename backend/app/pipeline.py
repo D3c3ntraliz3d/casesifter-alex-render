@@ -182,6 +182,7 @@ def run_pipeline(
     )
     ocr = analyze_ocr_text(source, metadata.extras, scan_profile=profile)
     full_text = ocr.extras.pop("full_text", "") or ""
+    page_offsets = list(ocr.extras.get("page_offsets") or [])
 
     update_job(
         job_id,
@@ -230,7 +231,7 @@ def run_pipeline(
 
     entities = (contextual.extras or {}).get("entities") or {}
     amounts = extract_amounts(full_text)
-    facts = extract_facts(full_text)
+    facts = extract_facts(full_text, page_offsets=page_offsets)
     fingerprint = text_fingerprint(full_text)
     hashes = excerpt_hashes(full_text)
     fact_matrix: list[dict[str, Any]] = []
@@ -243,6 +244,8 @@ def run_pipeline(
             percent=92,
             message="Comparing labeled facts against prior documents in this case…",
         )
+        if document_id and digest:
+            cases_db.update_document(document_id, sha256=digest)
         cases_db.save_scan_snapshot(
             document_id=document_id,
             case_id=case_id,
@@ -253,6 +256,7 @@ def run_pipeline(
             amounts=amounts,
             text_excerpt=full_text[:24000],
             facts=facts,
+            page_offsets=page_offsets,
         )
         priors = cases_db.list_prior_snapshots(case_id, exclude_document_id=document_id)
         name = display_name or source.name
@@ -267,6 +271,8 @@ def run_pipeline(
             new_facts=facts,
             new_text=full_text,
             case_documents=cases_db.list_documents(case_id),
+            new_sha256=digest,
+            new_page_offsets=page_offsets,
         )
         findings.extend(consistency)
         update_job(
@@ -347,9 +353,12 @@ def run_pipeline(
                     "display_name": snap.get("display_name") or snap.get("original_filename"),
                     "original_filename": snap.get("original_filename"),
                     "doc_kind": snap.get("doc_kind"),
+                    "sha256": snap.get("sha256"),
                 }
                 for snap in peer_priors
             ],
+            new_sha256=digest,
+            new_page_offsets=page_offsets,
         )
         findings.extend(consistency)
         contextual.extras["case_consistency"] = {

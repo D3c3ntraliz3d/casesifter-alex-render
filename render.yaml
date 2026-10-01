@@ -12,6 +12,12 @@ services:
         - backend/**
         - render.yaml
     envVars:
+      - key: APP_MODE
+        value: analysis
+      - key: APP_ENV
+        value: production
+      - key: CORS_ALLOW_ORIGINS
+        value: "https://casesifter.com,https://www.casesifter.com,https://casesifter-marketing.onrender.com"
       - key: EPHEMERAL_JOBS
         value: "true"
       - key: EPHEMERAL_TTL_HOURS

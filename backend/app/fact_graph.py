@@ -668,7 +668,11 @@ UTILITY_SERVICE_ADDRESS_RE = re.compile(
 )
 
 
-def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
+def extract_grounded_facts(
+    text: str,
+    limit: int = 40,
+    page_offsets: list[dict[str, int]] | None = None,
+) -> list[dict[str, Any]]:
     """Pull entity-scoped documentary attributes from OCR text."""
     body = text or ""
     if not body.strip():
@@ -684,6 +688,11 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
         seen.add(token)
         facts.append(rec)
         return len(facts) >= limit
+
+    def _done() -> list[dict[str, Any]]:
+        from app.page_anchors import enrich_fact_anchors
+
+        return enrich_fact_anchors(facts, body, page_offsets)
 
     for match in EMPLOYED_SINCE_RE.finditer(body):
         parsed = _date(match.group(1))
@@ -706,10 +715,10 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             match.group(0),
             person=person,
             employer=employer,
-            extra=parsed,
+            extra={**parsed, "char_start": match.start(), "char_end": match.end()},
         )
         if _add(rec):
-            return facts
+            return _done()
 
     for match in POSITION_SINCE_RE.finditer(body):
         parsed = _date(match.group(2))
@@ -737,7 +746,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             extra=parsed,
         )
         if _add(rec):
-            return facts
+            return _done()
 
     for match in EMPLOYED_BY_SINCE_RE.finditer(body):
         parsed = _date(match.group(2))
@@ -756,7 +765,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             extra=parsed,
         )
         if _add(rec):
-            return facts
+            return _done()
 
     for match in PAYSTUB_HIRE_RE.finditer(body):
         raw = match.group(1)
@@ -781,7 +790,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             extra=parsed,
         )
         if _add(rec):
-            return facts
+            return _done()
 
     for pattern in (W2_YEAR_RE, W2_YEAR_ALT_RE):
         for match in pattern.finditer(body):
@@ -800,7 +809,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
                 employer=employer,
             )
             if _add(rec):
-                return facts
+                return _done()
 
     # Fallback: W-2 marker anywhere + explicit tax year on the page
     if W2_DOC_MARKER_RE.search(body):
@@ -820,7 +829,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
                 employer=employer,
             )
             if _add(rec):
-                return facts
+                return _done()
 
     # --- Person documentary attributes (identity / occupancy / income) ---
     for match in DOB_RE.finditer(body):
@@ -838,7 +847,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             extra={**parsed, "deadline": True},
         )
         if _add(rec):
-            return facts
+            return _done()
 
     for pattern in (RESIDENCE_RE, RESIDENCE_INLINE_RE):
         for match in pattern.finditer(body):
@@ -885,7 +894,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
                 person=person,
             )
             if _add(rec):
-                return facts
+                return _done()
 
     for match in INCOME_APPROX_ANNUAL_RE.finditer(body):
         monthly = _parse_money(match.group(1))
@@ -915,7 +924,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             extra={"income_source": "monthly_stated"},
         )
         if _add(rec):
-            return facts
+            return _done()
 
     for match in INCOME_MONTHLY_RE.finditer(body):
         monthly = _parse_money(match.group(1))
@@ -937,7 +946,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             extra={"income_source": "monthly", "monthly": monthly},
         )
         if _add(rec):
-            return facts
+            return _done()
 
     for match in INCOME_ANNUAL_RE.finditer(body):
         annual = _parse_money(match.group(1))
@@ -959,7 +968,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             extra={"income_source": source},
         )
         if _add(rec):
-            return facts
+            return _done()
 
     # Resolve process-server name early so AOS personal-service leads can also
     # stamp service_attempt (needed for AOS vs daily-log pairing).
@@ -997,7 +1006,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
                 match.group(0)[:220],
             )
             if _add(srec):
-                return facts
+                return _done()
         rec = _presence_record(
             person,
             parsed["value"],
@@ -1008,7 +1017,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             impact="element",
         )
         if _add(rec):
-            return facts
+            return _done()
 
     for match in PERSONAL_SERVICE_SAME_DATE_RE.finditer(body):
         person = _clean_served_name(match.group(1))
@@ -1026,7 +1035,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             impact="element",
         )
         if _add(rec):
-            return facts
+            return _done()
 
     for match in FLIGHT_DEPART_RE.finditer(body):
         place = (match.group(1) or "").strip()
@@ -1052,7 +1061,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             match.group(0)[:220],
         )
         if _add(rec):
-            return facts
+            return _done()
 
     for match in OUT_OF_STATE_RE.finditer(body):
         raw_date = match.group(1) or match.group(2)
@@ -1077,7 +1086,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             match.group(0)[:220],
         )
         if _add(rec):
-            return facts
+            return _done()
 
     for match in CONFERENCE_RE.finditer(body):
         conf = (match.group(1) or "").strip()
@@ -1114,7 +1123,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
                 match.group(0)[:220],
             )
             if _add(rec):
-                return facts
+                return _done()
         # Explicit: for each day in range up to 4 days, stamp presence
         if start_p and end_p:
             try:
@@ -1135,7 +1144,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
                             match.group(0)[:220],
                         )
                         if _add(rec):
-                            return facts
+                            return _done()
                     cur = cur + timedelta(days=1)
                     n += 1
             except (ValueError, TypeError):
@@ -1156,7 +1165,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             match.group(0)[:220],
         )
         if _add(rec):
-            return facts
+            return _done()
 
     for match in BANK_SPEND_RE.finditer(body):
         parsed = _date(match.group(1))
@@ -1193,7 +1202,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             match.group(0)[:220],
         )
         if _add(rec):
-            return facts
+            return _done()
 
     # --- principal decline (P003) ---
     arrears = bool(ARREARS_HINT_RE.search(body))
@@ -1215,7 +1224,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             },
         )
         if _add(rec):
-            return facts
+            return _done()
 
     # Judgment principal: prefer line "Principal: $..." in a judgment / amount-due block
     judgmentish = bool(
@@ -1243,7 +1252,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             },
         )
         if _add(rec):
-            return facts
+            return _done()
 
     # --- sale grantee (P006 only when distinct names) ---
     for match in SALE_GRANTEE_RE.finditer(body):
@@ -1262,7 +1271,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             extra={"grantee_display": name},
         )
         if _add(rec):
-            return facts
+            return _done()
 
     # --- boarding pass (supports P0#1 alibi) ---
     for match in BOARDING_PASS_RE.finditer(body):
@@ -1291,7 +1300,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             match.group(0)[:220],
         )
         if _add(rec):
-            return facts
+            return _done()
 
     # --- process server service_attempt (P0#2) ---
     for match in SERVICE_PERSONAL_TIME_RE.finditer(body):
@@ -1314,7 +1323,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             match.group(0)[:220],
         )
         if _add(rec):
-            return facts
+            return _done()
         # Also stamp presence for the person served (alibi/office conflicts)
         served = _clean_served_name(match.group(3)) if match.lastindex and match.lastindex >= 3 else None
         if not served:
@@ -1340,7 +1349,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
                 impact="element",
             )
             if _add(prec):
-                return facts
+                return _done()
 
     for match in NAIL_MAIL_RE.finditer(body):
         time_s = (match.group(1) or "").strip().lower()
@@ -1372,7 +1381,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             match.group(0)[:220],
         )
         if _add(rec):
-            return facts
+            return _done()
 
     log_date = None
     m_log_date = re.search(
@@ -1408,7 +1417,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             match.group(0)[:220],
         )
         if _add(rec):
-            return facts
+            return _done()
 
     # --- balance_on_date (P0#3) ---
     for match in BALANCE_ON_DATE_RE.finditer(body):
@@ -1428,7 +1437,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             extra={"on_date": str(parsed["value"])[:10]},
         )
         if _add(rec):
-            return facts
+            return _done()
 
     for match in BALANCE_AS_OF_RE.finditer(body):
         amount = _parse_money(match.group(1))
@@ -1443,7 +1452,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             extra={"on_date": str(parsed["value"])[:10]},
         )
         if _add(rec):
-            return facts
+            return _done()
 
     # --- loan_payment_date (P0#4) ---
     for match in SERVICER_PAYMENT_RE.finditer(body):
@@ -1464,7 +1473,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
                 },
             )
             if _add(rec):
-                return facts
+                return _done()
 
     for match in SERVICER_PAYMENT_LINE_RE.finditer(body):
         parsed = _date(match.group(1))
@@ -1483,7 +1492,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             },
         )
         if _add(rec):
-            return facts
+            return _done()
 
     for match in BANK_DEBIT_RE.finditer(body):
         parsed = _date(match.group(1))
@@ -1507,7 +1516,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             },
         )
         if _add(rec):
-            return facts
+            return _done()
 
     # --- employer_of_record (P0#5) ---
     for match in WAY_TO_EMPLOYER_RE.finditer(body):
@@ -1542,7 +1551,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             extra={"employer_source": "service_narrative"},
         )
         if _add(rec):
-            return facts
+            return _done()
 
     for match in EMPLOYER_VERIFICATION_RE.finditer(body):
         emp = _clean_employer(match.group(1) or "")
@@ -1573,7 +1582,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             extra={"employer_source": "employment_record"},
         )
         if _add(rec):
-            return facts
+            return _done()
 
     # --- substitute service (personal vs substitute same day) ---
     for match in SUBSTITUTE_SERVICE_RE.finditer(body):
@@ -1605,7 +1614,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
         )
         # Fix server_name - it's in extract scope
         if _add(rec):
-            return facts
+            return _done()
 
     # --- multi-day flight presence (depart + return stamps intervening days) ---
     departures = []
@@ -1652,7 +1661,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
                         quote[:120] + " / " + rquote[:80],
                     )
                     if _add(rec):
-                        return facts
+                        return _done()
                     cur = cur + timedelta(days=1)
                     n += 1
 
@@ -1690,7 +1699,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             match.group(0)[:220],
         )
         if _add(rec):
-            return facts
+            return _done()
 
     # --- utility service address as residence ---
     for match in UTILITY_SERVICE_ADDRESS_RE.finditer(body):
@@ -1716,7 +1725,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             extra={"address_source": "utility"},
         )
         if _add(rec):
-            return facts
+            return _done()
 
     # --- stated interest rate note vs sought ---
     for match in CONTRACT_RATE_RE.finditer(body):
@@ -1739,7 +1748,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             extra={"rate_role": "note"},
         )
         if _add(rec):
-            return facts
+            return _done()
 
     for match in SOUGHT_RATE_RE.finditer(body):
         try:
@@ -1762,7 +1771,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             extra={"rate_role": "sought"},
         )
         if _add(rec):
-            return facts
+            return _done()
 
     # --- payment event claims (plaintiff / defendant / bank) ---
     for match in PAYMENT_EVENT_CLAIM_RE.finditer(body):
@@ -1793,7 +1802,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             },
         )
         if _add(rec):
-            return facts
+            return _done()
 
     # --- execution venue ---
     for match in EXECUTION_VENUE_RE.finditer(body):
@@ -1825,7 +1834,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             extra={"on_date": str(parsed["value"])[:10], "venue_county": county},
         )
         if _add(rec):
-            return facts
+            return _done()
 
     # --- occupancy_start (same person incompatible starts) ---
     for match in OCCUPANCY_USE_START_RE.finditer(body):
@@ -1851,7 +1860,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             },
         )
         if _add(rec):
-            return facts
+            return _done()
 
     for match in OCCUPANCY_START_RE.finditer(body):
         parsed = _date(match.group(1))
@@ -1882,7 +1891,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             },
         )
         if _add(rec):
-            return facts
+            return _done()
 
     for match in OCCUPANCY_QA_SINCE_RE.finditer(body):
         parsed = _date(match.group(1))
@@ -1905,7 +1914,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             },
         )
         if _add(rec):
-            return facts
+            return _done()
 
     # --- mortgage origination (occupancy-before-mortgage gate) ---
     for match in MORTGAGE_ORIGINATION_RE.finditer(body):
@@ -1926,7 +1935,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             },
         )
         if _add(rec):
-            return facts
+            return _done()
 
     # --- claimed arrears with as-of date ---
     for match in CLAIMED_ARREARS_RE.finditer(body):
@@ -1954,7 +1963,7 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             },
         )
         if _add(rec):
-            return facts
+            return _done()
 
     # --- zero / no payments on servicing history ---
     if ZERO_PAYMENTS_RE.search(body) and re.search(
@@ -1970,9 +1979,9 @@ def extract_grounded_facts(text: str, limit: int = 40) -> list[dict[str, Any]]:
             extra={"payment_activity": "none"},
         )
         if _add(rec):
-            return facts
+            return _done()
 
-    return facts
+    return _done()
 
 
 def _occupancy_person(body: str, at: int) -> str | None:
