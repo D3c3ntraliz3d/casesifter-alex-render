@@ -266,6 +266,9 @@ def extract_facts(
     text: str,
     limit: int = 40,
     page_offsets: list[dict[str, int]] | None = None,
+    *,
+    ai_usage_out: dict[str, Any] | None = None,
+    document_label: str | None = None,
 ) -> list[dict[str, Any]]:
     body = text or ""
     facts: list[dict[str, Any]] = []
@@ -282,7 +285,14 @@ def extract_facts(
             seen.add(token)
             facts.append(rec)
             if len(facts) >= limit:
-                return _finalize_facts(facts, body, page_offsets, limit=limit)
+                return _finalize_facts(
+                    facts,
+                    body,
+                    page_offsets,
+                    limit=limit,
+                    ai_usage_out=ai_usage_out,
+                    document_label=document_label,
+                )
     except Exception:
         pass
 
@@ -323,7 +333,14 @@ def extract_facts(
             seen.add(token)
             facts.append(rec)
             if len(facts) >= limit:
-                return _finalize_facts(facts, body, page_offsets, limit=limit)
+                return _finalize_facts(
+                    facts,
+                    body,
+                    page_offsets,
+                    limit=limit,
+                    ai_usage_out=ai_usage_out,
+                    document_label=document_label,
+                )
 
     for match in RATE_RE.finditer(body):
         value = float(match.group(1))
@@ -340,7 +357,14 @@ def extract_facts(
         seen.add(token)
         facts.append(rec)
         if len(facts) >= limit:
-            return _finalize_facts(facts, body, page_offsets, limit=limit)
+            return _finalize_facts(
+                    facts,
+                    body,
+                    page_offsets,
+                    limit=limit,
+                    ai_usage_out=ai_usage_out,
+                    document_label=document_label,
+                )
 
     for key, pattern in DATE_PATTERNS:
         for match in pattern.finditer(body):
@@ -355,9 +379,23 @@ def extract_facts(
             seen.add(token)
             facts.append(rec)
             if len(facts) >= limit:
-                return _finalize_facts(facts, body, page_offsets, limit=limit)
+                return _finalize_facts(
+                    facts,
+                    body,
+                    page_offsets,
+                    limit=limit,
+                    ai_usage_out=ai_usage_out,
+                    document_label=document_label,
+                )
 
-    return _finalize_facts(facts, body, page_offsets, limit=limit)
+    return _finalize_facts(
+                    facts,
+                    body,
+                    page_offsets,
+                    limit=limit,
+                    ai_usage_out=ai_usage_out,
+                    document_label=document_label,
+                )
 
 
 def _finalize_facts(
@@ -366,6 +404,8 @@ def _finalize_facts(
     page_offsets: list[dict[str, int]] | None,
     *,
     limit: int = 40,
+    ai_usage_out: dict[str, Any] | None = None,
+    document_label: str | None = None,
 ) -> list[dict[str, Any]]:
     from app.page_anchors import enrich_fact_anchors
 
@@ -374,11 +414,20 @@ def _finalize_facts(
     try:
         from app.ai_fact_extract import extract_ai_facts
 
+        ai_facts, usage = extract_ai_facts(
+            text,
+            page_offsets=page_offsets,
+            limit=max(4, limit // 3),
+            document_label=document_label,
+        )
+        if ai_usage_out is not None:
+            ai_usage_out.clear()
+            ai_usage_out.update(usage)
         seen = {
             (str(f.get("key")), str(f.get("entity_key") or ""), str(f.get("display")))
             for f in anchored
         }
-        for rec in extract_ai_facts(text, page_offsets=page_offsets, limit=max(4, limit // 3)):
+        for rec in ai_facts:
             token = (str(rec.get("key")), str(rec.get("entity_key") or ""), str(rec.get("display")))
             if token in seen:
                 continue
@@ -387,7 +436,8 @@ def _finalize_facts(
             if len(anchored) >= limit:
                 break
     except Exception:
-        pass
+        if ai_usage_out is not None and not ai_usage_out:
+            ai_usage_out.update({"skipped": "exception", "calls": 0, "total_tokens": 0, "step": "ai_fact_extract"})
     return anchored
 
 

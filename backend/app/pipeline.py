@@ -231,7 +231,13 @@ def run_pipeline(
 
     entities = (contextual.extras or {}).get("entities") or {}
     amounts = extract_amounts(full_text)
-    facts = extract_facts(full_text, page_offsets=page_offsets)
+    ai_fact_usage: dict[str, Any] = {}
+    facts = extract_facts(
+        full_text,
+        page_offsets=page_offsets,
+        ai_usage_out=ai_fact_usage,
+        document_label=display_name or source.name,
+    )
     fingerprint = text_fingerprint(full_text)
     hashes = excerpt_hashes(full_text)
     fact_matrix: list[dict[str, Any]] = []
@@ -402,6 +408,11 @@ def run_pipeline(
         "scan_profile": profile,
         "doc_kind": doc_kind,
         "case_impact": impact_log,
+        "ai_fact_extract_usage": ai_fact_usage,
+        "gemini_usage": {
+            **((contextual.extras or {}).get("gemini_usage") or {}),
+            "ai_fact_extract": ai_fact_usage,
+        },
         "text_excerpt": (full_text or "")[:24000],
     }
 

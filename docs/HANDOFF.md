@@ -16,51 +16,33 @@
 |---|---|
 | Render `casesifter-analysis` | **SUSPENDED** (leave suspended until sale) |
 | Phase 0 min lockdown | **Done** |
-| Phase 1 page anchors | **Done** — evidence below |
-| Phase 4 | Ready after this gate checklist |
+| Phase 1 page anchors | **Done** |
+| Phase 4 extraction | **Done** (regex baseline + additive AI; fixtures; token log) |
 | `desktop/` | **Frozen — delete before launch** |
 
-## Pre–Phase 4 checklist (2026-10-01)
+## Phase 4 (conditions met)
 
-### 1. Local vault (`APP_MODE=vault`)
+- Regex/graph extraction stays the baseline; Gemini facts are **additive**, `confidence` capped (72), labeled **`ai_generated=True`**.
+- Fixtures in `planted_bs_cases.json`: `summers_employment_start_cross_doc` (2019/2022 two-doc), three rephrasing TPs, clean twin — `run_gotcha_eval.py` must stay `all_pass`.
+- Gemini token use for the new step is logged per document (`ai_fact_extract[name] tokens …`) and stored on the report at `comparison.ai_fact_extract_usage` / `comparison.gemini_usage.ai_fact_extract`.
 
-- `docker-compose.yml` overrides Dockerfile bake-in: `APP_MODE: ${APP_MODE:-vault}`
-- Local run: `APP_MODE=vault APP_ENV=development PYTHONPATH=. uvicorn app.main:app --host 127.0.0.1 --port 8000`
-- **GET `/api/cases` → 200** (`{"cases":[]}`, `app_mode: vault`)
+### John’s local 11467-2007 re-run checklist
 
-### 2. CORS in analysis mode (env-driven, not `*`)
+After pulling this branch (`APP_MODE=vault`), rescan the case and confirm:
 
-```
-CORS_ALLOW_ORIGINS=https://casesifter.com,https://www.casesifter.com
-resolved_allow_origins=["https://casesifter.com","https://www.casesifter.com"]
-contains_star=false
-```
+1. **Still red / still catch all 3 forged exhibits** (National Grid historical, wrong-era/chrome, statement math or too-crisp / edited-exhibit cards — same material interrupts as before).
+2. **Cross-doc / gotcha cards show `evidence.refs`** with a **page number on both documents** when two docs are cited (open any employment / occupancy / DOB-style conflict).
+3. **AI facts (if `GEMINI_API_KEY` set):** any new fact from the LLM path is marked `ai_generated` and does not replace regex facts; report `comparison.ai_fact_extract_usage` shows `prompt_tokens` / `total_tokens` / `facts_added` for that document (also in server logs as `ai_fact_extract[…] tokens …`).
+4. **No silent drop:** list any prior material finding that disappeared or changed severity; paste titles if something moved.
+5. **Cost glance:** sum `ai_fact_extract_usage.total_tokens` across rescanned exhibits — that is the Phase 4 extraction add-on cost only (separate from multimodal/chrome).
 
-Also baked in `backend/Dockerfile` / `render.yaml` (casesifter.com + www + marketing). Local compose keeps `CORS_ALLOW_ORIGINS=${CORS_ALLOW_ORIGINS:-*}`.
+## Pre–Phase 4 checklist (completed)
 
-### 3. Phase 1 evidence
-
-**`run_gotcha_eval.py`:** every section `all_pass: True` (PIPELINE 1.0/1.0; LIE DETECTOR 1.0/1.0 misses=[]; CASE IMPACT all_pass including `national_grid_historical_fixture` + `ai_print_scan_fixtures`).
-
-**Cross-doc findings with `evidence.refs` pages on BOTH docs** (11467 PDFs not in this cloud workspace — local multi-page proof):
-
-1. Employment 2019 vs 2022 — Loan app **p.2** ↔ VOE **p.2**
-2. Began-employment vs Employed-since 2022 — Updated VOE **p.3** ↔ VOE **p.2**
-3. DOB conflict — Passport **p.2** ↔ Borrower application **p.2**
-
-**Three forged-exhibit lanes still caught** (CASE IMPACT fixtures): National Grid Brooklyn Apr 2007 historical; wrong-era logo/chrome; too-crisp AI print-scan.
-
-### 4. Suspended Render disk (`data/cases/`, `data/jobs/`)
-
-- Live probe: **503 Service Suspended** — no shell/API access to list files.
-- `render.yaml` has **no persistent disk**; `docs/RENDER_HYBRID.md` says scratch only for in-flight jobs.
-- **File list:** unavailable while suspended. Expect **none persisted** (ephemeral FS). John: if you unsuspend briefly to wipe, check `/app/data/cases/` and `/app/data/jobs/` — names only — then re-suspend.
-
-### 5. Next for launch (still open from Phase 0)
-
-- Control-plane **password hashing** (move off SHA-256+salt → argon2/bcrypt; rehash on next login)
-- Control-plane **session expiry** (e.g. 14 days) + logout invalidation
-- **`GEMINI_TIER=paid|vertex|free`** — refuse `free` when `APP_ENV=production`
+1. Local vault: **GET `/api/cases` → 200** with `APP_MODE=vault`; compose defaults vault.
+2. Analysis CORS env-driven, not `*`.
+3. Gotcha `all_pass`; page refs both sides; forged lanes still caught.
+4. Suspended Render: no disk listing possible; expect no persisted case files.
+5. Launch next (still open): control-plane argon2/bcrypt + session expiry; `GEMINI_TIER` refuse `free` in production.
 
 ## Render lockdown status codes (reference)
 
@@ -74,4 +56,4 @@ Live now: **503** (suspended).
 
 ## Next
 
-Phase 4 (if not already merged from this branch) → keep Render suspended → launch build (Phase 2/3 + parity + control-plane / GEMINI_TIER items above) when ready to sell.
+John re-runs 11467 locally using the checklist above → keep Render suspended → launch build (Phase 2/3 + parity + control-plane / `GEMINI_TIER`) when ready to sell.

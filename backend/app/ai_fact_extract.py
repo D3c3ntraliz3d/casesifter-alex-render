@@ -2,11 +2,11 @@
 
 Returns documentary facts with ai_generated=True and capped confidence.
 Never replaces the deterministic extractors; pipeline merges both.
+Logs Gemini token use per document so cost impact is visible.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from typing import Any
@@ -68,25 +68,50 @@ AI_MAX_FACTS = 12
 AI_MAX_CHARS = 12_000
 
 
+def _empty_usage(*, skipped: str | None = None) -> dict[str, Any]:
+    usage: dict[str, Any] = {
+        "prompt_tokens": 0,
+        "candidates_tokens": 0,
+        "thoughts_tokens": 0,
+        "total_tokens": 0,
+        "calls": 0,
+        "facts_added": 0,
+        "model": settings.gemini_model,
+        "step": "ai_fact_extract",
+    }
+    if skipped:
+        usage["skipped"] = skipped
+    return usage
+
+
 def extract_ai_facts(
     text: str,
     *,
     page_offsets: list[dict[str, int]] | None = None,
     limit: int = AI_MAX_FACTS,
-) -> list[dict[str, Any]]:
-    """Call Gemini when configured; return [] on any failure or missing key."""
+    document_label: str | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Call Gemini when configured; return (facts, usage). No-op without a key."""
     body = (text or "").strip()
-    if not body or not settings.gemini_api_key:
-        return []
-    if not getattr(settings, "contextual_multimodal", False) and not settings.gemini_api_key:
-        return []
+    label = (document_label or "document").strip() or "document"
+    if not body:
+        return [], _empty_usage(skipped="empty_text")
+    if not settings.gemini_api_key:
+        return [], _empty_usage(skipped="no_api_key")
 
     try:
-        from app.engines.contextual_logic import _generation_config, _parse_json_payload, _post_gemini
-    except Exception:
-        return []
+        from app.engines.contextual_logic import (
+            _generation_config,
+            _parse_json_payload,
+            _post_gemini,
+            _usage_from_body,
+        )
+    except Exception as exc:
+        logger.info("ai_fact_extract[%s] import skipped: %s", label, exc)
+        return [], _empty_usage(skipped="import_error")
 
     snippet = body[:AI_MAX_CHARS]
+    usage = _empty_usage()
     try:
         response = _post_gemini(
             {
@@ -102,14 +127,20 @@ def extract_ai_facts(
             },
             timeout=max(20, int(settings.gemini_timeout_s or 20)),
         )
+        usage.update(_usage_from_body(response))
+        usage["calls"] = 1
         parsed = _parse_json_payload(response)
     except Exception as exc:
-        logger.info("ai_fact_extract skipped: %s", exc)
-        return []
+        logger.info("ai_fact_extract[%s] skipped: %s", label, exc)
+        usage["skipped"] = "gemini_error"
+        usage["error"] = str(exc)[:200]
+        _log_usage(label, usage)
+        return [], usage
 
     items = parsed.get("facts") if isinstance(parsed, dict) else None
     if not isinstance(items, list):
-        return []
+        _log_usage(label, usage)
+        return [], usage
 
     out: list[dict[str, Any]] = []
     for item in items[: max(1, limit)]:
@@ -118,7 +149,26 @@ def extract_ai_facts(
         rec = _to_fact_record(item, body)
         if rec:
             out.append(rec)
-    return enrich_fact_anchors(out, body, page_offsets)
+    out = enrich_fact_anchors(out, body, page_offsets)
+    usage["facts_added"] = len(out)
+    _log_usage(label, usage)
+    return out, usage
+
+
+def _log_usage(document_label: str, usage: dict[str, Any]) -> None:
+    logger.info(
+        "ai_fact_extract[%s] tokens prompt=%s candidates=%s thoughts=%s total=%s "
+        "calls=%s facts_added=%s skipped=%s model=%s",
+        document_label,
+        usage.get("prompt_tokens", 0),
+        usage.get("candidates_tokens", 0),
+        usage.get("thoughts_tokens", 0),
+        usage.get("total_tokens", 0),
+        usage.get("calls", 0),
+        usage.get("facts_added", 0),
+        usage.get("skipped") or "-",
+        usage.get("model") or settings.gemini_model,
+    )
 
 
 def _to_fact_record(item: dict[str, Any], text: str) -> dict[str, Any] | None:
