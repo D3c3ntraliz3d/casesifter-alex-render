@@ -66,7 +66,7 @@ def _require_analysis_auth(
     elif x_api_key:
         token = x_api_key.strip()
 
-    mode = (settings.app_mode or "vault").strip().lower()
+    mode = settings.resolve_app_mode()
     # Hosted analysis: API key required (no open-entitlement bypass).
     if mode == "analysis":
         if not keys or not token or token not in keys:

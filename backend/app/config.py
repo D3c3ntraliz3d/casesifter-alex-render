@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -12,7 +13,8 @@ class Settings(BaseSettings):
     app_name: str = "CaseSifter"
     app_version: str = "1.0.0"
     # vault = local John testing (full /api/cases). analysis = Render hybrid (v1 only).
-    app_mode: str = "vault"
+    # Empty / unset → resolve_app_mode() picks vault locally, analysis on Render.
+    app_mode: str = ""
     app_env: str = "development"
     # Comma-separated origins. Use * only for local vault; analysis mode rejects *.
     cors_allow_origins: str = "*"
@@ -107,6 +109,18 @@ class Settings(BaseSettings):
         if not raw:
             return ["http://127.0.0.1:5173", "http://localhost:5173"]
         return [part.strip() for part in raw.split(",") if part.strip()]
+
+    def resolve_app_mode(self) -> str:
+        """vault locally; analysis on Render / production unless explicitly vault."""
+        explicit = (self.app_mode or "").strip().lower()
+        if explicit in {"vault", "analysis"}:
+            return explicit
+        # Render always injects RENDER=true. Hosted analysis image must not expose vault.
+        if (os.environ.get("RENDER") or "").strip().lower() in {"true", "1", "yes"}:
+            return "analysis"
+        if (self.app_env or "").strip().lower() == "production":
+            return "analysis"
+        return "vault"
 
 
 settings = Settings()

@@ -63,14 +63,14 @@ def _health_payload() -> dict:
     ensure_watchdog()
     # RENDER_GIT_COMMIT is injected by Render — use it to confirm which SHA is live.
     git_commit = (os.environ.get("RENDER_GIT_COMMIT") or "").strip() or None
-    mode = (settings.app_mode or "vault").strip().lower()
+    mode = settings.resolve_app_mode()
     payload = {
         "status": "ok",
         "name": settings.app_name,
         "version": settings.app_version,
         "app_mode": mode,
         # Bumped when blank-kind forensic + PORT CMD restore ships — proves live SHA without dashboard.
-        "build": "app-mode-page-anchors",
+        "build": "analysis-lockdown-v2",
     }
     if git_commit:
         payload["git_commit"] = git_commit[:12]

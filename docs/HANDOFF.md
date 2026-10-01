@@ -7,39 +7,42 @@
 - **`desktop/` — frozen, delete before launch.** No further Electron feature work.
 - **Local vault stays until launch.** Test with `APP_MODE=vault`. Do not break `/api/cases`.
 - **Phase order:** Phase 1 → Phase 4 → launch (Phase 0 + 2 + 3).
-- **Phase 0** only if Render analysis is live (min: `APP_MODE` + CORS + `/api/v1` auth).
+- **Phase 0** lockdown for launch; **keep `casesifter-analysis` suspended until ready to sell.**
 - **Parity eval before launch:** vault vs `/v1/jobs`+`case_id` material findings must match.
 
 ## Status
 
 | Item | Status |
 |---|---|
-| Render `casesifter-analysis` | **LIVE** — `https://casesifter-analysis.onrender.com` |
-| Phase 0 min lockdown | Shipping with this branch |
-| Phase 1 page anchors | Shipping with this branch |
-| Phase 4 | After Phase 1 gates |
+| Render `casesifter-analysis` | **SUSPENDED** (leave suspended until sale) |
+| Phase 0 min lockdown | **Done** — Dockerfile + `resolve_app_mode()`; vault unmounted in analysis |
+| Phase 1 page anchors | **Done** on this branch |
+| Phase 4 | **Done** on this branch |
 | `desktop/` | **Frozen — delete before launch** |
 
-## Render before → after (Phase 0)
+## Render / lockdown status codes
 
-| Request | Before | Now (`90c5501` live) | Target (`APP_MODE=analysis`) |
-|---|---|---|---|
-| GET `/api/health` | 200 | 200 (`app_mode: vault`) | 200 (`app_mode: analysis`) |
-| GET `/api/cases` | **200** | **200** | **404** |
-| POST `/api/v1/jobs` (no key) | 422 | 422 | **401** |
+**Live service (now):** suspended by owner → all routes **503**.
 
-Code for lockdown is on the tip; live env still has `app_mode: vault`. Sync `APP_MODE=analysis` from `render.yaml` / dashboard to finish.
+**Pre-suspend (historical before lockdown):**
 
-## Gates (this branch)
-
-| Gate | Result |
+| Request | Code |
 |---|---|
-| `run_gotcha_eval.py` before | `all_pass` |
-| `run_gotcha_eval.py` after Phase 1 | `all_pass` |
-| Cross-doc refs have pages both sides | Pass (Summers local) |
-| 11467 PDFs in workspace | **Missing** — CASE IMPACT forged-exhibit fixtures still pass |
-| Phase 4 Summers cross-doc + rephrasings | Shipping |
+| GET `/api/health` | 200 |
+| GET `/api/cases` | **200** (vault exposed) |
+| POST `/api/v1/jobs` (no key) | 422 |
+
+**After lockdown (local proof — `prove_lockdown_status_codes.py`):**
+
+| Request | Before (`APP_MODE=vault`) | After (`APP_MODE=analysis` / `RENDER=true`) |
+|---|---|---|
+| GET `/api/health` | 200 (`vault`) | 200 (`analysis`) |
+| GET `/api/cases` | **200** | **404** |
+| POST `/api/v1/jobs` (no key) | 422 | **401** |
+| POST `/api/v1/jobs` (valid key, no file) | — | **422** |
+
+Image bakes `APP_MODE=analysis`. Empty `ANALYSIS_API_KEYS` no longer crashes boot; `/api/v1` stays 401 until keys are set for sale.
 
 ## Next
 
-Phase 4 complete on this branch → launch build (Phase 0 remainder if needed + 2 + 3) after John confirms Render after-codes.
+Keep Render suspended. Phase 1 already shipped — continue launch prep (Phase 2/3 + parity) when John is ready to sell.

@@ -18,7 +18,7 @@ app = FastAPI(
     description="CaseSifter — local store, ephemeral remote analysis.",
 )
 
-_mode = (settings.app_mode or "vault").strip().lower()
+_mode = settings.resolve_app_mode()
 _origins = settings.cors_origin_list()
 if _mode == "analysis" and ("*" in _origins or not _origins):
     # Analysis service must not reflect arbitrary origins.
@@ -51,11 +51,9 @@ init_sentry(service="analysis-api")
 
 @app.on_event("startup")
 def _startup() -> None:
+    # Do not refuse boot when keys are missing — vault stays unmounted and /api/v1
+    # returns 401. Set ANALYSIS_API_KEYS before unsuspending for sale.
     if _mode == "analysis" and not settings.analysis_api_key_set():
-        if (settings.app_env or "").strip().lower() == "production":
-            raise RuntimeError(
-                "APP_MODE=analysis requires ANALYSIS_API_KEYS when APP_ENV=production."
-            )
         logger.warning(
             "APP_MODE=analysis but ANALYSIS_API_KEYS is empty — /api/v1 will return 401."
         )
