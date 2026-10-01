@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sign up — CaseSifter</title>
+  <meta name="description" content="Create a CaseSifter account and start a 14-day trial in the web app. Analysis is ephemeral; we do not keep a document vault." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600&family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="assets/style.css" />
+</head>
+<body>
+  <nav class="site-nav">
+    <div class="nav-inner">
+      <a class="brand-link" href="index.html">
+        <div class="mark">CS</div>
+        <span class="brand-name">CaseSifter</span>
+      </a>
+      <ul class="nav-links">
+        <li><a href="product.html">Product</a></li>
+        <li><a href="pricing.html">Pricing</a></li>
+        <li><a class="on" href="signup.html">Sign up</a></li>
+        <li><a href="security.html">Security &amp; Privacy</a></li>
+        <li><a href="contact.html">Contact</a></li>
+      </ul>
+      <div class="nav-cta">
+        <a class="btn ghost small" href="signup.html">Sign up</a>
+        <button class="nav-toggle" aria-label="Toggle menu"><span></span><span></span><span></span></button>
+      </div>
+    </div>
+  </nav>
+
+  <main class="wrap">
+    <div class="page-hero">
+      <p class="kicker">Web app</p>
+      <h1>Create your CaseSifter account.</h1>
+      <p class="lead">
+        Sign up for the web app, then start your 14-day trial from Account.
+        Analysis runs ephemerally in the cloud — we do not keep a document vault.
+      </p>
+      <p class="hero-foot"><span class="dot-live"></span> Browser access · ephemeral analysis · no document vault</p>
+    </div>
+
+    <section class="block" style="padding-top: 0;">
+      <div class="contact-grid">
+        <div class="form-card" id="signup-card">
+          <form id="signup-form">
+            <div class="field">
+              <label for="name">Name</label>
+              <input id="name" name="name" type="text" autocomplete="name" />
+            </div>
+            <div class="field">
+              <label for="email">Work email</label>
+              <input id="email" name="email" type="email" required autocomplete="email" />
+            </div>
+            <div class="field">
+              <label for="password">Password</label>
+              <input id="password" name="password" type="password" required minlength="6" autocomplete="new-password" />
+            </div>
+            <div class="field">
+              <label for="invite_code">Invite code <span class="field-optional">(if required)</span></label>
+              <input id="invite_code" name="invite_code" type="text" autocomplete="off" />
+            </div>
+            <div class="field field-check">
+              <label>
+                <input id="accepted_terms" name="accepted_terms" type="checkbox" required />
+                <span>I agree to the Terms of Service and Privacy Policy.</span>
+              </label>
+            </div>
+            <button class="btn primary block" type="submit" id="signup-submit">Create account</button>
+            <p class="form-status" id="form-status" role="status"></p>
+          </form>
+          <div id="signup-success" class="signup-success" hidden>
+            <h3 style="margin-top: 0;">Account created</h3>
+            <p>Open the web app and sign in with the email you just used. Start your trial from Account when you are ready.</p>
+            <p class="plan-note" style="margin-top: 1rem;">Need a walkthrough or early access help? <a href="contact.html">Contact us</a>.</p>
+          </div>
+        </div>
+
+        <div>
+          <div class="card" style="margin-bottom: 1rem;">
+            <h3>What you get</h3>
+            <p>A CaseSifter account for the web app, ready for a 14-day trial. Scans stay locked until entitlement is active.</p>
+          </div>
+          <div class="card">
+            <h3>Prefer a demo first?</h3>
+            <p>We can run a short walkthrough against a real matter structure. <a href="contact.html">Book a demo</a>.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="block">
+      <div class="section-head">
+        <h2>Get scanning in three steps</h2>
+      </div>
+      <div class="plan-grid">
+        <div class="plan">
+          <h3>1. Sign up</h3>
+          <p class="plan-note">Create your account here. Use an invite code if your firm was given one for beta access.</p>
+        </div>
+        <div class="plan">
+          <h3>2. Open the web app</h3>
+          <p class="plan-note">Sign in and open Account to start your 14-day trial (or subscribe). Scans stay locked until entitlement is active.</p>
+        </div>
+        <div class="plan">
+          <h3>3. Add a matter</h3>
+          <p class="plan-note">Create a case, upload filings in the browser, and let analysis run two files at a time.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="cta-band">
+      <h2>Prefer a walkthrough?</h2>
+      <p>We can run a short demo against a real matter structure — ephemeral analysis, no document vault.</p>
+      <a class="btn primary" href="contact.html">Book a demo</a>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap">
+      <div class="footer-grid">
+        <div>
+          <div class="footer-brand"><div class="mark">CS</div><strong>CaseSifter</strong></div>
+          <p style="max-width: 32ch; color: var(--muted); font-size: 0.88rem; line-height: 1.55;">Find what matters in the record. Browser access · ephemeral analysis · no document vault.</p>
+        </div>
+        <div class="footer-cols">
+          <div class="footer-col">
+            <h5>Product</h5>
+            <a href="product.html">How it works</a>
+            <a href="pricing.html">Pricing</a>
+            <a href="signup.html">Sign up</a>
+            <a href="security.html">Security &amp; privacy</a>
+          </div>
+          <div class="footer-col">
+            <h5>Company</h5>
+            <a href="contact.html">Contact</a>
+            <a href="contact.html">Book a demo</a>
+          </div>
+        </div>
+      </div>
+      <p class="footer-disclaimer">
+        CaseSifter — decision support only. Not a determination of authenticity, fraud, or admissibility.
+        © <span id="year"></span> CaseSifter.
+      </p>
+    </div>
+  </footer>
+  <script>document.getElementById("year").textContent = new Date().getFullYear();</script>
+  <script src="assets/app.js"></script>
+</body>
+</html>

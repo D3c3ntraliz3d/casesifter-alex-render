@@ -299,6 +299,15 @@ table.compare td.module { font-weight: 600; color: var(--ink); white-space: nowr
 .field input:focus, .field select:focus, .field textarea:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
 .form-status { margin-top: 1rem; font-size: 0.88rem; color: var(--accent-dark); display: none; }
 .form-status.show { display: block; }
+.form-status.error { color: var(--red); }
+.field-optional { font-weight: 500; color: var(--muted); }
+.field-check label {
+  display: flex; align-items: flex-start; gap: 0.55rem;
+  font-size: 0.88rem; font-weight: 500; color: var(--muted); line-height: 1.45; cursor: pointer;
+}
+.field-check input[type="checkbox"] { margin-top: 0.2rem; flex: 0 0 auto; }
+.signup-success h3 { font-family: Fraunces, serif; color: var(--navy); }
+.signup-success p { color: var(--muted); line-height: 1.6; font-size: 0.95rem; margin: 0; }
 
 /* ---------- Footer ---------- */
 footer.site-footer { border-top: 1px solid var(--border); padding: 2.5rem 0 2.75rem; margin-top: 3rem; }

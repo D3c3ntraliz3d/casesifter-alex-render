@@ -7,47 +7,76 @@ document.addEventListener("DOMContentLoaded", () => {
 
   const form = document.getElementById("contact-form");
   const status = document.getElementById("form-status");
-  if (form && status) {
+  if (form && status && form.id === "contact-form") {
     form.addEventListener("submit", (e) => {
       e.preventDefault();
       status.textContent = "Thanks — we'll be in touch within one business day.";
+      status.classList.remove("error");
       status.classList.add("show");
       form.reset();
     });
   }
 
-  wireDownloads();
+  wireSignup();
 });
 
-async function wireDownloads() {
-  const anchors = document.querySelectorAll("[data-download]");
-  if (!anchors.length) return;
+const CONTROL_PLANE_URL = "https://casesifter-control.onrender.com";
 
-  let catalog = null;
-  try {
-    const res = await fetch("assets/downloads.json", { cache: "no-store" });
-    if (res.ok) catalog = await res.json();
-  } catch {
-    /* keep placeholders */
-  }
+async function wireSignup() {
+  const form = document.getElementById("signup-form");
+  if (!form) return;
 
-  anchors.forEach((el) => {
-    const key = el.getAttribute("data-download");
-    const entry = catalog?.[key];
-    if (!entry?.url) return;
-    el.href = entry.url;
-    el.setAttribute("download", entry.filename || "");
-    if (entry.label && el.id === "download-windows") {
-      el.textContent = entry.label;
+  const status = document.getElementById("form-status");
+  const submit = document.getElementById("signup-submit");
+  const success = document.getElementById("signup-success");
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (!status || !submit) return;
+
+    status.classList.remove("show", "error");
+    status.textContent = "";
+    submit.disabled = true;
+
+    const body = {
+      name: (form.name?.value || "").trim() || null,
+      email: (form.email?.value || "").trim(),
+      password: form.password?.value || "",
+      accepted_terms: Boolean(form.accepted_terms?.checked),
+      invite_code: (form.invite_code?.value || "").trim() || null,
+    };
+
+    try {
+      const res = await fetch(`${CONTROL_PLANE_URL}/v1/signup`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify(body),
+      });
+      let detail = "";
+      try {
+        const data = await res.json();
+        detail = typeof data?.detail === "string"
+          ? data.detail
+          : Array.isArray(data?.detail)
+            ? data.detail.map((d) => d.msg || JSON.stringify(d)).join(" ")
+            : "";
+      } catch {
+        /* non-JSON error body */
+      }
+
+      if (!res.ok) {
+        status.textContent = detail || `Signup failed (${res.status}). Try again or contact us.`;
+        status.classList.add("show", "error");
+        submit.disabled = false;
+        return;
+      }
+
+      form.hidden = true;
+      if (success) success.hidden = false;
+    } catch {
+      status.textContent = "Could not reach the signup service. Check your connection and try again.";
+      status.classList.add("show", "error");
+      submit.disabled = false;
     }
   });
-
-  const meta = document.getElementById("download-meta");
-  if (meta && catalog?.windows?.version) {
-    meta.textContent = `Windows 10/11 · NSIS installer · v${catalog.windows.version}`;
-  }
-  const notes = document.getElementById("download-notes");
-  if (notes && catalog?.windows?.notes) {
-    notes.textContent = catalog.windows.notes;
-  }
 }

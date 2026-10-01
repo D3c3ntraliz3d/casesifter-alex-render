@@ -1,9 +1,0 @@
-{
-  "windows": {
-    "version": "1.0.3",
-    "label": "Download for Windows",
-    "url": "https://casesifter-marketing.onrender.com/downloads/CaseSifter-Setup-1.0.3.exe",
-    "filename": "CaseSifter-Setup-1.0.3.exe",
-    "notes": "Early-access build — Authenticode signing is required before customer rollout (Azure Trusted Signing or OV cert). Elevates document risk from cross-doc fact conflicts (Wayne occupancy path)."
-  }
-}
