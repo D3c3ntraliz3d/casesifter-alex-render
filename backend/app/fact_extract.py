@@ -25,8 +25,11 @@ DATE_TOKEN = (
     r"(?:January|February|March|April|May|June|July|August|September|October|November|December)"
     r"\.?\s+\d{1,2},?\s+\d{4}"
     r"|(?:January|February|March|April|May|June|July|August|September|October|November|December)"
+    r"\.?\s+of\s+\d{4}"
+    r"|(?:January|February|March|April|May|June|July|August|September|October|November|December)"
     r"\.?\s+\d{4}"
     r"|\d{1,2}[/-]\d{1,2}[/-]\d{2,4}"
+    r"|\d{1,2}/\d{4}"
     r")"
 )
 
@@ -279,7 +282,7 @@ def extract_facts(
             seen.add(token)
             facts.append(rec)
             if len(facts) >= limit:
-                return _finalize_facts(facts, body, page_offsets)
+                return _finalize_facts(facts, body, page_offsets, limit=limit)
     except Exception:
         pass
 
@@ -320,7 +323,7 @@ def extract_facts(
             seen.add(token)
             facts.append(rec)
             if len(facts) >= limit:
-                return _finalize_facts(facts, body, page_offsets)
+                return _finalize_facts(facts, body, page_offsets, limit=limit)
 
     for match in RATE_RE.finditer(body):
         value = float(match.group(1))
@@ -337,7 +340,7 @@ def extract_facts(
         seen.add(token)
         facts.append(rec)
         if len(facts) >= limit:
-            return _finalize_facts(facts, body, page_offsets)
+            return _finalize_facts(facts, body, page_offsets, limit=limit)
 
     for key, pattern in DATE_PATTERNS:
         for match in pattern.finditer(body):
@@ -352,19 +355,40 @@ def extract_facts(
             seen.add(token)
             facts.append(rec)
             if len(facts) >= limit:
-                return _finalize_facts(facts, body, page_offsets)
+                return _finalize_facts(facts, body, page_offsets, limit=limit)
 
-    return _finalize_facts(facts, body, page_offsets)
+    return _finalize_facts(facts, body, page_offsets, limit=limit)
 
 
 def _finalize_facts(
     facts: list[dict[str, Any]],
     text: str,
     page_offsets: list[dict[str, int]] | None,
+    *,
+    limit: int = 40,
 ) -> list[dict[str, Any]]:
     from app.page_anchors import enrich_fact_anchors
 
-    return enrich_fact_anchors(facts, text, page_offsets)
+    anchored = enrich_fact_anchors(facts, text, page_offsets)
+    # Additive Gemini pass (no-op without API key). Regex remains the baseline.
+    try:
+        from app.ai_fact_extract import extract_ai_facts
+
+        seen = {
+            (str(f.get("key")), str(f.get("entity_key") or ""), str(f.get("display")))
+            for f in anchored
+        }
+        for rec in extract_ai_facts(text, page_offsets=page_offsets, limit=max(4, limit // 3)):
+            token = (str(rec.get("key")), str(rec.get("entity_key") or ""), str(rec.get("display")))
+            if token in seen:
+                continue
+            seen.add(token)
+            anchored.append(rec)
+            if len(anchored) >= limit:
+                break
+    except Exception:
+        pass
+    return anchored
 
 
 def referenced_exhibits(text: str) -> list[str]:
@@ -437,13 +461,20 @@ def _date(raw: str) -> dict[str, Any] | None:
         return None
     if parsed is None:
         return None
-    month_only = not re.search(r"\d{1,2}", raw) or (
-        re.search(
-            r"(?:January|February|March|April|May|June|July|August|September|October|November|December)\.?\s+\d{4}",
-            raw,
-            re.I,
+    month_only = (
+        bool(re.search(r"(?i)\bof\s+\d{4}\b", raw))
+        or bool(re.fullmatch(r"\d{1,2}/\d{4}", (raw or "").strip()))
+        or (
+            not re.search(r"\d{1,2}", raw)
+            or (
+                re.search(
+                    r"(?:January|February|March|April|May|June|July|August|September|October|November|December)\.?\s+\d{4}",
+                    raw,
+                    re.I,
+                )
+                and not re.search(r"\d{1,2},", raw)
+            )
         )
-        and not re.search(r"\d{1,2},", raw)
     )
     iso = parsed.date().isoformat()
     return {

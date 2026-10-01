@@ -12,6 +12,99 @@
       "notes": "Summers-style binder: two hire dates for the same person/employer."
     },
     {
+      "id": "summers_employment_start_cross_doc",
+      "label": "tp",
+      "shape": "same_entity_attribute_conflict",
+      "mode": "cross_doc",
+      "must_ship": true,
+      "impact_bucket": "credibility",
+      "documents": [
+        {
+          "id": "voe",
+          "name": "VOE TechCore",
+          "text": "EMPLOYMENT VERIFICATION\nEmployee: Michael Summers\nMichael Summers started working at TechCore Solutions in March of 2019.\n"
+        },
+        {
+          "id": "loan",
+          "name": "Loan application",
+          "text": "Uniform Residential Loan Application\nEmployee: Michael Summers\nEmployer: TechCore Solutions\nStart date with current employer: 3/2022\n"
+        }
+      ],
+      "notes": "Phase 4: two-document Summers 2019 vs 2022 must ship HIGH with page-capable refs."
+    },
+    {
+      "id": "summers_rephrase_started_working_vs_start_date",
+      "label": "tp",
+      "shape": "same_entity_attribute_conflict",
+      "mode": "cross_doc",
+      "must_ship": true,
+      "impact_bucket": "credibility",
+      "documents": [
+        {
+          "id": "a",
+          "name": "VOE rephrase A",
+          "text": "Employee: Michael Summers\nMichael Summers started working at TechCore Solutions in March of 2019.\n"
+        },
+        {
+          "id": "b",
+          "name": "App rephrase B",
+          "text": "Employee: Michael Summers\nEmployer: TechCore Solutions\nStart date with current employer: 3/2022\n"
+        }
+      ],
+      "notes": "Phase 4 rephrasing that previously failed regex extraction."
+    },
+    {
+      "id": "summers_rephrase_began_employment_vs_employed_since",
+      "label": "tp",
+      "shape": "same_entity_attribute_conflict",
+      "mode": "cross_doc",
+      "must_ship": true,
+      "impact_bucket": "credibility",
+      "documents": [
+        {
+          "id": "a",
+          "name": "VOE began employment",
+          "text": "Employee: Michael Summers\nMichael Summers began employment with TechCore Solutions on or about March 1, 2019.\n"
+        },
+        {
+          "id": "b",
+          "name": "Updated VOE",
+          "text": "Employee: Michael Summers\nMichael Summers: Employed since March 2022 at TechCore Solutions.\n"
+        }
+      ],
+      "notes": "Phase 4 rephrasing: began employment on or about …"
+    },
+    {
+      "id": "summers_rephrase_mixed_wording_conflict",
+      "label": "tp",
+      "shape": "same_entity_attribute_conflict",
+      "mode": "internal_binder",
+      "must_ship": true,
+      "impact_bucket": "credibility",
+      "text": "Employee: Michael Summers\nEmployer: TechCore Solutions\nMichael Summers started working at TechCore Solutions in March of 2019.\nStart date with current employer: 3/2022\n",
+      "notes": "Phase 4 third rephrasing pair inside one binder."
+    },
+    {
+      "id": "summers_rephrase_clean_twin_same_date",
+      "label": "fp",
+      "shape": "supporting_not_against",
+      "mode": "cross_doc",
+      "must_suppress": true,
+      "documents": [
+        {
+          "id": "a",
+          "name": "VOE started working",
+          "text": "Employee: Michael Summers\nMichael Summers started working at TechCore Solutions in March of 2019.\n"
+        },
+        {
+          "id": "b",
+          "name": "VOE began employment",
+          "text": "Employee: Michael Summers\nMichael Summers began employment with TechCore Solutions on or about March 1, 2019.\n"
+        }
+      ],
+      "notes": "Phase 4 clean twin: same hire month, different wording — must not flag."
+    },
+    {
       "id": "paystub_hire_after_w2_year",
       "label": "tp",
       "shape": "cross_attribute_hire_vs_w2",

@@ -148,10 +148,28 @@ MONTHS = (
 )
 
 # "Employed since March 2022" / "employed since March 15, 2022"
+# Also: "started working … in March of 2019", "Start date with current employer: 3/2022"
 EMPLOYED_SINCE_RE = re.compile(
-    rf"(?i)(?:employed\s+since|date\s+of\s+hire|hire\s+date|start\s+date|"
-    rf"commenced\s+(?:employment|work)|began\s+(?:employment|work))"
-    rf"\D{{0,24}}({DATE_TOKEN})"
+    rf"(?i)(?:employed\s+since|date\s+of\s+hire|hire\s+date|"
+    rf"start\s+date(?:\s+with\s+current\s+employer)?|"
+    rf"commenced\s+(?:employment|work)|"
+    rf"began\s+(?:employment|work(?:ing)?)|"
+    rf"started\s+(?:working|employment|work))"
+    rf"(?:.{{0,80}}?)({DATE_TOKEN})"
+)
+
+# "started working at TechCore … in March of 2019"
+STARTED_WORKING_AT_RE = re.compile(
+    rf"(?i)started\s+working\s+(?:at|for|with)\s+"
+    rf"([A-Z][A-Za-z0-9 &.'/-]{{2,60}}?)"
+    rf"\s+in\s+({DATE_TOKEN})"
+)
+
+# "began employment with TechCore … on or about March 1, 2019"
+BEGAN_EMPLOYMENT_WITH_RE = re.compile(
+    rf"(?i)began\s+employment\s+(?:with|at|for)\s+"
+    rf"([A-Z][A-Za-z0-9 &.'/-]{{2,60}}?)"
+    rf"\s+(?:on\s+or\s+about\s+|on\s+|in\s+)({DATE_TOKEN})"
 )
 
 # "in the position of Senior Business Analyst since March 2019"
@@ -169,10 +187,11 @@ EMPLOYED_BY_SINCE_RE = re.compile(
     rf"since\s+({DATE_TOKEN})"
 )
 
-# "Michael Summers: … Employed since …" or name near employment language
+# "Michael Summers: … Employed since …" or name near employment language.
+# Use horizontal whitespace only so "Name\\nName" is not one person token.
 PERSON_NEAR_RE = re.compile(
-    r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z'.]+){1,3})\b"
-    r"(?:\s*[:,]\s*|\s+(?:is|has\s+been|was)\s+)"
+    r"\b([A-Z][a-z]+(?:[ \t]+[A-Z][a-z'.]+){1,3})\b"
+    r"(?:[ \t]*[:,][ \t]*|[ \t]+(?:is|has[ \t]+been|was)[ \t]+)"
 )
 
 PERSON_STOP = frozenset(
@@ -693,6 +712,44 @@ def extract_grounded_facts(
         from app.page_anchors import enrich_fact_anchors
 
         return enrich_fact_anchors(facts, body, page_offsets)
+
+    for match in STARTED_WORKING_AT_RE.finditer(body):
+        parsed = _date(match.group(2))
+        if not parsed:
+            continue
+        employer = match.group(1).strip().rstrip(".,")
+        before = body[max(0, match.start() - 200) : match.start()]
+        person = _nearest_person(before)
+        rec = _graph_record(
+            "employment_start",
+            parsed["value"],
+            parsed["display"],
+            match.group(0),
+            person=person,
+            employer=employer,
+            extra={**parsed, "char_start": match.start(), "char_end": match.end()},
+        )
+        if _add(rec):
+            return _done()
+
+    for match in BEGAN_EMPLOYMENT_WITH_RE.finditer(body):
+        parsed = _date(match.group(2))
+        if not parsed:
+            continue
+        employer = match.group(1).strip().rstrip(".,")
+        before = body[max(0, match.start() - 200) : match.start()]
+        person = _nearest_person(before)
+        rec = _graph_record(
+            "employment_start",
+            parsed["value"],
+            parsed["display"],
+            match.group(0),
+            person=person,
+            employer=employer,
+            extra={**parsed, "char_start": match.start(), "char_end": match.end()},
+        )
+        if _add(rec):
+            return _done()
 
     for match in EMPLOYED_SINCE_RE.finditer(body):
         parsed = _date(match.group(1))
@@ -2682,6 +2739,22 @@ def _norm_address(value: str) -> str:
     return re.sub(r"\s+", " ", n).strip()
 
 
+def _clean_person_name(name: str | None) -> str | None:
+    if not name:
+        return None
+    cleaned = re.sub(r"[\r\n]+", " ", str(name))
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    parts = cleaned.split()
+    # Drop accidental doubled "First Last First Last" from cross-line matches.
+    if len(parts) >= 4 and len(parts) % 2 == 0:
+        half = len(parts) // 2
+        if [p.lower() for p in parts[:half]] == [p.lower() for p in parts[half:]]:
+            cleaned = " ".join(parts[:half])
+    elif len(parts) > 4:
+        cleaned = " ".join(parts[:3])
+    return cleaned or None
+
+
 def _graph_record(
     key: str,
     value: Any,
@@ -2702,8 +2775,8 @@ def _graph_record(
         "quote": re.sub(r"\s+", " ", quote).strip()[:220],
         "documentary": True,
         "graph": True,
-        "person": person,
-        "employer": employer,
+        "person": _clean_person_name(person),
+        "employer": re.sub(r"\s+", " ", employer).strip() if employer else employer,
         "entity_key": None,
     }
     if extra:
@@ -2723,7 +2796,7 @@ def _nearest_person(window: str) -> str | None:
     for match in EMPLOYEE_LABEL_RE.finditer(window or ""):
         labeled.append(match.group(1).strip())
     for match in re.finditer(
-        r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z'.]+){1,3})\s*:",
+        r"\b([A-Z][a-z]+(?:[ \t]+[A-Z][a-z'.]+){1,3})[ \t]*:",
         window or "",
     ):
         labeled.append(match.group(1).strip())

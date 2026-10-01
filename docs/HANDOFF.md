@@ -33,6 +33,16 @@
 
 **After deploy (`APP_MODE=analysis`):** vault routes 404; `/api/v1/*` without `X-API-Key` → 401. Re-probe and update this table.
 
+## Gates (this branch)
+
+| Gate | Result |
+|---|---|
+| `run_gotcha_eval.py` before | `all_pass` |
+| `run_gotcha_eval.py` after Phase 1 | `all_pass` |
+| Cross-doc refs have pages both sides | Pass (Summers local) |
+| 11467 PDFs in workspace | **Missing** — CASE IMPACT forged-exhibit fixtures still pass |
+| Phase 4 Summers cross-doc + rephrasings | Shipping |
+
 ## Next
 
-Phase 1 gates (gotcha all_pass + 11467 with pages) → Phase 4.
+Phase 4 complete on this branch → launch build (Phase 0 remainder if needed + 2 + 3) after John confirms Render after-codes.

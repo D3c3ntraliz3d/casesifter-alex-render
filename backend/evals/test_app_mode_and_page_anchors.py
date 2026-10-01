@@ -61,30 +61,30 @@ def test_page_offsets_and_fact_anchors():
     )
 
     # Cross-doc finding should carry refs with pages on both sides.
+    a_text = "Employee: Alex Summers\nEmployed since March 2019 at TechCore."
+    b_text = "Employee: Alex Summers\nVerification of employment. Start date: March 2022."
+    fa = extract_facts(a_text, page_offsets=[{"page": 1, "start": 0}])
+    fb = extract_facts(b_text, page_offsets=[{"page": 1, "start": 0}])
     doc_a = {
         "document_id": "a",
         "display_name": "VOE",
         "doc_kind": "exhibit",
         "sha256": "aaa",
-        "facts": [
-            f
-            for f in extract_facts(pages[0]["text"], page_offsets=[{"page": 1, "start": 0}])
-            if f.get("key") == "employment_start"
-        ],
-        "text_excerpt": pages[0]["text"],
-        "entities": {"organizations": ["TechCore"], "locations": []},
+        "facts": fa,
+        "text_excerpt": a_text,
+        "entities": {"organizations": ["TechCore"], "people": ["Alex Summers"], "locations": []},
         "text_fingerprint": "fp-a",
     }
     findings, _ = compare_to_case(
         new_document_id="b",
         new_display_name="Loan app",
-        new_entities={"organizations": ["TechCore"], "locations": []},
+        new_entities={"organizations": ["TechCore"], "people": ["Alex Summers"], "locations": []},
         new_amounts=[],
         new_fingerprint="fp-b",
         prior_snapshots=[doc_a],
         new_doc_kind="exhibit",
-        new_facts=extract_facts(pages[1]["text"], page_offsets=[{"page": 1, "start": 0}]),
-        new_text=pages[1]["text"],
+        new_facts=fb,
+        new_text=b_text,
         new_sha256="bbb",
         new_page_offsets=[{"page": 1, "start": 0}],
     )
