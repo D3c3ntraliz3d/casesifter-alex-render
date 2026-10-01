@@ -22,16 +22,13 @@
 
 ## Render before → after (Phase 0)
 
-**Before (unauthenticated):**
+| Request | Before | Now (`90c5501` live) | Target (`APP_MODE=analysis`) |
+|---|---|---|---|
+| GET `/api/health` | 200 | 200 (`app_mode: vault`) | 200 (`app_mode: analysis`) |
+| GET `/api/cases` | **200** | **200** | **404** |
+| POST `/api/v1/jobs` (no key) | 422 | 422 | **401** |
 
-| Request | Code |
-|---|---|
-| GET `/api/health` | 200 |
-| GET `/api/cases` | **200** (vault exposed) |
-| POST `/api/upload` | 422 |
-| POST `/api/v1/jobs` | 422 (open entitlement) |
-
-**After deploy (`APP_MODE=analysis`):** vault routes 404; `/api/v1/*` without `X-API-Key` → 401. Re-probe and update this table.
+Code for lockdown is on the tip; live env still has `app_mode: vault`. Sync `APP_MODE=analysis` from `render.yaml` / dashboard to finish.
 
 ## Gates (this branch)
 
