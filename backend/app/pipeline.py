@@ -470,14 +470,22 @@ def run_pipeline(
     )
 
     if document_id:
-        cases_db.update_document(
-            document_id,
-            status="complete",
-            risk_level=risk_level,
-            risk_score=risk_score,
-            scan_job_id=job_id,
-            last_scanned_at=datetime.now(timezone.utc).isoformat(),
-        )
+        complete_fields: dict[str, Any] = {
+            "status": "complete",
+            "risk_level": risk_level,
+            "risk_score": risk_score,
+            "scan_job_id": job_id,
+            "last_scanned_at": datetime.now(timezone.utc).isoformat(),
+        }
+        # Persist inferred exhibit kind when the case row was still blank.
+        if not (doc_kind or "").strip():
+            from app.auto_title import looks_like_exhibit_filename
+
+            fname = source.name if source else ""
+            if looks_like_exhibit_filename(fname) or looks_like_exhibit_filename(display_name or ""):
+                complete_fields["doc_kind"] = "exhibit"
+                doc_kind = "exhibit"
+        cases_db.update_document(document_id, **complete_fields)
         cases_db.save_scan_snapshot(
             document_id=document_id,
             case_id=case_id or "",

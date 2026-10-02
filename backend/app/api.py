@@ -478,6 +478,11 @@ def api_rescan_case(
     # Full rescan: clear any queued/scanning flags (including orphans from a prior crash)
     # so every stored file can be started again.
     _reap_stale_scans(case_id, stale_seconds=0)
+    # Re-apply filename → kind before queueing so EXHIBIT(S) is not left Unknown.
+    try:
+        retitle_case_documents(case_id)
+    except Exception:
+        logger.exception("retitle before rescan failed for case %s", case_id)
 
     pending: list[str] = []
     skipped: list[dict[str, str]] = []
@@ -589,6 +594,24 @@ def api_scan_document(
     return UploadResponse(job_id=job["job_id"], filename=job["filename"], status="queued")
 
 
+def _infer_kind_from_names(doc: dict) -> str | None:
+    """Fill or correct doc_kind from filename / display (rescan must not keep Unknown)."""
+    filename = doc.get("original_filename") or ""
+    display = doc.get("display_name") or ""
+    # Exhibit-shaped names win even over a wrong prior kind (e.g. Order from body text).
+    if looks_like_exhibit_filename(filename) or looks_like_exhibit_filename(display):
+        return "exhibit"
+    current = (doc.get("doc_kind") or "").strip()
+    if current:
+        return current
+    _name, proposed = propose_document_title(filename, "")
+    if looks_like_exhibit_filename(_name):
+        return "exhibit"
+    if proposed and proposed.strip().lower() not in COURT_FILING_KINDS:
+        return proposed
+    return None
+
+
 def _queue_document_scan(doc: dict, *, submitted_by: str) -> dict[str, str]:
     source = Path(doc["stored_path"])
     job_id = uuid.uuid4().hex
@@ -596,6 +619,17 @@ def _queue_document_scan(doc: dict, *, submitted_by: str) -> dict[str, str]:
     job_path = job_dir(job_id) / filename
     shutil.copy2(source, job_path)
     create_job(job_id, job_path.name)
+    # Rescan used to pass through a blank kind forever — EXHIBIT(S) files stayed Unknown.
+    kind = _infer_kind_from_names(doc)
+    display = doc.get("display_name")
+    prior_kind = (doc.get("doc_kind") or "").strip()
+    if kind and kind != prior_kind:
+        # Prefer a clean Exhibit N title when correcting/filling exhibit kind.
+        proposed_name, _proposed_kind = propose_document_title(filename, "")
+        if kind == "exhibit" and proposed_name:
+            display = proposed_name
+        cases_db.update_document(doc["id"], doc_kind=kind, display_name=display)
+        doc = {**doc, "doc_kind": kind, "display_name": display}
     cases_db.update_document(doc["id"], scan_job_id=job_id, status="queued")
     _start_analysis(
         job_id,
@@ -604,7 +638,7 @@ def _queue_document_scan(doc: dict, *, submitted_by: str) -> dict[str, str]:
         case_id=doc["case_id"],
         document_id=doc["id"],
         display_name=doc.get("display_name"),
-        doc_kind=doc.get("doc_kind"),
+        doc_kind=doc.get("doc_kind") or kind,
     )
     return {"job_id": job_id, "filename": job_path.name}
 
