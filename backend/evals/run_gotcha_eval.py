@@ -580,6 +580,21 @@ def evaluate_doc_kinds() -> dict:
             "exhibit",
         ),
         (
+            "32 - EXHIBIT(S).pdf",
+            "",
+            "exhibit",
+        ),
+        (
+            "32 EXHIBIT(S).pdf",
+            "",
+            "exhibit",
+        ),
+        (
+            "38 – EXHIBIT(S).pdf",  # en-dash between number and type
+            "",
+            "exhibit",
+        ),
+        (
             "Proposed Order.pdf",
             "IT IS HEREBY ORDERED that the motion is granted.",
             "order",

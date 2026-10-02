@@ -64,19 +64,22 @@ BODY_KIND_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     }
 ]
 
+# ASCII hyphen plus common NYSCEF / Word en–em dashes between doc no and type.
+_DASH = r"[\s_\-\u2010-\u2015]"
+
 # Filename like EXHIBIT_S__83 or Exhibit S_41 — letter plus the docket/file number.
 EXHIBIT_FILE_RE = re.compile(
-    r"(?i)(?:^|[\s_\-])exhibit[\s_\-]*"
+    rf"(?i)(?:^|{_DASH})exhibit{_DASH}*"
     r"([A-Za-z0-9]{1,4}(?:-[A-Za-z0-9]{1,3})?)"
-    r"(?:[\s_\-]+(\d{1,4}))?"
-    r"(?=$|[\s_\-.(])"
+    rf"(?:{_DASH}+(\d{{1,4}}))?"
+    rf"(?=$|{_DASH}|\.|[(])"
 )
 
 # NYSCEF type label EXHIBIT(S) — plural marker, optional letter / docket number after.
 EXHIBIT_PARENS_S_RE = re.compile(
-    r"(?i)(?:^|[\s_\-])exhibit\s*\(\s*s\s*\)"
-    r"(?:[\s_\-]+([A-Za-z0-9]{1,4}))?"
-    r"(?:[\s_\-]+(\d{1,4}))?"
+    rf"(?i)(?:^|{_DASH})exhibit\s*\(\s*s\s*\)"
+    rf"(?:{_DASH}+([A-Za-z0-9]{{1,4}}))?"
+    rf"(?:{_DASH}+(\d{{1,4}}))?"
 )
 
 
@@ -124,7 +127,10 @@ def propose_document_title(
         name = titled if _keeps_file_identity(titled, stem) else f"{label} — {titled}"
         return _truncate(_with_file_number(name, stem)), kind
 
-    if re.search(r"\b(exhibit|complaint|motion|affidavit)\b", cleaned, re.I):
+    # Bare "exhibit" in the stem is enough — never leave these as Unknown.
+    if re.search(r"(?i)\bexhibit\b", cleaned):
+        return _truncate(_with_file_number(cleaned, stem)), "exhibit"
+    if re.search(r"\b(complaint|motion|affidavit)\b", cleaned, re.I):
         return _truncate(_with_file_number(cleaned, stem)), None
 
     return _truncate(_with_file_number(cleaned or filename, stem)), None
@@ -132,8 +138,12 @@ def propose_document_title(
 
 def exhibit_title_from_filename(filename: str) -> str | None:
     stem = _stem(filename)
-    # Leading NYSCEF doc number: "104 - EXHIBIT(S).pdf" → Exhibit 104
-    leading = re.match(r"^(\d{1,4})\s*[\-–—]\s*", stem or "")
+    # Leading NYSCEF doc number: "104 - EXHIBIT(S).pdf" / "104 EXHIBIT(S).pdf" → Exhibit 104
+    leading = re.match(
+        r"^(\d{1,4})(?:\s*[\-–—]\s*|\s+)(?=exhibit)",
+        stem or "",
+        re.I,
+    )
     lead_no = leading.group(1) if leading else None
 
     match = EXHIBIT_FILE_RE.search(stem)
@@ -144,17 +154,19 @@ def exhibit_title_from_filename(filename: str) -> str | None:
             return f"Exhibit {tag}_{number}"
         return f"Exhibit {tag}"
     # NYSCEF "EXHIBIT(S)" packets — do not let body "in order to" retitle these as Order.
+    # Prefer the leading docket number ("32 - EXHIBIT(S)") over a trailing description token
+    # ("… - S Bank Statement"), which is not an exhibit letter.
     parens = EXHIBIT_PARENS_S_RE.search(stem)
     if not parens:
         return None
     tag = (parens.group(1) or "").upper()
     number = parens.group(2)
+    if lead_no:
+        return f"Exhibit {lead_no}"
     if tag and number:
         return f"Exhibit {tag}_{number}"
     if tag:
         return f"Exhibit {tag}"
-    if lead_no:
-        return f"Exhibit {lead_no}"
     return "Exhibit"
 
 
@@ -165,10 +177,10 @@ def looks_like_exhibit_filename(name: str) -> bool:
         return True
     return bool(
         re.search(
-            r"(?i)(?:^|[\s_\-./])exhibit(?:\s*\(\s*s\s*\))?(?:$|[\s_\-./(])",
+            rf"(?i)(?:^|{_DASH}|[./])exhibit(?:\s*\(\s*s\s*\))?(?:$|{_DASH}|[./(])",
             text,
         )
-    )
+    ) or bool(re.search(r"(?i)\bexhibit\b", text))
 
 
 def uniquify_display_name(
@@ -288,6 +300,8 @@ def retitle_case_documents(case_id: str) -> list[dict[str, str]]:
         filename = doc.get("original_filename") or ""
         excerpt = (snaps.get(doc["id"]) or {}).get("text_excerpt") or ""
         proposed, kind = propose_document_title(filename, excerpt[:4000])
+        if looks_like_exhibit_filename(filename) or looks_like_exhibit_filename(proposed):
+            kind = "exhibit"
         unique = uniquify_display_name(proposed, taken, filename)
         taken.append(unique)
         fields: dict[str, str] = {}
