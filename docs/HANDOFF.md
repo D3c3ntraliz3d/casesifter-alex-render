@@ -19,6 +19,8 @@
 | Phase 1 page anchors | **Done** |
 | Phase 4 extraction | **Done** (regex baseline + additive AI; fixtures; token log) |
 | `desktop/` | **Frozen — delete before launch** |
+| Marketing CTAs (Download → Sign up) | **Done on Render** `casesifter-marketing.onrender.com` |
+| Custom domain `www.casesifter.com` | **STALE — still SiteGround** (Sept desktop Download page). DNS NS = `ns1/ns2.siteground.net`. Not the Render static site. Re-upload `marketing/` to SiteGround **or** attach domain to Render `casesifter-marketing`. |
 
 ## Phase 4 (conditions met)
 

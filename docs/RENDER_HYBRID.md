@@ -34,7 +34,8 @@ Scratch disk only if needed for in-flight jobs; do not treat it as permanent cas
 ### marketing (static from `marketing/`)
 
 - Publish path: `./marketing`
-- Public download page: `/download.html` (installer URL from `assets/downloads.json` → GitHub Releases)
+- Public CTA: `/signup.html` (control-plane `POST /v1/signup`). `/download.html` redirects to signup — desktop installer is retired.
+- **Custom domain note:** `casesifter.com` / `www.casesifter.com` DNS is still on SiteGround (`ns1/ns2.siteground.net`) and can serve a stale Sept-2026 desktop marketing tree. The updated site is on Render `casesifter-marketing` (`https://casesifter-marketing.onrender.com`). Point the custom domain at that static service (or re-upload `marketing/` to SiteGround) so visitors stop seeing Download / Windows installer CTAs.
 
 ## Deploy branch
 
