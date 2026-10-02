@@ -20,7 +20,7 @@
 | Phase 4 extraction | **Done** (regex baseline + additive AI; fixtures; token log) |
 | `desktop/` | **Frozen — delete before launch** |
 | Marketing CTAs (Download → Sign up) | **Done on Render** `casesifter-marketing.onrender.com` |
-| Custom domain `www.casesifter.com` | **STALE — SiteGround** (A `34.174.53.153`, NS `ns1/ns2.siteground.net`, SiteGuard). John’s private-browser screenshot is this host, not Render. Fix: attach domain to Render **or** re-upload `marketing/` via SiteGround File Manager — see `docs/RENDER_HYBRID.md`. Until then open `https://casesifter-marketing.onrender.com`. |
+| Custom domain `www.casesifter.com` | **BLOCKED — no deploy creds in agent.** Still SiteGround (A `34.174.53.153`, NS `ns1/ns2.siteground.net`). Render Sign-up is live at `https://casesifter-marketing.onrender.com`. Need **either** `RENDER_API_KEY` + SiteGround DNS edit **or** SiteGround FTP/SFTP — exact DNS table in `docs/RENDER_HYBRID.md`. |
 
 ## Phase 4 (conditions met)
 

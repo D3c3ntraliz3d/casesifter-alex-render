@@ -39,17 +39,30 @@ Scratch disk only if needed for in-flight jobs; do not treat it as permanent cas
 
 ### Fix custom domain (pick one)
 
+**Agent blocker (2026-10-02):** this Cloud Agent has **no** `RENDER_API_KEY`, SiteGround Site Tools login, or FTP/SFTP credentials. Cannot attach domains or upload to `34.174.53.153`. Provide one of the secrets below to finish remotely.
+
 **A — Preferred: attach domain to Render `casesifter-marketing`**
-1. Render Dashboard → **casesifter-marketing** → **Settings** → **Custom Domains** → add `casesifter.com` and `www.casesifter.com`.
-2. Copy the A / CNAME targets Render shows.
-3. SiteGround → **Site Tools** → **Domain** → **DNS Zone Editor** (or registrar DNS if NS leave SiteGround later): set apex A and `www` CNAME/A to Render’s values. Remove the old A `34.174.53.153` once Render verifies.
-4. Wait for TLS on Render; then hard-refresh `https://www.casesifter.com` — nav must say **Sign up**, not Download.
+1. Render Dashboard → **casesifter-marketing** → **Settings** → **Custom Domains** → add `www.casesifter.com` (Render also adds apex and redirects) **or** add both.
+2. In SiteGround **Site Tools → Domain → DNS Zone Editor** (NS are still `ns1/ns2.siteground.net`), replace SiteGround hosting records:
+
+| Host | Type | Value |
+|---|---|---|
+| `@` (apex `casesifter.com`) | **A** | `216.24.57.1` (Render load balancer; confirm in Dashboard if shown) |
+| `www` | **CNAME** | `casesifter-marketing.onrender.com` |
+
+3. Remove old A `34.174.53.153` for `@` / `www`, and remove any **AAAA** records (Render is IPv4-only).
+4. Dashboard → **Verify**; wait for TLS. Hard-refresh `https://www.casesifter.com` — nav must say **Sign up**, not Download.
+5. Keep SiteGround MX/SPF as-is if mail still uses SiteGround antispam (`mx*.antispam.mailspamprotection.com`).
+
+**Secret for agent to do A:** `RENDER_API_KEY` (Account Settings → API Keys) plus DNS edit access — either SiteGround DNS Zone Editor login **or** registrar access if NS move off SiteGround.
 
 **B — Fast interim: overwrite SiteGround files**
 1. SiteGround → **Site Tools** → **File Manager** → site root for `casesifter.com` (often `public_html`).
-2. Upload/replace from this branch’s `marketing/`: `index.html`, `signup.html`, `download.html`, `product.html`, `pricing.html`, `security.html`, `contact.html`, and `assets/` (`app.js`, `style.css`).
+2. Upload/replace from this branch’s `marketing/`: `index.html`, `signup.html`, `download.html`, `product.html`, `pricing.html`, `security.html`, `contact.html`, and `assets/` (`app.js`, `style.css`). Do **not** upload any real `.exe`.
 3. Delete SiteGround `downloads/` (installer) and any `assets/downloads.json`.
 4. Hard-refresh `https://www.casesifter.com`.
+
+**Secret for agent to do B:** SiteGround FTP/SFTP host + username + password (Site Tools → Site → FTP Accounts), **or** Site Tools login so File Manager can be used.
 
 ## Deploy branch
 
