@@ -1,33 +1,25 @@
 # CaseSifter
 
-Decision-support for court filings: local case files on the firm PC, proprietary analysis on an ephemeral cloud API (process then delete — **no document vault**).
+Decision-support for court filings: browser web app + proprietary analysis on an ephemeral cloud API (process then delete — **no document vault**).
 
 ## Hybrid model
 
 | Piece | Where |
 | --- | --- |
-| Case PDFs, index, UI | **Desktop** (`desktop/`) |
+| Case PDFs, index, UI | **Web app** (`frontend/` → firm browser) |
 | Pipeline / gotcha / OCR / prompts | **Analysis API** (`backend/` on Render) |
 | Login / trial / Stripe | **Control plane** (`control_plane/`) |
 
-Privacy pitch: we do not keep a document library. Files used for analysis are processed and removed. The lasting copy stays on your machine.
+Privacy pitch: we do not keep a document library. Files used for analysis are processed and removed.
 
-See [desktop/README.md](desktop/README.md), [docs/RENDER_HYBRID.md](docs/RENDER_HYBRID.md), [marketing/index.html](marketing/index.html), [marketing/download.html](marketing/download.html), and [docs/DMS_PHASE2.md](docs/DMS_PHASE2.md).
+See [docs/RENDER_HYBRID.md](docs/RENDER_HYBRID.md), [marketing/index.html](marketing/index.html), [marketing/signup.html](marketing/signup.html), and [docs/DMS_PHASE2.md](docs/DMS_PHASE2.md).
 
-## End-user download (Windows)
+## End-user signup (web)
 
-Marketing hosts a **Download** page. The installer is published via GitHub Releases (`desktop-v*` tags); the site reads the URL from [`marketing/assets/downloads.json`](marketing/assets/downloads.json).
+Marketing CTAs point to **Sign up** (`marketing/signup.html` → control-plane `POST /v1/signup`). The desktop installer funnel is retired (`download.html` redirects to signup).
 
-```powershell
-# Build locally
-cd frontend; npm ci
-cd ../desktop; npm ci
-$env:CASESIFTER_ANALYSIS_URL="https://your-analysis.onrender.com"
-$env:CASESIFTER_CONTROL_URL="https://your-control.onrender.com"
-npm run dist:win
-```
-
-Then tag `desktop-vX.Y.Z`, push the tag, and update `downloads.json` to the release asset. After install, users start a 14-day trial in **Account** (download itself is not paywalled).
+Live marketing (current): `https://casesifter-marketing.onrender.com`  
+Custom domain `casesifter.com` / `www.casesifter.com` may still be on **SiteGround** until DNS is moved to this Render static service — see custom-domain steps in [docs/RENDER_HYBRID.md](docs/RENDER_HYBRID.md).
 
 ## Quick start (local web / ops)
 

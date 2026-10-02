@@ -35,7 +35,21 @@ Scratch disk only if needed for in-flight jobs; do not treat it as permanent cas
 
 - Publish path: `./marketing`
 - Public CTA: `/signup.html` (control-plane `POST /v1/signup`). `/download.html` redirects to signup — desktop installer is retired.
-- **Custom domain note:** `casesifter.com` / `www.casesifter.com` DNS is still on SiteGround (`ns1/ns2.siteground.net`) and can serve a stale Sept-2026 desktop marketing tree. The updated site is on Render `casesifter-marketing` (`https://casesifter-marketing.onrender.com`). Point the custom domain at that static service (or re-upload `marketing/` to SiteGround) so visitors stop seeing Download / Windows installer CTAs.
+- **Why John still sees Download:** `casesifter.com` / `www.casesifter.com` are **not** the Render static site. DNS NS = `ns1.siteground.net` / `ns2.siteground.net` (SiteGuard). Apex/www A = `34.174.53.153` (SiteGround). `https://casesifter-marketing.onrender.com` already serves Sign up. Private browsing cannot fix a different host.
+
+### Fix custom domain (pick one)
+
+**A — Preferred: attach domain to Render `casesifter-marketing`**
+1. Render Dashboard → **casesifter-marketing** → **Settings** → **Custom Domains** → add `casesifter.com` and `www.casesifter.com`.
+2. Copy the A / CNAME targets Render shows.
+3. SiteGround → **Site Tools** → **Domain** → **DNS Zone Editor** (or registrar DNS if NS leave SiteGround later): set apex A and `www` CNAME/A to Render’s values. Remove the old A `34.174.53.153` once Render verifies.
+4. Wait for TLS on Render; then hard-refresh `https://www.casesifter.com` — nav must say **Sign up**, not Download.
+
+**B — Fast interim: overwrite SiteGround files**
+1. SiteGround → **Site Tools** → **File Manager** → site root for `casesifter.com` (often `public_html`).
+2. Upload/replace from this branch’s `marketing/`: `index.html`, `signup.html`, `download.html`, `product.html`, `pricing.html`, `security.html`, `contact.html`, and `assets/` (`app.js`, `style.css`).
+3. Delete SiteGround `downloads/` (installer) and any `assets/downloads.json`.
+4. Hard-refresh `https://www.casesifter.com`.
 
 ## Deploy branch
 

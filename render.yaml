@@ -79,3 +79,21 @@ services:
       paths:
         - marketing/**
         - render.yaml
+    routes:
+      # Desktop funnel retired — keep these even if CDN still has old binaries.
+      - type: redirect
+        source: /download.html
+        destination: /signup.html
+      - type: redirect
+        source: /downloads/*
+        destination: /signup.html
+      - type: redirect
+        source: /assets/downloads.json
+        destination: /signup.html
+    headers:
+      - path: /*.html
+        name: Cache-Control
+        value: public, max-age=0, must-revalidate
+      - path: /
+        name: Cache-Control
+        value: public, max-age=0, must-revalidate
