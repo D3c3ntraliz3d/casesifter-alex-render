@@ -59,16 +59,21 @@ Scratch disk only if needed for in-flight jobs; do not treat it as permanent cas
 
 | Key | Soft-launch |
 |---|---|
-| `STRIPE_SECRET_KEY` | sync:false — John |
-| `STRIPE_WEBHOOK_SECRET` | sync:false — John |
-| `STRIPE_PRICE_ID` | sync:false — John |
+| `STRIPE_SECRET_KEY` | sync:false — John (`sk_test_…` first) |
+| `STRIPE_WEBHOOK_SECRET` | sync:false — John (`whsec_…`) |
+| `STRIPE_PRICE_ID` | sync:false — John (Solo **$149**/mo `price_…`) |
 | `CONTROL_ADMIN_TOKEN` | sync:false — John |
-| `CASESIFTER_PUBLIC_URL` | `https://casesifter-app.onrender.com` until `app` DNS; then `https://app.casesifter.com` |
+| `CASESIFTER_PUBLIC_URL` | Blueprint: `https://casesifter-app.onrender.com` until `app` DNS; then `https://app.casesifter.com` |
 | `CASESIFTER_TRIAL_DAYS` | `14` |
 | `CASESIFTER_INVITE_REQUIRED` | `false` (invite optional) |
 | `CASESIFTER_INVITE_CODES` | sync:false comma-list — optional while gate is off |
 
-**Verify:** signup (invite optional) → Account → Start trial → Stripe (or admin `POST /v1/trial` for demos). Webhook endpoint: `https://casesifter-control.onrender.com/v1/webhooks/stripe`.
+**Stripe runbook:** `docs/STRIPE.md` (product/price, keys, webhook events, Render env, verify).
+
+**Webhook:** `https://casesifter-control.onrender.com/v1/webhooks/stripe`  
+Events: `checkout.session.completed`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`.
+
+**Verify:** `GET /health` → `"stripe":true` → Account → Start trial / Manage billing → Stripe Checkout (or admin `POST /v1/trial` for demos without a card). Without Stripe env, checkout is a local/dev entitlement grant and Account shows the red “Stripe not configured” banner.
 
 ### app (static from `frontend/`)
 

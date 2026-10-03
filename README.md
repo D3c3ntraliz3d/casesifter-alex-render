@@ -62,6 +62,8 @@ $env:CONTROL_ADMIN_TOKEN="dev-admin"
 uvicorn main:app --host 127.0.0.1 --port 8010
 ```
 
+Hosted Stripe setup (Dashboard product/price, webhook events, Render env): **`docs/STRIPE.md`**.
+
 ### Contextual verification (opt-in)
 
 Tier 2 needs `GEMINI_API_KEY`. Tier 3 also needs `CONTEXTUAL_MULTIMODAL=true` and sends the file — do not enable for sealed or privileged evidence.

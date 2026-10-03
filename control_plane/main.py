@@ -161,7 +161,8 @@ app.add_middleware(
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "stripe": bool(STRIPE_SECRET)}
+    # Checkout requires both secret + price id; expose that as stripe readiness.
+    return {"status": "ok", "stripe": bool(STRIPE_SECRET and STRIPE_PRICE_ID)}
 
 
 @app.post("/v1/signup")

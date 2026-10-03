@@ -71,8 +71,10 @@ services:
         sync: false
       - key: CONTROL_ADMIN_TOKEN
         sync: false
+      # Soft-launch return URL for Stripe Checkout (success/cancel).
+      # Switch to https://app.casesifter.com after app CNAME + Render custom domain.
       - key: CASESIFTER_PUBLIC_URL
-        value: https://app.casesifter.com
+        value: https://casesifter-app.onrender.com
       - key: CASESIFTER_TRIAL_DAYS
         value: "14"
       # Soft-launch: invite optional (gate off).
