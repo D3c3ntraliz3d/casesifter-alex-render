@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import threading
+import time
+import urllib.error
+import urllib.request
 import uuid
 from pathlib import Path
 
@@ -23,6 +28,11 @@ from app.scan_watchdog import ensure_watchdog
 from app.storage import create_job, job_dir, load_progress, load_report, update_job
 
 v1 = APIRouter(prefix="/v1", tags=["v1-analysis"])
+logger = logging.getLogger(__name__)
+
+# Short-lived cache: session bearer → entitlement probe (soft-launch browser auth).
+_SESSION_ENTITLEMENT_CACHE: dict[str, tuple[float, dict]] = {}
+_SESSION_CACHE_TTL_S = 45.0
 
 
 class CaseChatPacketDoc(BaseModel):
@@ -55,26 +65,70 @@ class FactConflictPacketBody(BaseModel):
     documents: list[FactConflictPacketDoc] = Field(default_factory=list, max_length=80)
 
 
+def _probe_control_plane_session(token: str) -> dict | None:
+    """Return entitlement dict when the control-plane session is active; else None."""
+    control = (settings.cloud_control_url or "").strip().rstrip("/")
+    if not control or not token:
+        return None
+    now = time.time()
+    cached = _SESSION_ENTITLEMENT_CACHE.get(token)
+    if cached and cached[0] > now:
+        return cached[1]
+    req = urllib.request.Request(
+        f"{control}/v1/entitlement",
+        method="GET",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
+        logger.info("Control-plane session probe failed: %s", exc)
+        return None
+    if not isinstance(data, dict) or not data.get("active"):
+        return None
+    _SESSION_ENTITLEMENT_CACHE[token] = (now + _SESSION_CACHE_TTL_S, data)
+    # Opportunistic prune
+    if len(_SESSION_ENTITLEMENT_CACHE) > 256:
+        stale = [k for k, (exp, _) in _SESSION_ENTITLEMENT_CACHE.items() if exp <= now]
+        for k in stale:
+            _SESSION_ENTITLEMENT_CACHE.pop(k, None)
+    return data
+
+
 def _require_analysis_auth(
     authorization: str | None = Header(default=None),
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
 ) -> dict:
     keys = settings.analysis_api_key_set()
-    token = None
+    bearer = None
     if authorization and authorization.lower().startswith("bearer "):
-        token = authorization[7:].strip()
-    elif x_api_key:
-        token = x_api_key.strip()
+        bearer = authorization[7:].strip()
+    api_key = (x_api_key or "").strip() or None
+    # Prefer explicit API key header; bearer may also be an ops key.
+    token_as_key = api_key or (bearer if bearer and bearer in keys else None)
 
     mode = settings.resolve_app_mode()
-    # Hosted analysis: API key required (no open-entitlement bypass).
+    # Hosted analysis: ops API key OR active control-plane session (browser soft-launch).
     if mode == "analysis":
-        if not keys or not token or token not in keys:
-            raise HTTPException(401, "Valid analysis API key required.")
-        return {"auth": "api_key"}
+        if token_as_key and token_as_key in keys:
+            return {"auth": "api_key"}
+        if bearer:
+            remote = _probe_control_plane_session(bearer)
+            if remote:
+                return {"auth": "session", "email": remote.get("email"), "plan": remote.get("plan")}
+        raise HTTPException(
+            401,
+            "Valid analysis API key or active subscription session required.",
+        )
 
     if keys:
-        if not token or token not in keys:
+        if not token_as_key or token_as_key not in keys:
+            # Allow session bearer even when keys are configured (desktop hybrid).
+            if bearer:
+                remote = _probe_control_plane_session(bearer)
+                if remote:
+                    return {"auth": "session", "email": remote.get("email"), "plan": remote.get("plan")}
             raise HTTPException(401, "Valid analysis API key required.")
         return {"auth": "api_key"}
 

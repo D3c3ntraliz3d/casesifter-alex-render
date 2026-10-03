@@ -2341,7 +2341,12 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
 
   async function openCheckout(trial) {
     const session = await startCheckout(trial);
-    if (session.url) window.open(session.url, "_blank");
+    if (session?.url) {
+      window.open(session.url, "_blank", "noopener,noreferrer");
+    } else if (session?.mode === "dev") {
+      // Stripe not configured — control plane already applied local trial/sub.
+      onError(session.message || "Trial updated (Stripe not configured).");
+    }
     await onRefresh();
   }
 
@@ -2473,7 +2478,10 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
           </div>
           <p className="footnote">
             Trials and subscriptions run through Stripe’s hosted checkout — CaseSifter never sees or stores your
-            card number. Files stay on this PC; analysis runs remotely and is deleted after the report is saved.
+            card number.{" "}
+            {isDesktopApp()
+              ? "Files stay on this PC; analysis runs remotely and is deleted after the report is saved."
+              : "Analysis runs ephemerally in the cloud — we do not keep a document vault."}
           </p>
         </div>
       )}
@@ -2484,6 +2492,8 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
           onSubmit={(e) => {
             e.preventDefault();
             guard("login", async () => {
+              if (!email || !email.includes("@")) throw new Error("Enter a valid work email.");
+              if (!password || password.length < 6) throw new Error("Password must be at least 6 characters.");
               await loginCloud(email, password);
               await onRefresh();
             });
@@ -2547,6 +2557,9 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
               disabled={busy || !acceptedTerms || !email || password.length < 6}
               title={!acceptedTerms ? "Agree to the Terms of Service first" : undefined}
               onClick={() => guard("trial", async () => {
+                if (!acceptedTerms) throw new Error("Agree to the Terms of Service and Privacy Policy to continue.");
+                if (!email || !email.includes("@")) throw new Error("Enter a valid work email.");
+                if (!password || password.length < 6) throw new Error("Password must be at least 6 characters.");
                 await signupCloud(email, password, name, acceptedTerms, inviteCode);
                 await openCheckout(true);
               })}
@@ -2555,7 +2568,9 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
             </button>
           </div>
           <p className="footnote">
-            Files stay on this PC. Analysis runs remotely and is deleted after the report is saved.
+            {isDesktopApp()
+              ? "Files stay on this PC. Analysis runs remotely and is deleted after the report is saved."
+              : "Soft-launch: sign up with your invite code, then start a trial. Analysis is ephemeral — no document vault."}
           </p>
         </form>
       )}
@@ -2595,9 +2610,9 @@ function TermsModal({ onClose }) {
           </p>
           <h4>2. Files and data</h4>
           <p>
-            Your case files stay on your PC. When you scan a document, its content is sent to CaseSifter’s analysis
-            service for processing, then deleted once your report is generated. CaseSifter does not retain a
-            document library.
+            When you scan a document, its content is sent to CaseSifter’s analysis service for processing, then
+            deleted once your report is generated. CaseSifter does not retain a document library (no vault).
+            Desktop clients keep local copies on your PC; the hosted web app analyzes ephemerally in the browser session.
           </p>
           <h4>3. Billing and trials</h4>
           <p>

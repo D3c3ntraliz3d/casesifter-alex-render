@@ -1,7 +1,79 @@
 const jsonHeaders = { Accept: "application/json" };
 
+/** Soft-launch hosted URLs (Vite build-time). Fallbacks keep local + marketing signup working. */
+const CONTROL_PLANE_URL = String(
+  import.meta.env.VITE_CONTROL_PLANE_URL || "https://casesifter-control.onrender.com"
+).replace(/\/$/, "");
+const ANALYSIS_API_URL = String(import.meta.env.VITE_ANALYSIS_API_URL || "").replace(/\/$/, "");
+const ANALYSIS_API_KEY = String(import.meta.env.VITE_ANALYSIS_API_KEY || "").trim();
+
+const SESSION_TOKEN_KEY = "casesifter_session_token";
+const SESSION_EMAIL_KEY = "casesifter_email";
+
 function desktop() {
   return typeof window !== "undefined" && window.casesifter?.isDesktop ? window.casesifter : null;
+}
+
+function getSessionToken() {
+  try {
+    return localStorage.getItem(SESSION_TOKEN_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+function setSession(token, email) {
+  try {
+    if (token) localStorage.setItem(SESSION_TOKEN_KEY, token);
+    else localStorage.removeItem(SESSION_TOKEN_KEY);
+    if (email) localStorage.setItem(SESSION_EMAIL_KEY, email);
+  } catch {
+    /* private mode */
+  }
+}
+
+function clearSession() {
+  try {
+    localStorage.removeItem(SESSION_TOKEN_KEY);
+    localStorage.removeItem(SESSION_EMAIL_KEY);
+  } catch {
+    /* private mode */
+  }
+}
+
+function controlUrl(path) {
+  return `${CONTROL_PLANE_URL}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
+/** Analysis/API base: remote Render URL when set, else same-origin (Vite proxy / nginx). */
+function apiUrl(path) {
+  const p = path.startsWith("/") ? path : `/${path}`;
+  if (ANALYSIS_API_URL) return `${ANALYSIS_API_URL}${p}`;
+  return p;
+}
+
+function authHeaders(extra = {}) {
+  const headers = { ...jsonHeaders, ...extra };
+  const token = getSessionToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  if (ANALYSIS_API_KEY) headers["X-API-Key"] = ANALYSIS_API_KEY;
+  return headers;
+}
+
+function controlHeaders(extra = {}) {
+  const headers = { ...jsonHeaders, ...extra };
+  const token = getSessionToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return headers;
+}
+
+async function apiFetch(path, options = {}) {
+  const headers = { ...authHeaders(), ...(options.headers || {}) };
+  // FormData must not force Content-Type (browser sets boundary).
+  if (options.body instanceof FormData) {
+    delete headers["Content-Type"];
+  }
+  return fetch(apiUrl(path), { ...options, headers });
 }
 
 // Electron prefixes every rejected ipcRenderer.invoke() with "Error invoking remote
@@ -36,7 +108,7 @@ export async function uploadExhibit(file, submittedBy = "court-staff") {
   const body = new FormData();
   body.append("file", file);
   body.append("submitted_by", submittedBy);
-  const res = await fetch("/api/upload", { method: "POST", body });
+  const res = await apiFetch("/api/upload", { method: "POST", body });
   return readJson(res);
 }
 
@@ -55,28 +127,40 @@ export async function getJob(jobId, { includeReport = false } = {}) {
     };
   }
   const qs = includeReport ? "?include_report=true" : "";
-  const res = await fetch(`/api/jobs/${jobId}${qs}`, { headers: jsonHeaders });
+  // Prefer ephemeral v1 when talking to hosted analysis; fall back to vault job route.
+  if (ANALYSIS_API_URL) {
+    const res = await apiFetch(`/api/v1/jobs/${jobId}${qs}`);
+    return readJson(res);
+  }
+  const res = await apiFetch(`/api/jobs/${jobId}${qs}`);
   return readJson(res);
 }
 
 export function exportUrl(jobId, kind) {
-  return `/api/jobs/${jobId}/export/${kind}`;
+  return apiUrl(`/api/jobs/${jobId}/export/${kind}`);
 }
 
 export function documentFileUrl(caseId, documentId) {
   const cs = desktop();
   if (cs) return `casesifter-local://${caseId}/${documentId}`;
-  return `/api/cases/${caseId}/documents/${documentId}/file`;
+  return apiUrl(`/api/cases/${caseId}/documents/${documentId}/file`);
 }
 
 export function jobSourceUrl(jobId) {
-  return `/api/jobs/${jobId}/source`;
+  return apiUrl(`/api/jobs/${jobId}/source`);
+}
+
+function vaultUnavailableError() {
+  return new Error(
+    "Case memory is not on the hosted analysis API yet (Phase 2). Account, trial, and Stripe work now; durable case folders ship next."
+  );
 }
 
 export async function listCases() {
   const cs = desktop();
   if (cs) return cs.listCases();
-  const res = await fetch("/api/cases", { headers: jsonHeaders });
+  const res = await apiFetch("/api/cases");
+  if (res.status === 404) return [];
   const data = await readJson(res);
   return data.cases || [];
 }
@@ -84,32 +168,36 @@ export async function listCases() {
 export async function createCase(payload) {
   const cs = desktop();
   if (cs) return cs.createCase(payload);
-  const res = await fetch("/api/cases", {
+  const res = await apiFetch("/api/cases", {
     method: "POST",
-    headers: { ...jsonHeaders, "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
+  if (res.status === 404) throw vaultUnavailableError();
   return readJson(res);
 }
 
 export async function getCase(caseId) {
   const cs = desktop();
   if (cs) return cs.getCase(caseId);
-  const res = await fetch(`/api/cases/${caseId}`, { headers: jsonHeaders });
+  const res = await apiFetch(`/api/cases/${caseId}`);
+  if (res.status === 404) throw vaultUnavailableError();
   return readJson(res);
 }
 
 export async function archiveCase(caseId) {
   const cs = desktop();
   if (cs) return cs.archiveCase(caseId);
-  const res = await fetch(`/api/cases/${caseId}/archive`, { method: "POST", headers: jsonHeaders });
+  const res = await apiFetch(`/api/cases/${caseId}/archive`, { method: "POST" });
+  if (res.status === 404) throw vaultUnavailableError();
   return readJson(res);
 }
 
 export async function unarchiveCase(caseId) {
   const cs = desktop();
   if (cs) return cs.unarchiveCase(caseId);
-  const res = await fetch(`/api/cases/${caseId}/unarchive`, { method: "POST", headers: jsonHeaders });
+  const res = await apiFetch(`/api/cases/${caseId}/unarchive`, { method: "POST" });
+  if (res.status === 404) throw vaultUnavailableError();
   return readJson(res);
 }
 
@@ -119,26 +207,28 @@ export async function deleteCase(caseId) {
     await cs.deleteCase(caseId);
     return { deleted: caseId };
   }
-  const res = await fetch(`/api/cases/${caseId}`, { method: "DELETE", headers: jsonHeaders });
+  const res = await apiFetch(`/api/cases/${caseId}`, { method: "DELETE" });
+  if (res.status === 404) throw vaultUnavailableError();
   return readJson(res);
 }
 
 export async function deleteDocument(caseId, documentId) {
   const cs = desktop();
   if (cs) return cs.deleteDocument(caseId, documentId);
-  const res = await fetch(`/api/cases/${caseId}/documents/${documentId}`, {
+  const res = await apiFetch(`/api/cases/${caseId}/documents/${documentId}`, {
     method: "DELETE",
-    headers: jsonHeaders,
   });
+  if (res.status === 404) throw vaultUnavailableError();
   return readJson(res);
 }
 
 export async function updateCase(caseId, payload) {
-  const res = await fetch(`/api/cases/${caseId}`, {
+  const res = await apiFetch(`/api/cases/${caseId}`, {
     method: "PATCH",
-    headers: { ...jsonHeaders, "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
+  if (res.status === 404) throw vaultUnavailableError();
   return readJson(res);
 }
 
@@ -161,7 +251,8 @@ export async function uploadCaseDocument(caseId, file, { displayName, autoScan =
     if (displayName) body.append("display_name", displayName);
     body.append("auto_scan", autoScan ? "true" : "false");
     try {
-      const res = await fetch(`/api/cases/${caseId}/documents`, { method: "POST", body });
+      const res = await apiFetch(`/api/cases/${caseId}/documents`, { method: "POST", body });
+      if (res.status === 404) throw vaultUnavailableError();
       return await readJson(res);
     } catch (err) {
       lastError = err;
@@ -191,16 +282,18 @@ export async function getDesktopReport(caseId, documentId) {
 }
 
 export async function patchDocument(caseId, documentId, payload) {
-  const res = await fetch(`/api/cases/${caseId}/documents/${documentId}`, {
+  const res = await apiFetch(`/api/cases/${caseId}/documents/${documentId}`, {
     method: "PATCH",
-    headers: { ...jsonHeaders, "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
+  if (res.status === 404) throw vaultUnavailableError();
   return readJson(res);
 }
 
 export async function retitleCaseDocuments(caseId) {
-  const res = await fetch(`/api/cases/${caseId}/retitle`, { method: "POST" });
+  const res = await apiFetch(`/api/cases/${caseId}/retitle`, { method: "POST" });
+  if (res.status === 404) throw vaultUnavailableError();
   return readJson(res);
 }
 
@@ -245,7 +338,10 @@ export async function listCaseGotchas(caseId) {
       caseImpact: summarizeCaseImpact(allFindings),
     };
   }
-  const res = await fetch(`/api/cases/${caseId}/gotchas`, { headers: jsonHeaders });
+  const res = await apiFetch(`/api/cases/${caseId}/gotchas`);
+  if (res.status === 404) {
+    return { gotchas: [], factConflicts: [], risksElevated: 0, caseImpact: null };
+  }
   const data = await readJson(res);
   return {
     gotchas: data.gotchas || [],
@@ -315,7 +411,8 @@ export async function listCaseChat(caseId) {
   if (cs) {
     return callDesktop(cs.listCaseChat(caseId));
   }
-  const res = await fetch(`/api/cases/${caseId}/chat`, { headers: jsonHeaders });
+  const res = await apiFetch(`/api/cases/${caseId}/chat`);
+  if (res.status === 404) return [];
   const data = await readJson(res);
   return data.messages || [];
 }
@@ -325,24 +422,25 @@ export async function askCaseChat(caseId, question, { focusDocumentId, documents
   if (cs) {
     return callDesktop(cs.askCaseChat(caseId, question, focusDocumentId));
   }
-  const res = await fetch(`/api/cases/${caseId}/chat`, {
+  const res = await apiFetch(`/api/cases/${caseId}/chat`, {
     method: "POST",
-    headers: { ...jsonHeaders, "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       question,
       focus_document_id: focusDocumentId || undefined,
     }),
   });
+  if (res.status === 404) throw vaultUnavailableError();
   return readJson(res);
 }
 
 export async function scanDocument(caseId, documentId) {
   const cs = desktop();
   if (cs) return cs.analyzeDocument(caseId, documentId);
-  const res = await fetch(`/api/cases/${caseId}/documents/${documentId}/scan`, {
+  const res = await apiFetch(`/api/cases/${caseId}/documents/${documentId}/scan`, {
     method: "POST",
-    headers: jsonHeaders,
   });
+  if (res.status === 404) throw vaultUnavailableError();
   return readJson(res);
 }
 
@@ -394,18 +492,84 @@ export async function rescanCase(caseId, { waitingOnly = false } = {}) {
       error: errors[0] || null,
     };
   }
-  const res = await fetch(`/api/cases/${caseId}/rescan`, {
-    method: "POST",
-    headers: jsonHeaders,
-  });
+  const res = await apiFetch(`/api/cases/${caseId}/rescan`, { method: "POST" });
+  if (res.status === 404) throw vaultUnavailableError();
+  return readJson(res);
+}
+
+/**
+ * Create an ephemeral analysis job on the hosted analysis API (soft-launch path).
+ * Requires an active control-plane session (Bearer) or VITE_ANALYSIS_API_KEY.
+ */
+export async function createAnalysisJob(file, { displayName, docKind, submittedBy = "web-app" } = {}) {
+  const body = new FormData();
+  body.append("file", file);
+  body.append("submitted_by", submittedBy);
+  if (displayName) body.append("display_name", displayName);
+  if (docKind) body.append("doc_kind", docKind);
+  const res = await apiFetch("/api/v1/jobs", { method: "POST", body });
   return readJson(res);
 }
 
 export async function getEntitlement() {
   const cs = desktop();
   if (cs) return callDesktop(cs.entitlement());
-  const res = await fetch("/api/entitlement", { headers: jsonHeaders });
-  return readJson(res);
+
+  // Local vault / Vite proxy (no remote analysis URL): keep open/license mode for John.
+  if (!ANALYSIS_API_URL) {
+    try {
+      const res = await apiFetch("/api/entitlement");
+      if (res.ok) {
+        const data = await readJson(res);
+        if (data.mode === "open" || data.mode === "license") return data;
+      }
+    } catch {
+      /* fall through to control-plane cloud path */
+    }
+  }
+
+  const token = getSessionToken();
+  if (!token) {
+    return {
+      active: false,
+      mode: "cloud",
+      plan: null,
+      message: "Sign in to activate your subscription.",
+      hasSession: false,
+    };
+  }
+  try {
+    const res = await fetch(controlUrl("/v1/entitlement"), { headers: controlHeaders() });
+    const data = await readJson(res);
+    return {
+      ...data,
+      mode: "cloud",
+      hasSession: true,
+      email: data.email || (() => {
+        try {
+          return localStorage.getItem(SESSION_EMAIL_KEY) || undefined;
+        } catch {
+          return undefined;
+        }
+      })(),
+    };
+  } catch {
+    let email;
+    try {
+      email = localStorage.getItem(SESSION_EMAIL_KEY) || undefined;
+    } catch {
+      email = undefined;
+    }
+    return {
+      active: false,
+      mode: "cloud",
+      plan: "cloud-cached",
+      hasSession: true,
+      email,
+      message: "Control plane unreachable. Sign in when online.",
+      cached: true,
+    };
+  }
 }
 
 export async function loginCloud(email, password) {
@@ -414,12 +578,15 @@ export async function loginCloud(email, password) {
     await callDesktop(cs.login(email, password));
     return callDesktop(cs.entitlement());
   }
-  const res = await fetch("/api/auth/login", {
+  const res = await fetch(controlUrl("/v1/login"), {
     method: "POST",
     headers: { ...jsonHeaders, "Content-Type": "application/json" },
     body: JSON.stringify({ email, password }),
   });
-  return readJson(res);
+  const data = await readJson(res);
+  if (!data?.token) throw new Error("Login returned no session token.");
+  setSession(data.token, email);
+  return getEntitlement();
 }
 
 export async function signupCloud(email, password, name, acceptedTerms, inviteCode) {
@@ -428,7 +595,27 @@ export async function signupCloud(email, password, name, acceptedTerms, inviteCo
     await callDesktop(cs.signup(email, password, name, acceptedTerms, inviteCode));
     return callDesktop(cs.entitlement());
   }
-  throw new Error("Signup is available in the desktop app (control plane).");
+  if (!acceptedTerms) {
+    throw new Error("Agree to the Terms of Service and Privacy Policy to continue.");
+  }
+  if (!password || password.length < 6) {
+    throw new Error("Password must be at least 6 characters.");
+  }
+  const res = await fetch(controlUrl("/v1/signup"), {
+    method: "POST",
+    headers: { ...jsonHeaders, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      email,
+      password,
+      name: name || null,
+      accepted_terms: Boolean(acceptedTerms),
+      invite_code: inviteCode || null,
+    }),
+  });
+  const data = await readJson(res);
+  if (!data?.token) throw new Error("Signup returned no session token.");
+  setSession(data.token, email);
+  return getEntitlement();
 }
 
 export async function reportProblem(note) {
@@ -445,20 +632,33 @@ export async function logoutCloud() {
     await callDesktop(cs.setConfig({ sessionToken: "" }));
     return { active: false, mode: "cloud", message: "Signed out." };
   }
-  const res = await fetch("/api/auth/logout", { method: "POST", headers: jsonHeaders });
-  return readJson(res);
+  clearSession();
+  return {
+    active: false,
+    mode: "cloud",
+    plan: null,
+    hasSession: false,
+    message: "Signed out.",
+  };
 }
 
 export async function startCheckout(trial = false) {
   const cs = desktop();
-  if (!cs) throw new Error("Checkout runs from the desktop app.");
-  return callDesktop(cs.checkout(trial));
+  if (cs) return callDesktop(cs.checkout(trial));
+  const token = getSessionToken();
+  if (!token) throw new Error("Sign in first.");
+  const res = await fetch(controlUrl("/v1/checkout"), {
+    method: "POST",
+    headers: { ...controlHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({ trial: Boolean(trial) }),
+  });
+  return readJson(res);
 }
 
 export async function saveLicense(licenseKey) {
-  const res = await fetch("/api/entitlement/license", {
+  const res = await apiFetch("/api/entitlement/license", {
     method: "POST",
-    headers: { ...jsonHeaders, "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ license_key: licenseKey }),
   });
   return readJson(res);
@@ -466,12 +666,18 @@ export async function saveLicense(licenseKey) {
 
 export async function setShareOutcomes(enabled) {
   if (desktop()) return getEntitlement();
-  const res = await fetch("/api/settings/share-outcomes", {
-    method: "POST",
-    headers: { ...jsonHeaders, "Content-Type": "application/json" },
-    body: JSON.stringify({ enabled }),
-  });
-  return readJson(res);
+  // Hosted soft-launch: share preference is local-only until vault settings exist.
+  try {
+    const res = await apiFetch("/api/settings/share-outcomes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    });
+    if (res.status === 404) return getEntitlement();
+    return readJson(res);
+  } catch {
+    return getEntitlement();
+  }
 }
 
 export async function sendFindingFeedback(payload) {
@@ -479,14 +685,23 @@ export async function sendFindingFeedback(payload) {
   if (cs) {
     return cs.findingFeedback(payload);
   }
-  const res = await fetch("/api/telemetry/finding-feedback", {
+  const res = await apiFetch("/api/telemetry/finding-feedback", {
     method: "POST",
-    headers: { ...jsonHeaders, "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
+  if (res.status === 404) return { recorded: false };
   return readJson(res);
 }
 
 export function isDesktopApp() {
   return Boolean(desktop());
+}
+
+export function controlPlaneUrl() {
+  return CONTROL_PLANE_URL;
+}
+
+export function analysisApiUrl() {
+  return ANALYSIS_API_URL;
 }

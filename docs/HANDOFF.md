@@ -1,50 +1,83 @@
-# CaseSifter HANDOFF — live checkpoint
+# CaseSifter HANDOFF — soft-launch checkpoint
 
-**Plan:** HANDOFF v2 (`docs/HANDOFF-web-architecture.md`) + John’s reorder (2026-10-01).
+**Plan:** Sell soft-launch MVP + HANDOFF v2 (`docs/HANDOFF-web-architecture.md`).
 
 ## Product decisions (John)
 
-- **`desktop/` — frozen, delete before launch.** No further Electron feature work.
-- **Local vault stays until launch.** Test with `APP_MODE=vault`. Do not break `/api/cases`.
-- **Phase order:** Phase 1 → Phase 4 → launch (Phase 0 + 2 + 3).
-- **Keep `casesifter-analysis` suspended until ready to sell.**
-- **Parity eval before launch:** vault vs `/v1/jobs`+`case_id` material findings must match.
+- **`desktop/` — frozen, delete before broad launch.** No further Electron feature work.
+- **Local vault stays for John’s testing** (`APP_MODE=vault`). Do not break `/api/cases` locally.
+- **Soft-launch now** (invite beta): marketing signup → hosted web app → Stripe trial → unsuspend analysis with Phase 0 lockdown.
+- **Hard gate before first paid invoice:** Phase 2 `case_id` memory so cross-doc gotchas are durable across browser sessions.
+- Out of scope for soft-launch: full Phase 2 Postgres, Phase 3 folder picker, deleting `desktop/`, control-plane argon2.
 
-## Status
+## Soft-launch status
 
 | Item | Status |
 |---|---|
-| Render `casesifter-analysis` | **SUSPENDED** (leave suspended until sale) |
-| Phase 0 min lockdown | **Done** |
-| Phase 1 page anchors | **Done** |
-| Phase 4 extraction | **Done** (regex baseline + additive AI; fixtures; token log) |
-| `desktop/` | **Frozen — delete before launch** |
-| Marketing CTAs (Download → Sign up) | **Done on Render** `casesifter-marketing.onrender.com` |
-| Custom domain `www.casesifter.com` | **BLOCKED — no deploy creds in agent.** Still SiteGround (A `34.174.53.153`, NS `ns1/ns2.siteground.net`). Render Sign-up is live at `https://casesifter-marketing.onrender.com`. Need **either** `RENDER_API_KEY` + SiteGround DNS edit **or** SiteGround FTP/SFTP — exact DNS table in `docs/RENDER_HYBRID.md`. |
+| Marketing signup UX + **Open web app** CTA | **Done** (this branch) → `https://app.casesifter.com` |
+| Render `casesifter-app` (frontend SPA) | **Blueprint ready** — John: sync Blueprint / deploy + attach `app.casesifter.com` |
+| Browser Account (signup/login/checkout → control plane) | **Done** (`VITE_CONTROL_PLANE_URL`) |
+| Control invite gate + Stripe env in `render.yaml` | **Documented** — John sets secrets |
+| Render `casesifter-analysis` | **SUSPENDED** — John resumes after secrets/CORS; code/docs ready |
+| Phase 0 lockdown | **Done** (`APP_MODE=analysis`, CORS not `*`, API key **or** active session) |
+| Phase 1 page anchors / Phase 4 extraction | **Done** |
+| Custom domain `www` / `app` | **BLOCKED** — needs John’s DNS / Render access |
+| Phase 2 case_id memory | **Next before invoicing** |
+
+## Soft-launch URLs
+
+| Surface | Prefer | Fallback |
+|---|---|---|
+| Marketing | `https://www.casesifter.com` | `https://casesifter-marketing.onrender.com` |
+| Web app | `https://app.casesifter.com` | `https://casesifter-app.onrender.com` |
+| Control | `https://casesifter-control.onrender.com` | same |
+| Analysis | `https://casesifter-analysis.onrender.com` | same (resume first) |
+
+## Invite + Stripe verify path
+
+1. Set on `casesifter-control`: `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_ID`, `CASESIFTER_INVITE_REQUIRED=true`, `CASESIFTER_INVITE_CODES=…`, `CASESIFTER_PUBLIC_URL=https://app.casesifter.com`.
+2. Sign up on marketing with password + terms + invite → success → **Open web app**.
+3. In Account: sign in if needed → **Start 14-day trial** → Stripe Checkout.
+4. Webhook: `https://casesifter-control.onrender.com/v1/webhooks/stripe`.
+5. Demo shortcut: admin `POST /v1/trial` with `CONTROL_ADMIN_TOKEN`.
+
+## Unsuspend analysis (John)
+
+1. Confirm `ANALYSIS_API_KEYS` and/or `CLOUD_CONTROL_URL` set; CORS includes app + www + apex (see `render.yaml`).
+2. Dashboard → Resume `casesifter-analysis`.
+3. Expect: `GET /api/health` → 200; `POST /api/v1/jobs` without auth → **401**; entitled session or API key can create jobs.
+4. Until resume: live health is **503**.
+
+## DNS (John)
+
+| Host | Type | Target |
+|---|---|---|
+| `www` | CNAME | `casesifter-marketing.onrender.com` |
+| `app` | CNAME | `casesifter-app.onrender.com` |
+| `@` | A | Render LB IP from Dashboard |
+
+Details: `docs/RENDER_HYBRID.md`.
+
+## What John must provide
+
+- Render dashboard access or `RENDER_API_KEY` (deploy `casesifter-app`, custom domains, unsuspend analysis, set secrets)
+- Stripe keys + price id
+- Invite codes for pilot firms (`CASESIFTER_INVITE_CODES`)
+- SiteGround DNS (or registrar) for `www` + `app`
+
+## Next before invoicing
+
+**Phase 2 `case_id` memory** — durable firm case folders so cross-doc gotchas work on `/v1/jobs` with `case_id` across sessions. Soft-launch can demo single-doc forensics + Account/Stripe; foreclosure buyers will expect multi-doc history.
 
 ## Phase 4 (conditions met)
 
 - Regex/graph extraction stays the baseline; Gemini facts are **additive**, `confidence` capped (72), labeled **`ai_generated=True`**.
-- Fixtures in `planted_bs_cases.json`: `summers_employment_start_cross_doc` (2019/2022 two-doc), three rephrasing TPs, clean twin — `run_gotcha_eval.py` must stay `all_pass`.
-- Gemini token use for the new step is logged per document (`ai_fact_extract[name] tokens …`) and stored on the report at `comparison.ai_fact_extract_usage` / `comparison.gemini_usage.ai_fact_extract`.
+- Fixtures in `planted_bs_cases.json`; `run_gotcha_eval.py` must stay `all_pass`.
+- Token use logged per document (`ai_fact_extract[…]`) and on report `comparison.ai_fact_extract_usage`.
 
 ### John’s local 11467-2007 re-run checklist
 
-After pulling this branch (`APP_MODE=vault`), rescan the case and confirm:
-
-1. **Still red / still catch all 3 forged exhibits** (National Grid historical, wrong-era/chrome, statement math or too-crisp / edited-exhibit cards — same material interrupts as before).
-2. **Cross-doc / gotcha cards show `evidence.refs`** with a **page number on both documents** when two docs are cited (open any employment / occupancy / DOB-style conflict).
-3. **AI facts (if `GEMINI_API_KEY` set):** any new fact from the LLM path is marked `ai_generated` and does not replace regex facts; report `comparison.ai_fact_extract_usage` shows `prompt_tokens` / `total_tokens` / `facts_added` for that document (also in server logs as `ai_fact_extract[…] tokens …`).
-4. **No silent drop:** list any prior material finding that disappeared or changed severity; paste titles if something moved.
-5. **Cost glance:** sum `ai_fact_extract_usage.total_tokens` across rescanned exhibits — that is the Phase 4 extraction add-on cost only (separate from multimodal/chrome).
-
-## Pre–Phase 4 checklist (completed)
-
-1. Local vault: **GET `/api/cases` → 200** with `APP_MODE=vault`; compose defaults vault.
-2. Analysis CORS env-driven, not `*`.
-3. Gotcha `all_pass`; page refs both sides; forged lanes still caught.
-4. Suspended Render: no disk listing possible; expect no persisted case files.
-5. Launch next (still open): control-plane argon2/bcrypt + session expiry; `GEMINI_TIER` refuse `free` in production.
+After pulling this branch (`APP_MODE=vault`), rescan and confirm forged-exhibit catches, page refs on both docs for cross-doc cards, AI facts marked `ai_generated`, and no silent drop of prior material findings.
 
 ## Render lockdown status codes (reference)
 
@@ -52,10 +85,6 @@ After pulling this branch (`APP_MODE=vault`), rescan the case and confirm:
 |---|---|---|
 | GET `/api/health` | 200 | 200 (`analysis`) |
 | GET `/api/cases` | **200** | **404** |
-| POST `/api/v1/jobs` (no key) | 422 | **401** |
+| POST `/api/v1/jobs` (no key/session) | 422 | **401** |
 
-Live now: **503** (suspended).
-
-## Next
-
-John re-runs 11467 locally using the checklist above → keep Render suspended → launch build (Phase 2/3 + parity + control-plane / `GEMINI_TIER`) when ready to sell.
+Live while suspended: **503**.

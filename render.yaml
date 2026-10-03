@@ -1,4 +1,4 @@
-# CaseSifter hybrid — ephemeral analysis + control plane (no document vault)
+# CaseSifter hybrid — ephemeral analysis + control plane + hosted web app (no document vault)
 services:
   - type: web
     name: casesifter-analysis
@@ -16,14 +16,18 @@ services:
         value: analysis
       - key: APP_ENV
         value: production
+      # Soft-launch browser origins (not *). Include onrender fallbacks until DNS cuts over.
       - key: CORS_ALLOW_ORIGINS
-        value: "https://casesifter.com,https://www.casesifter.com,https://casesifter-marketing.onrender.com"
+        value: "https://app.casesifter.com,https://www.casesifter.com,https://casesifter.com,https://casesifter-app.onrender.com,https://casesifter-marketing.onrender.com"
       - key: EPHEMERAL_JOBS
         value: "true"
       - key: EPHEMERAL_TTL_HOURS
         value: "6"
       - key: ENTITLEMENT_MODE
-        value: open
+        value: cloud
+      # Control plane used to validate browser session bearers on /api/v1/*
+      - key: CLOUD_CONTROL_URL
+        value: https://casesifter-control.onrender.com
       - key: ANALYSIS_API_KEYS
         sync: false
       - key: GEMINI_API_KEY
@@ -58,6 +62,7 @@ services:
         - control_plane/**
         - render.yaml
     envVars:
+      # John sets these in Render Dashboard (or Blueprint sync:false secrets).
       - key: STRIPE_SECRET_KEY
         sync: false
       - key: STRIPE_WEBHOOK_SECRET
@@ -67,9 +72,51 @@ services:
       - key: CONTROL_ADMIN_TOKEN
         sync: false
       - key: CASESIFTER_PUBLIC_URL
-        sync: false
+        value: https://app.casesifter.com
       - key: CASESIFTER_TRIAL_DAYS
         value: "14"
+      # Soft-launch: invite-only signup for pilot firms.
+      - key: CASESIFTER_INVITE_REQUIRED
+        value: "true"
+      - key: CASESIFTER_INVITE_CODES
+        sync: false
+
+  - type: web
+    name: casesifter-app
+    runtime: static
+    rootDir: frontend
+    buildCommand: npm ci && npm run build
+    staticPublishPath: dist
+    buildFilter:
+      paths:
+        - frontend/**
+        - render.yaml
+    routes:
+      # SPA fallback — client router / deep links land on index.html
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    headers:
+      - path: /index.html
+        name: Cache-Control
+        value: public, max-age=0, must-revalidate
+      - path: /
+        name: Cache-Control
+        value: public, max-age=0, must-revalidate
+      - path: /assets/*
+        name: Cache-Control
+        value: public, max-age=31536000, immutable
+    # Custom domain app.casesifter.com — attach in Render Dashboard → casesifter-app → Custom Domains
+    # (Blueprint cannot always bind domains without dashboard/API access.)
+    envVars:
+      - key: VITE_CONTROL_PLANE_URL
+        value: https://casesifter-control.onrender.com
+      - key: VITE_ANALYSIS_API_URL
+        value: https://casesifter-analysis.onrender.com
+      - key: VITE_SENTRY_ENVIRONMENT
+        value: production
+      - key: VITE_SENTRY_DSN
+        sync: false
 
   - type: web
     name: casesifter-marketing

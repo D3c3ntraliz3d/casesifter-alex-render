@@ -23,8 +23,10 @@ _origins = settings.cors_origin_list()
 if _mode == "analysis" and ("*" in _origins or not _origins):
     # Analysis service must not reflect arbitrary origins.
     _origins = [
-        "https://casesifter.com",
+        "https://app.casesifter.com",
         "https://www.casesifter.com",
+        "https://casesifter.com",
+        "https://casesifter-app.onrender.com",
         "https://casesifter-marketing.onrender.com",
         "http://127.0.0.1:5173",
         "http://localhost:5173",
@@ -51,11 +53,12 @@ init_sentry(service="analysis-api")
 
 @app.on_event("startup")
 def _startup() -> None:
-    # Do not refuse boot when keys are missing — vault stays unmounted and /api/v1
-    # returns 401. Set ANALYSIS_API_KEYS before unsuspending for sale.
-    if _mode == "analysis" and not settings.analysis_api_key_set():
+    # Do not refuse boot when keys are missing — vault stays unmounted.
+    # Soft-launch: /api/v1 accepts ANALYSIS_API_KEYS or an active control-plane session.
+    if _mode == "analysis" and not settings.analysis_api_key_set() and not settings.cloud_control_url:
         logger.warning(
-            "APP_MODE=analysis but ANALYSIS_API_KEYS is empty — /api/v1 will return 401."
+            "APP_MODE=analysis but ANALYSIS_API_KEYS and CLOUD_CONTROL_URL are empty — "
+            "/api/v1 will return 401."
         )
     cases_db.ensure_schema()
     ensure_sweeper()
