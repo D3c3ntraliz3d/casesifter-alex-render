@@ -110,8 +110,14 @@ def _entitlement_payload(user: dict[str, Any]) -> dict[str, Any]:
 
 
 def _invite_ok(code: str | None) -> bool:
-    if not INVITE_REQUIRED and not INVITE_CODES:
-        return True
+    # When invite is not required, empty/missing codes are allowed.
+    # If a code is supplied and a list is configured, still validate it.
+    if not INVITE_REQUIRED:
+        if not code or not str(code).strip():
+            return True
+        if not INVITE_CODES:
+            return True
+        return str(code).strip().lower() in INVITE_CODES
     if not code:
         return False
     return code.strip().lower() in INVITE_CODES

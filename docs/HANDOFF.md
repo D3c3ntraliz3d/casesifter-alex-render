@@ -38,7 +38,7 @@
 
 | Action | URL |
 |---|---|
-| Sign up | `https://casesifter.com/signup.html` + **real invite code** (required for beta) |
+| Sign up | `https://casesifter.com/signup.html` (invite optional — gate off) |
 | Log in / use product | `https://casesifter-app.onrender.com` → **Account → Sign in** |
 | Avoid | `https://app.casesifter.com` (NXDOMAIN until `app` CNAME) |
 
@@ -46,8 +46,8 @@
 
 ## Invite + Stripe verify path
 
-1. Set on `casesifter-control`: `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_ID`, `CASESIFTER_INVITE_REQUIRED=true`, `CASESIFTER_INVITE_CODES=…` (non-empty), `CASESIFTER_PUBLIC_URL=https://casesifter-app.onrender.com` until custom app domain works.
-2. Sign up on marketing with password + terms + invite → success → **Open web app** (`casesifter-app.onrender.com`).
+1. Set on `casesifter-control`: `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_ID`, `CASESIFTER_INVITE_REQUIRED=false` (invite optional), optional `CASESIFTER_INVITE_CODES=…`, `CASESIFTER_PUBLIC_URL=https://casesifter-app.onrender.com` until custom app domain works.
+2. Sign up on marketing with password + terms (invite optional) → success → **Open web app** (`casesifter-app.onrender.com`).
 3. In Account: **Sign in** → **Start 14-day trial** → Stripe Checkout.
 4. Webhook: `https://casesifter-control.onrender.com/v1/webhooks/stripe`.
 5. Demo shortcut: admin `POST /v1/trial` with `CONTROL_ADMIN_TOKEN`.
@@ -71,7 +71,7 @@ Then attach `app.casesifter.com` on the Render `casesifter-app` service. Details
 
 ## What John must provide
 
-- Confirm `CASESIFTER_INVITE_CODES` is set (and non-empty) on `casesifter-control` — invite required is already `true`; empty list blocks all signup
+- Invite gate is **off** (`CASESIFTER_INVITE_REQUIRED=false` in Blueprint). If live Render still has `true`, sync Blueprint or set env + redeploy `casesifter-control`. Optional `CASESIFTER_INVITE_CODES` may remain set.
 - Stripe keys + price id (`control` `/health` may still show `"stripe":false` until set)
 - DNS: `app` CNAME → `casesifter-app.onrender.com` + attach domain in Render
 - Unsuspend `casesifter-analysis` when ready for scans

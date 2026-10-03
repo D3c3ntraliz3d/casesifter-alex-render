@@ -16,13 +16,13 @@ Ephemeral analysis API, Stripe control plane, and hosted SPA. **No customer docu
 
 | Action | URL |
 |---|---|
-| Sign up | `https://casesifter.com/signup.html` + invite code (**required for beta**) |
+| Sign up | `https://casesifter.com/signup.html` (invite **optional** — gate off) |
 | Log in / use product | `https://casesifter-app.onrender.com` → **Account → Sign in** |
 | Avoid until DNS | `https://app.casesifter.com` |
 
 **Cross-origin:** marketing-site session token ≠ app session. After signup, users must Sign in on the hosted app.
 
-**Invite + Stripe path:** marketing Sign up (invite required) → Open web app (`casesifter-app.onrender.com`) → Account → Sign in → Start 14-day trial → Stripe Checkout → return to `CASESIFTER_PUBLIC_URL`.
+**Invite + Stripe path:** marketing Sign up (invite optional) → Open web app (`casesifter-app.onrender.com`) → Account → Sign in → Start 14-day trial → Stripe Checkout → return to `CASESIFTER_PUBLIC_URL`.
 
 ## Services
 
@@ -65,10 +65,10 @@ Scratch disk only if needed for in-flight jobs; do not treat it as permanent cas
 | `CONTROL_ADMIN_TOKEN` | sync:false — John |
 | `CASESIFTER_PUBLIC_URL` | `https://casesifter-app.onrender.com` until `app` DNS; then `https://app.casesifter.com` |
 | `CASESIFTER_TRIAL_DAYS` | `14` |
-| `CASESIFTER_INVITE_REQUIRED` | `true` |
-| `CASESIFTER_INVITE_CODES` | sync:false comma-list — John |
+| `CASESIFTER_INVITE_REQUIRED` | `false` (invite optional) |
+| `CASESIFTER_INVITE_CODES` | sync:false comma-list — optional while gate is off |
 
-**Verify:** signup with invite → Account → Start trial → Stripe (or admin `POST /v1/trial` for demos). Webhook endpoint: `https://casesifter-control.onrender.com/v1/webhooks/stripe`.
+**Verify:** signup (invite optional) → Account → Start trial → Stripe (or admin `POST /v1/trial` for demos). Webhook endpoint: `https://casesifter-control.onrender.com/v1/webhooks/stripe`.
 
 ### app (static from `frontend/`)
 
@@ -84,7 +84,7 @@ Browser Account uses control-plane signup/login/checkout; analysis calls send se
 ### marketing (static from `marketing/`)
 
 - Publish path: `./marketing`
-- Public CTA: `/signup.html` → control-plane `POST /v1/signup` (invite **required for beta**); success CTA **Open web app** defaults to `https://casesifter-app.onrender.com` (JS probes and upgrades to `https://app.casesifter.com` when that host resolves)
+- Public CTA: `/signup.html` → control-plane `POST /v1/signup` (invite **optional** while gate is off); success CTA **Open web app** defaults to `https://casesifter-app.onrender.com` (JS probes and upgrades to `https://app.casesifter.com` when that host resolves)
 - Nav/footer **Sign in** → `https://casesifter-app.onrender.com` (Account is in-app; no marketing `/login.html`)
 - `/download.html` redirects to signup — desktop installer is retired.
 

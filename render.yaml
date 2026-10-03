@@ -75,9 +75,9 @@ services:
         value: https://app.casesifter.com
       - key: CASESIFTER_TRIAL_DAYS
         value: "14"
-      # Soft-launch: invite-only signup for pilot firms.
+      # Soft-launch: invite optional (gate off).
       - key: CASESIFTER_INVITE_REQUIRED
-        value: "true"
+        value: "false"
       - key: CASESIFTER_INVITE_CODES
         sync: false
 

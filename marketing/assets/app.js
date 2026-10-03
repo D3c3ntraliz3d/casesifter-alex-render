@@ -73,11 +73,11 @@ async function wireSignup() {
     const invite = (form.invite_code?.value || "").trim();
     const accepted = Boolean(form.accepted_terms?.checked);
 
-    // Surface native HTML5 constraints (required email/password/invite/terms, minlength).
+    // Surface native HTML5 constraints (required email/password/terms, minlength).
     if (typeof form.reportValidity === "function" && !form.reportValidity()) {
       showFormStatus(
         status,
-        "Fix the highlighted fields — invite code (required for beta), password (6+ chars), and terms are required.",
+        "Fix the highlighted fields — password (6+ chars) and terms are required.",
         { error: true },
       );
       return;
@@ -91,11 +91,6 @@ async function wireSignup() {
     if (password.length < 6) {
       showFormStatus(status, "Password must be at least 6 characters.", { error: true });
       form.password?.focus();
-      return;
-    }
-    if (!invite) {
-      showFormStatus(status, "A valid invite code is required for beta signup.", { error: true });
-      form.invite_code?.focus();
       return;
     }
     if (!accepted) {
@@ -144,7 +139,7 @@ async function wireSignup() {
       if (!res.ok) {
         const fallback =
           res.status === 403
-            ? "A valid invite code is required for beta signup."
+            ? "That invite code is not valid. Leave it blank or use a code from your firm."
             : `Signup failed (${res.status}). Try again or contact us.`;
         showFormStatus(status, detail || fallback, { error: true });
         submit.disabled = false;
