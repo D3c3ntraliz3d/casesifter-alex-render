@@ -129,7 +129,7 @@ export async function getJob(jobId, { includeReport = false } = {}) {
   const qs = includeReport ? "?include_report=true" : "";
   // Prefer ephemeral v1 when talking to hosted analysis; fall back to vault job route.
   if (ANALYSIS_API_URL) {
-    const res = await apiFetch(`/api/v1/jobs/${jobId}${qs}`);
+    const res = await analysisFetch(`/api/v1/jobs/${jobId}${qs}`);
     return readJson(res);
   }
   const res = await apiFetch(`/api/jobs/${jobId}${qs}`);
@@ -156,9 +156,41 @@ function vaultUnavailableError() {
   );
 }
 
+/**
+ * Soft-launch browser build points VITE_ANALYSIS_API_URL at APP_MODE=analysis,
+ * which mounts /api/health + /api/v1 only — not durable /api/cases. Hitting
+ * /api/cases against a suspended Render service returns HTML 503 without CORS,
+ * which the browser surfaces as opaque "Failed to fetch" on Account.
+ */
+function isHostedAnalysis() {
+  return Boolean(ANALYSIS_API_URL);
+}
+
+function analysisUnreachableError(cause) {
+  const raw = String(cause?.message || cause || "");
+  if (/failed to fetch|networkerror|load failed|503|service suspended/i.test(raw)) {
+    return new Error(
+      "Analysis service unreachable (suspended or offline). Account and billing still work; resume casesifter-analysis on Render to scan."
+    );
+  }
+  return cause instanceof Error ? cause : new Error(raw || "Analysis request failed.");
+}
+
+async function analysisFetch(path, options = {}) {
+  try {
+    const res = await apiFetch(path, options);
+    if (res.status === 503) throw analysisUnreachableError(new Error("503"));
+    return res;
+  } catch (err) {
+    throw analysisUnreachableError(err);
+  }
+}
+
 export async function listCases() {
   const cs = desktop();
   if (cs) return cs.listCases();
+  // Hosted analysis has no case vault — skip the fetch so Account stays clean.
+  if (isHostedAnalysis()) return [];
   const res = await apiFetch("/api/cases");
   if (res.status === 404) return [];
   const data = await readJson(res);
@@ -168,6 +200,7 @@ export async function listCases() {
 export async function createCase(payload) {
   const cs = desktop();
   if (cs) return cs.createCase(payload);
+  if (isHostedAnalysis()) throw vaultUnavailableError();
   const res = await apiFetch("/api/cases", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -180,6 +213,7 @@ export async function createCase(payload) {
 export async function getCase(caseId) {
   const cs = desktop();
   if (cs) return cs.getCase(caseId);
+  if (isHostedAnalysis()) throw vaultUnavailableError();
   const res = await apiFetch(`/api/cases/${caseId}`);
   if (res.status === 404) throw vaultUnavailableError();
   return readJson(res);
@@ -188,6 +222,7 @@ export async function getCase(caseId) {
 export async function archiveCase(caseId) {
   const cs = desktop();
   if (cs) return cs.archiveCase(caseId);
+  if (isHostedAnalysis()) throw vaultUnavailableError();
   const res = await apiFetch(`/api/cases/${caseId}/archive`, { method: "POST" });
   if (res.status === 404) throw vaultUnavailableError();
   return readJson(res);
@@ -196,6 +231,7 @@ export async function archiveCase(caseId) {
 export async function unarchiveCase(caseId) {
   const cs = desktop();
   if (cs) return cs.unarchiveCase(caseId);
+  if (isHostedAnalysis()) throw vaultUnavailableError();
   const res = await apiFetch(`/api/cases/${caseId}/unarchive`, { method: "POST" });
   if (res.status === 404) throw vaultUnavailableError();
   return readJson(res);
@@ -207,6 +243,7 @@ export async function deleteCase(caseId) {
     await cs.deleteCase(caseId);
     return { deleted: caseId };
   }
+  if (isHostedAnalysis()) throw vaultUnavailableError();
   const res = await apiFetch(`/api/cases/${caseId}`, { method: "DELETE" });
   if (res.status === 404) throw vaultUnavailableError();
   return readJson(res);
@@ -215,6 +252,7 @@ export async function deleteCase(caseId) {
 export async function deleteDocument(caseId, documentId) {
   const cs = desktop();
   if (cs) return cs.deleteDocument(caseId, documentId);
+  if (isHostedAnalysis()) throw vaultUnavailableError();
   const res = await apiFetch(`/api/cases/${caseId}/documents/${documentId}`, {
     method: "DELETE",
   });
@@ -223,6 +261,7 @@ export async function deleteDocument(caseId, documentId) {
 }
 
 export async function updateCase(caseId, payload) {
+  if (isHostedAnalysis()) throw vaultUnavailableError();
   const res = await apiFetch(`/api/cases/${caseId}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
@@ -244,6 +283,7 @@ export async function uploadCaseDocument(caseId, file, { displayName, autoScan =
     // Callers in desktop should use pickAndAddDocuments — keep a clear error if File is passed.
     throw new Error("In the desktop app, use Add files to pick documents from your PC.");
   }
+  if (isHostedAnalysis()) throw vaultUnavailableError();
   let lastError = new Error("Upload failed.");
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const body = new FormData();
@@ -282,6 +322,7 @@ export async function getDesktopReport(caseId, documentId) {
 }
 
 export async function patchDocument(caseId, documentId, payload) {
+  if (isHostedAnalysis()) throw vaultUnavailableError();
   const res = await apiFetch(`/api/cases/${caseId}/documents/${documentId}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
@@ -292,6 +333,7 @@ export async function patchDocument(caseId, documentId, payload) {
 }
 
 export async function retitleCaseDocuments(caseId) {
+  if (isHostedAnalysis()) throw vaultUnavailableError();
   const res = await apiFetch(`/api/cases/${caseId}/retitle`, { method: "POST" });
   if (res.status === 404) throw vaultUnavailableError();
   return readJson(res);
@@ -337,6 +379,9 @@ export async function listCaseGotchas(caseId) {
       risksElevated,
       caseImpact: summarizeCaseImpact(allFindings),
     };
+  }
+  if (isHostedAnalysis()) {
+    return { gotchas: [], factConflicts: [], risksElevated: 0, caseImpact: null };
   }
   const res = await apiFetch(`/api/cases/${caseId}/gotchas`);
   if (res.status === 404) {
@@ -411,6 +456,7 @@ export async function listCaseChat(caseId) {
   if (cs) {
     return callDesktop(cs.listCaseChat(caseId));
   }
+  if (isHostedAnalysis()) return [];
   const res = await apiFetch(`/api/cases/${caseId}/chat`);
   if (res.status === 404) return [];
   const data = await readJson(res);
@@ -422,6 +468,7 @@ export async function askCaseChat(caseId, question, { focusDocumentId, documents
   if (cs) {
     return callDesktop(cs.askCaseChat(caseId, question, focusDocumentId));
   }
+  if (isHostedAnalysis()) throw vaultUnavailableError();
   const res = await apiFetch(`/api/cases/${caseId}/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -437,6 +484,7 @@ export async function askCaseChat(caseId, question, { focusDocumentId, documents
 export async function scanDocument(caseId, documentId) {
   const cs = desktop();
   if (cs) return cs.analyzeDocument(caseId, documentId);
+  if (isHostedAnalysis()) throw vaultUnavailableError();
   const res = await apiFetch(`/api/cases/${caseId}/documents/${documentId}/scan`, {
     method: "POST",
   });
@@ -492,6 +540,7 @@ export async function rescanCase(caseId, { waitingOnly = false } = {}) {
       error: errors[0] || null,
     };
   }
+  if (isHostedAnalysis()) throw vaultUnavailableError();
   const res = await apiFetch(`/api/cases/${caseId}/rescan`, { method: "POST" });
   if (res.status === 404) throw vaultUnavailableError();
   return readJson(res);
@@ -507,7 +556,7 @@ export async function createAnalysisJob(file, { displayName, docKind, submittedB
   body.append("submitted_by", submittedBy);
   if (displayName) body.append("display_name", displayName);
   if (docKind) body.append("doc_kind", docKind);
-  const res = await apiFetch("/api/v1/jobs", { method: "POST", body });
+  const res = await analysisFetch("/api/v1/jobs", { method: "POST", body });
   return readJson(res);
 }
 
@@ -572,17 +621,32 @@ export async function getEntitlement() {
   }
 }
 
+function controlUnreachableError(cause) {
+  const raw = String(cause?.message || cause || "");
+  if (/failed to fetch|networkerror|load failed/i.test(raw)) {
+    return new Error(
+      `Control plane unreachable (${CONTROL_PLANE_URL}). Confirm VITE_CONTROL_PLANE_URL at build time and that casesifter-control is live.`
+    );
+  }
+  return cause instanceof Error ? cause : new Error(raw || "Control plane request failed.");
+}
+
 export async function loginCloud(email, password) {
   const cs = desktop();
   if (cs) {
     await callDesktop(cs.login(email, password));
     return callDesktop(cs.entitlement());
   }
-  const res = await fetch(controlUrl("/v1/login"), {
-    method: "POST",
-    headers: { ...jsonHeaders, "Content-Type": "application/json" },
-    body: JSON.stringify({ email, password }),
-  });
+  let res;
+  try {
+    res = await fetch(controlUrl("/v1/login"), {
+      method: "POST",
+      headers: { ...jsonHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password }),
+    });
+  } catch (err) {
+    throw controlUnreachableError(err);
+  }
   const data = await readJson(res);
   if (!data?.token) throw new Error("Login returned no session token.");
   setSession(data.token, email);
@@ -601,17 +665,22 @@ export async function signupCloud(email, password, name, acceptedTerms, inviteCo
   if (!password || password.length < 6) {
     throw new Error("Password must be at least 6 characters.");
   }
-  const res = await fetch(controlUrl("/v1/signup"), {
-    method: "POST",
-    headers: { ...jsonHeaders, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      email,
-      password,
-      name: name || null,
-      accepted_terms: Boolean(acceptedTerms),
-      invite_code: inviteCode || null,
-    }),
-  });
+  let res;
+  try {
+    res = await fetch(controlUrl("/v1/signup"), {
+      method: "POST",
+      headers: { ...jsonHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email,
+        password,
+        name: name || null,
+        accepted_terms: Boolean(acceptedTerms),
+        invite_code: inviteCode || null,
+      }),
+    });
+  } catch (err) {
+    throw controlUnreachableError(err);
+  }
   const data = await readJson(res);
   if (!data?.token) throw new Error("Signup returned no session token.");
   setSession(data.token, email);
@@ -647,11 +716,16 @@ export async function startCheckout(trial = false) {
   if (cs) return callDesktop(cs.checkout(trial));
   const token = getSessionToken();
   if (!token) throw new Error("Sign in first.");
-  const res = await fetch(controlUrl("/v1/checkout"), {
-    method: "POST",
-    headers: { ...controlHeaders(), "Content-Type": "application/json" },
-    body: JSON.stringify({ trial: Boolean(trial) }),
-  });
+  let res;
+  try {
+    res = await fetch(controlUrl("/v1/checkout"), {
+      method: "POST",
+      headers: { ...controlHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ trial: Boolean(trial) }),
+    });
+  } catch (err) {
+    throw controlUnreachableError(err);
+  }
   return readJson(res);
 }
 

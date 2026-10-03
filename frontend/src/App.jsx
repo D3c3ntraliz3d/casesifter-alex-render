@@ -266,7 +266,15 @@ export default function App() {
   }
 
   useEffect(() => {
-    refreshCases().catch((err) => setError(err.message));
+    // Soft-launch: case vault is optional. Never surface opaque browser
+    // "Failed to fetch" (suspended analysis / CORS) as an Account-blocking banner.
+    refreshCases().catch((err) => {
+      const msg = String(err?.message || "");
+      if (/failed to fetch|networkerror|load failed|analysis service unreachable|phase 2/i.test(msg)) {
+        return;
+      }
+      setError(msg);
+    });
     refreshEntitlement();
   }, []);
 
@@ -539,7 +547,16 @@ export default function App() {
           <button type="button" className={view !== "account" ? "on" : ""} onClick={() => { setBusy(false); setView("cases"); }}>
             Cases
           </button>
-          <button type="button" className={view === "account" ? "on" : ""} onClick={() => { refreshEntitlement(); setView("account"); }}>
+          <button
+            type="button"
+            className={view === "account" ? "on" : ""}
+            onClick={() => {
+              // Account talks to the control plane; drop leftover case/analysis noise.
+              setError("");
+              refreshEntitlement();
+              setView("account");
+            }}
+          >
             Account
           </button>
           <span className={`status-dot ${entitlement?.active ? "live" : ""}`}>

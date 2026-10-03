@@ -108,6 +108,7 @@ services:
         value: public, max-age=31536000, immutable
     # Custom domain app.casesifter.com — attach in Render Dashboard → casesifter-app → Custom Domains
     # (Blueprint cannot always bind domains without dashboard/API access.)
+    # Vite inlines these at build time. After changing them: Clear build cache → Manual Deploy.
     envVars:
       - key: VITE_CONTROL_PLANE_URL
         value: https://casesifter-control.onrender.com
