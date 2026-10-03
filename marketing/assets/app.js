@@ -21,9 +21,34 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 
 const CONTROL_PLANE_URL = "https://casesifter-control.onrender.com";
-/** Hosted web app (custom domain when DNS is live; Render URL always works). */
-const APP_URL = "https://app.casesifter.com";
-const APP_URL_FALLBACK = "https://casesifter-app.onrender.com";
+/** Default Open web app target (works today). Prefer custom domain once DNS resolves. */
+const APP_URL_DEFAULT = "https://casesifter-app.onrender.com";
+const APP_URL_PREFERRED = "https://app.casesifter.com";
+
+function showFormStatus(el, message, { error = false } = {}) {
+  if (!el) return;
+  el.textContent = message || "";
+  el.classList.toggle("error", Boolean(error && message));
+  el.classList.toggle("show", Boolean(message));
+  if (message && error && typeof el.scrollIntoView === "function") {
+    try {
+      el.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    } catch {
+      /* older browsers */
+    }
+  }
+}
+
+async function preferAppDomainWhenLive(openApp) {
+  if (!openApp) return;
+  openApp.href = APP_URL_DEFAULT;
+  try {
+    await fetch(APP_URL_PREFERRED, { method: "HEAD", mode: "no-cors" });
+    openApp.href = APP_URL_PREFERRED;
+  } catch {
+    openApp.href = APP_URL_DEFAULT;
+  }
+}
 
 async function wireSignup() {
   const form = document.getElementById("signup-form");
@@ -34,63 +59,60 @@ async function wireSignup() {
   const success = document.getElementById("signup-success");
   const openApp = document.getElementById("open-app");
   if (openApp) {
-    openApp.href = APP_URL;
-    openApp.addEventListener("click", (e) => {
-      // If custom domain is not live yet, fall back to the Render app URL.
-      if (openApp.dataset.fallback === "1") {
-        e.preventDefault();
-        window.location.href = APP_URL_FALLBACK;
-      }
-    });
+    openApp.href = APP_URL_DEFAULT;
   }
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     if (!status || !submit) return;
 
-    status.classList.remove("show", "error");
-    status.textContent = "";
+    showFormStatus(status, "");
 
     const email = (form.email?.value || "").trim();
     const password = form.password?.value || "";
+    const invite = (form.invite_code?.value || "").trim();
     const accepted = Boolean(form.accepted_terms?.checked);
 
-    // Surface native HTML5 constraints (required email/password/terms, minlength).
+    // Surface native HTML5 constraints (required email/password/invite/terms, minlength).
     if (typeof form.reportValidity === "function" && !form.reportValidity()) {
-      status.textContent = "Fix the highlighted fields — password (6+ chars) and terms are required.";
-      status.classList.add("show", "error");
+      showFormStatus(
+        status,
+        "Fix the highlighted fields — invite code (required for beta), password (6+ chars), and terms are required.",
+        { error: true },
+      );
       return;
     }
 
     if (!email || !email.includes("@")) {
-      status.textContent = "Enter a valid work email.";
-      status.classList.add("show", "error");
+      showFormStatus(status, "Enter a valid work email.", { error: true });
       form.email?.focus();
       return;
     }
     if (password.length < 6) {
-      status.textContent = "Password must be at least 6 characters.";
-      status.classList.add("show", "error");
+      showFormStatus(status, "Password must be at least 6 characters.", { error: true });
       form.password?.focus();
       return;
     }
+    if (!invite) {
+      showFormStatus(status, "A valid invite code is required for beta signup.", { error: true });
+      form.invite_code?.focus();
+      return;
+    }
     if (!accepted) {
-      status.textContent = "Agree to the Terms of Service and Privacy Policy to continue.";
-      status.classList.add("show", "error");
+      showFormStatus(status, "Agree to the Terms of Service and Privacy Policy to continue.", { error: true });
       form.accepted_terms?.focus();
       return;
     }
 
     submit.disabled = true;
-    status.textContent = "Creating your account…";
-    status.classList.add("show");
+    showFormStatus(status, "Creating your account…");
 
     const body = {
       name: (form.name?.value || "").trim() || null,
       email,
       password,
       accepted_terms: accepted,
-      invite_code: (form.invite_code?.value || "").trim() || null,
+      invite_code: invite,
     };
 
     try {
@@ -120,25 +142,26 @@ async function wireSignup() {
       }
 
       if (!res.ok) {
-        status.textContent = detail || `Signup failed (${res.status}). Try again or contact us.`;
-        status.classList.add("show", "error");
+        const fallback =
+          res.status === 403
+            ? "A valid invite code is required for beta signup."
+            : `Signup failed (${res.status}). Try again or contact us.`;
+        showFormStatus(status, detail || fallback, { error: true });
         submit.disabled = false;
         return;
       }
 
       form.hidden = true;
-      status.classList.remove("show", "error");
+      showFormStatus(status, "");
       if (success) success.hidden = false;
-      // Probe app custom domain; fall back to onrender if needed.
-      try {
-        const probe = await fetch(APP_URL, { method: "HEAD", mode: "no-cors" });
-        void probe;
-      } catch {
-        if (openApp) openApp.dataset.fallback = "1";
-      }
+      // Default CTA is onrender; upgrade to app.casesifter.com only when it resolves.
+      await preferAppDomainWhenLive(openApp);
     } catch {
-      status.textContent = "Could not reach the signup service. Check your connection and try again.";
-      status.classList.add("show", "error");
+      showFormStatus(
+        status,
+        "Could not reach the signup service. Check your connection and try again.",
+        { error: true },
+      );
       submit.disabled = false;
     }
   });

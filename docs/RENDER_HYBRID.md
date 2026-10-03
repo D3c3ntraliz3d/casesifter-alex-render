@@ -6,12 +6,23 @@ Ephemeral analysis API, Stripe control plane, and hosted SPA. **No customer docu
 
 | Surface | URL | Render service |
 |---|---|---|
-| Marketing | `https://www.casesifter.com` (DNS cutover) / `https://casesifter-marketing.onrender.com` | `casesifter-marketing` |
-| Web app | `https://app.casesifter.com` (DNS) / `https://casesifter-app.onrender.com` | `casesifter-app` |
+| Marketing | `https://casesifter.com` / `https://www.casesifter.com` (**live on Render**) / `https://casesifter-marketing.onrender.com` | `casesifter-marketing` |
+| Web app (interim) | `https://casesifter-app.onrender.com` | `casesifter-app` |
+| Web app (custom, not yet) | `https://app.casesifter.com` — **NXDOMAIN until `app` CNAME** | `casesifter-app` |
 | Control plane | `https://casesifter-control.onrender.com` | `casesifter-control` |
 | Analysis | `https://casesifter-analysis.onrender.com` | `casesifter-analysis` (**resume before sell**) |
 
-**Invite + Stripe path:** marketing Sign up (invite code) → Open web app → Account → Start 14-day trial → Stripe Checkout → return to `CASESIFTER_PUBLIC_URL`.
+### Interim client path
+
+| Action | URL |
+|---|---|
+| Sign up | `https://casesifter.com/signup.html` + invite code (**required for beta**) |
+| Log in / use product | `https://casesifter-app.onrender.com` → **Account → Sign in** |
+| Avoid until DNS | `https://app.casesifter.com` |
+
+**Cross-origin:** marketing-site session token ≠ app session. After signup, users must Sign in on the hosted app.
+
+**Invite + Stripe path:** marketing Sign up (invite required) → Open web app (`casesifter-app.onrender.com`) → Account → Sign in → Start 14-day trial → Stripe Checkout → return to `CASESIFTER_PUBLIC_URL`.
 
 ## Services
 
@@ -52,7 +63,7 @@ Scratch disk only if needed for in-flight jobs; do not treat it as permanent cas
 | `STRIPE_WEBHOOK_SECRET` | sync:false — John |
 | `STRIPE_PRICE_ID` | sync:false — John |
 | `CONTROL_ADMIN_TOKEN` | sync:false — John |
-| `CASESIFTER_PUBLIC_URL` | `https://app.casesifter.com` |
+| `CASESIFTER_PUBLIC_URL` | `https://casesifter-app.onrender.com` until `app` DNS; then `https://app.casesifter.com` |
 | `CASESIFTER_TRIAL_DAYS` | `14` |
 | `CASESIFTER_INVITE_REQUIRED` | `true` |
 | `CASESIFTER_INVITE_CODES` | sync:false comma-list — John |
@@ -73,34 +84,25 @@ Browser Account uses control-plane signup/login/checkout; analysis calls send se
 ### marketing (static from `marketing/`)
 
 - Publish path: `./marketing`
-- Public CTA: `/signup.html` → control-plane `POST /v1/signup`; success CTA **Open web app** → `https://app.casesifter.com`
+- Public CTA: `/signup.html` → control-plane `POST /v1/signup` (invite **required for beta**); success CTA **Open web app** defaults to `https://casesifter-app.onrender.com` (JS probes and upgrades to `https://app.casesifter.com` when that host resolves)
+- Nav/footer **Sign in** → `https://casesifter-app.onrender.com` (Account is in-app; no marketing `/login.html`)
 - `/download.html` redirects to signup — desktop installer is retired.
 
-**Why John may still see Download:** `casesifter.com` / `www` may still be SiteGround. `https://casesifter-marketing.onrender.com` already serves Sign up.
+**Apex / www status:** already on Render marketing (not SiteGround). Clients use `https://casesifter.com/signup.html` today.
 
-## DNS cutover (John — agent cannot without credentials)
+## DNS remaining (John — agent cannot without credentials)
+
+Apex and `www` are done. **Only custom app domain remains:**
 
 | Host | Type | Target |
 |---|---|---|
-| `@` (apex) | **A** | Render load balancer IP from Dashboard (often `216.24.57.1`) |
-| `www` | **CNAME** | `casesifter-marketing.onrender.com` |
 | `app` | **CNAME** | `casesifter-app.onrender.com` |
 
-Remove old SiteGround A `34.174.53.153` for `@` / `www`, and any **AAAA**. Keep SiteGround MX/SPF if mail still uses SiteGround antispam.
+Then: Render → **casesifter-app** → Custom Domains → `app.casesifter.com` → verify TLS.
 
-**Secrets for agent to finish remotely:** `RENDER_API_KEY` and/or SiteGround DNS/FTP — see historical Domain fix notes below.
+Keep SiteGround MX/SPF if mail still uses SiteGround antispam.
 
-### Fix custom domain (pick one)
-
-**Agent blocker:** this Cloud Agent has **no** `RENDER_API_KEY`, SiteGround Site Tools login, or FTP/SFTP credentials. Cannot attach domains or upload to SiteGround without those.
-
-**A — Preferred: attach domain to Render `casesifter-marketing` (+ `casesifter-app`)**
-1. Render → **casesifter-marketing** → Custom Domains → `www.casesifter.com` (and apex as shown).
-2. Render → **casesifter-app** → Custom Domains → `app.casesifter.com`.
-3. SiteGround DNS Zone Editor: apply the DNS table above.
-4. Verify TLS; hard-refresh — nav must say **Sign up**, not Download.
-
-**B — Fast interim: overwrite SiteGround files** with this branch’s `marketing/` (no `.exe`).
+**Secrets for agent to finish remotely:** `RENDER_API_KEY` and/or registrar DNS access.
 
 ## Deploy branch
 

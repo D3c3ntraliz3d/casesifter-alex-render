@@ -21,11 +21,13 @@
         <li><a href="product.html">Product</a></li>
         <li><a href="pricing.html">Pricing</a></li>
         <li><a class="on" href="signup.html">Sign up</a></li>
+        <li><a href="https://casesifter-app.onrender.com">Sign in</a></li>
         <li><a href="security.html">Security &amp; Privacy</a></li>
         <li><a href="contact.html">Contact</a></li>
       </ul>
       <div class="nav-cta">
-        <a class="btn ghost small" href="signup.html">Sign up</a>
+        <a class="btn ghost small" href="https://casesifter-app.onrender.com">Sign in</a>
+        <a class="btn primary small" href="signup.html">Sign up</a>
         <button class="nav-toggle" aria-label="Toggle menu"><span></span><span></span><span></span></button>
       </div>
     </div>
@@ -59,8 +61,8 @@
               <input id="password" name="password" type="password" required minlength="6" autocomplete="new-password" />
             </div>
             <div class="field">
-              <label for="invite_code">Invite code <span class="field-optional">(if required)</span></label>
-              <input id="invite_code" name="invite_code" type="text" autocomplete="off" />
+              <label for="invite_code">Invite code <span class="field-required">(required for beta)</span></label>
+              <input id="invite_code" name="invite_code" type="text" required autocomplete="off" />
             </div>
             <div class="field field-check">
               <label>
@@ -69,17 +71,17 @@
               </label>
             </div>
             <button class="btn primary block" type="submit" id="signup-submit">Create account</button>
-            <p class="form-status" id="form-status" role="status"></p>
+            <p class="form-status" id="form-status" role="alert" aria-live="assertive"></p>
           </form>
           <div id="signup-success" class="signup-success" hidden>
             <h3 style="margin-top: 0;">Account created</h3>
-            <p>Your CaseSifter account is ready. Open the web app, sign in if needed, and start your trial from <strong>Account</strong>.</p>
+            <p>Your CaseSifter account is ready. Open the web app and use <strong>Account → Sign in</strong> with the same email and password (marketing signup does not log you into the app automatically).</p>
             <p style="margin-top: 1.25rem;">
-              <a class="btn primary" id="open-app" href="https://app.casesifter.com">Open web app</a>
+              <a class="btn primary" id="open-app" href="https://casesifter-app.onrender.com">Open web app</a>
             </p>
             <p class="plan-note" style="margin-top: 1rem;">
-              If the app link is not live yet, use
-              <a href="https://casesifter-app.onrender.com">casesifter-app.onrender.com</a>.
+              Prefer the custom domain when it is live:
+              <a href="https://app.casesifter.com">app.casesifter.com</a>.
               Need a walkthrough? <a href="contact.html">Contact us</a>.
             </p>
           </div>
@@ -105,7 +107,7 @@
       <div class="plan-grid">
         <div class="plan">
           <h3>1. Sign up</h3>
-          <p class="plan-note">Create your account here. Use an invite code if your firm was given one for beta access.</p>
+          <p class="plan-note">Create your account here with the invite code your firm received for beta access (required).</p>
         </div>
         <div class="plan">
           <h3>2. Open the web app</h3>
@@ -138,6 +140,7 @@
             <a href="product.html">How it works</a>
             <a href="pricing.html">Pricing</a>
             <a href="signup.html">Sign up</a>
+            <a href="https://casesifter-app.onrender.com">Sign in</a>
             <a href="security.html">Security &amp; privacy</a>
           </div>
           <div class="footer-col">

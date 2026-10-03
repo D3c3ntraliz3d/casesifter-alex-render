@@ -14,30 +14,41 @@
 
 | Item | Status |
 |---|---|
-| Marketing signup UX + **Open web app** CTA | **Done** (this branch) → `https://app.casesifter.com` |
-| Render `casesifter-app` (frontend SPA) | **Blueprint ready** — John: sync Blueprint / deploy + attach `app.casesifter.com` |
+| Marketing signup UX + **Open web app** CTA | **Done** — default CTA `https://casesifter-app.onrender.com` (probe-upgrades to `app.casesifter.com` when DNS live) |
+| Marketing apex / www on Render | **Live** — `https://casesifter.com` / `www` already serve marketing |
+| Render `casesifter-app` (frontend SPA) | **Deployed** — use onrender URL until `app` CNAME |
 | Browser Account (signup/login/checkout → control plane) | **Done** (`VITE_CONTROL_PLANE_URL`) |
-| Control invite gate + Stripe env in `render.yaml` | **Documented** — John sets secrets |
+| Control invite gate + Stripe env in `render.yaml` | **Documented** — John sets secrets / invite codes |
 | Render `casesifter-analysis` | **SUSPENDED** — John resumes after secrets/CORS; code/docs ready |
 | Phase 0 lockdown | **Done** (`APP_MODE=analysis`, CORS not `*`, API key **or** active session) |
 | Phase 1 page anchors / Phase 4 extraction | **Done** |
-| Custom domain `www` / `app` | **BLOCKED** — needs John’s DNS / Render access |
+| Custom domain `app` | **BLOCKED** — `app.casesifter.com` NXDOMAIN until John adds CNAME + Render attach |
 | Phase 2 case_id memory | **Next before invoicing** |
 
 ## Soft-launch URLs
 
-| Surface | Prefer | Fallback |
+| Surface | Prefer (today) | Notes |
 |---|---|---|
-| Marketing | `https://www.casesifter.com` | `https://casesifter-marketing.onrender.com` |
-| Web app | `https://app.casesifter.com` | `https://casesifter-app.onrender.com` |
+| Marketing | `https://casesifter.com` / `https://www.casesifter.com` | Already on Render |
+| Web app | `https://casesifter-app.onrender.com` | Avoid `app.casesifter.com` until DNS |
 | Control | `https://casesifter-control.onrender.com` | same |
-| Analysis | `https://casesifter-analysis.onrender.com` | same (resume first) |
+| Analysis | `https://casesifter-analysis.onrender.com` | resume first |
+
+### Interim client path (use now)
+
+| Action | URL |
+|---|---|
+| Sign up | `https://casesifter.com/signup.html` + **real invite code** (required for beta) |
+| Log in / use product | `https://casesifter-app.onrender.com` → **Account → Sign in** |
+| Avoid | `https://app.casesifter.com` (NXDOMAIN until `app` CNAME) |
+
+**Cross-origin note:** a token stored on the marketing origin is **not** an app session. After signup, the client must **Sign in** on the hosted app with the same credentials.
 
 ## Invite + Stripe verify path
 
-1. Set on `casesifter-control`: `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_ID`, `CASESIFTER_INVITE_REQUIRED=true`, `CASESIFTER_INVITE_CODES=…`, `CASESIFTER_PUBLIC_URL=https://app.casesifter.com`.
-2. Sign up on marketing with password + terms + invite → success → **Open web app**.
-3. In Account: sign in if needed → **Start 14-day trial** → Stripe Checkout.
+1. Set on `casesifter-control`: `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_ID`, `CASESIFTER_INVITE_REQUIRED=true`, `CASESIFTER_INVITE_CODES=…` (non-empty), `CASESIFTER_PUBLIC_URL=https://casesifter-app.onrender.com` until custom app domain works.
+2. Sign up on marketing with password + terms + invite → success → **Open web app** (`casesifter-app.onrender.com`).
+3. In Account: **Sign in** → **Start 14-day trial** → Stripe Checkout.
 4. Webhook: `https://casesifter-control.onrender.com/v1/webhooks/stripe`.
 5. Demo shortcut: admin `POST /v1/trial` with `CONTROL_ADMIN_TOKEN`.
 
@@ -50,20 +61,21 @@
 
 ## DNS (John)
 
+Apex / `www` are already pointing at Render marketing. **Remaining:**
+
 | Host | Type | Target |
 |---|---|---|
-| `www` | CNAME | `casesifter-marketing.onrender.com` |
 | `app` | CNAME | `casesifter-app.onrender.com` |
-| `@` | A | Render LB IP from Dashboard |
 
-Details: `docs/RENDER_HYBRID.md`.
+Then attach `app.casesifter.com` on the Render `casesifter-app` service. Details: `docs/RENDER_HYBRID.md`.
 
 ## What John must provide
 
-- Render dashboard access or `RENDER_API_KEY` (deploy `casesifter-app`, custom domains, unsuspend analysis, set secrets)
-- Stripe keys + price id
-- Invite codes for pilot firms (`CASESIFTER_INVITE_CODES`)
-- SiteGround DNS (or registrar) for `www` + `app`
+- Confirm `CASESIFTER_INVITE_CODES` is set (and non-empty) on `casesifter-control` — invite required is already `true`; empty list blocks all signup
+- Stripe keys + price id (`control` `/health` may still show `"stripe":false` until set)
+- DNS: `app` CNAME → `casesifter-app.onrender.com` + attach domain in Render
+- Unsuspend `casesifter-analysis` when ready for scans
+- Render dashboard access or `RENDER_API_KEY` if agent help is needed for the above
 
 ## Next before invoicing
 
