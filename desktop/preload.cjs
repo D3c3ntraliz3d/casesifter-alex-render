@@ -23,7 +23,7 @@ contextBridge.exposeInMainWorld("casesifter", {
   signup: (email, password, name, acceptedTerms, inviteCode) =>
     ipcRenderer.invoke("cs:signup", email, password, name, acceptedTerms, inviteCode),
   entitlement: () => ipcRenderer.invoke("cs:entitlement"),
-  checkout: (trial) => ipcRenderer.invoke("cs:checkout", trial),
+  checkout: (trial, quantity = 1) => ipcRenderer.invoke("cs:checkout", trial, quantity),
   findingFeedback: (payload) => ipcRenderer.invoke("cs:finding-feedback", payload),
   reportProblem: (note) => ipcRenderer.invoke("cs:report-problem", note),
 });

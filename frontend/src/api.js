@@ -711,9 +711,10 @@ export async function logoutCloud() {
   };
 }
 
-export async function startCheckout(trial = false) {
+export async function startCheckout(trial = false, quantity = 1) {
+  const seats = Math.min(50, Math.max(1, Number(quantity) || 1));
   const cs = desktop();
-  if (cs) return callDesktop(cs.checkout(trial));
+  if (cs) return callDesktop(cs.checkout(trial, seats));
   const token = getSessionToken();
   if (!token) throw new Error("Sign in first.");
   let res;
@@ -721,7 +722,23 @@ export async function startCheckout(trial = false) {
     res = await fetch(controlUrl("/v1/checkout"), {
       method: "POST",
       headers: { ...controlHeaders(), "Content-Type": "application/json" },
-      body: JSON.stringify({ trial: Boolean(trial) }),
+      body: JSON.stringify({ trial: Boolean(trial), quantity: seats }),
+    });
+  } catch (err) {
+    throw controlUnreachableError(err);
+  }
+  return readJson(res);
+}
+
+export async function openBillingPortal() {
+  const token = getSessionToken();
+  if (!token) throw new Error("Sign in first.");
+  let res;
+  try {
+    res = await fetch(controlUrl("/v1/billing-portal"), {
+      method: "POST",
+      headers: { ...controlHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({}),
     });
   } catch (err) {
     throw controlUnreachableError(err);

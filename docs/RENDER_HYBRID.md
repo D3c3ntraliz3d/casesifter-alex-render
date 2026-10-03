@@ -53,7 +53,7 @@ Scratch disk only if needed for in-flight jobs; do not treat it as permanent cas
 ### control (Docker from `control_plane/`)
 
 - `POST /v1/signup`, `/v1/login`, `GET /v1/entitlement`
-- `POST /v1/checkout`, `POST /v1/webhooks/stripe`
+- `POST /v1/checkout` (quantity / seats), `POST /v1/billing-portal`, `POST /v1/webhooks/stripe`
 - `POST /v1/trial` (admin), `POST /v1/dms/webhook` (phase-2 stub)
 - Env (Blueprint + Dashboard secrets):
 
@@ -61,19 +61,21 @@ Scratch disk only if needed for in-flight jobs; do not treat it as permanent cas
 |---|---|
 | `STRIPE_SECRET_KEY` | sync:false — John (`sk_test_…` first) |
 | `STRIPE_WEBHOOK_SECRET` | sync:false — John (`whsec_…`) |
-| `STRIPE_PRICE_ID` | sync:false — John (Solo **$149**/mo `price_…`) |
+| `STRIPE_PRICE_ID` | sync:false — John (**$79/seat**/mo `price_1UMIUnD6sOleRtjBjVbHzMdP`) |
 | `CONTROL_ADMIN_TOKEN` | sync:false — John |
 | `CASESIFTER_PUBLIC_URL` | Blueprint: `https://casesifter-app.onrender.com` until `app` DNS; then `https://app.casesifter.com` |
 | `CASESIFTER_TRIAL_DAYS` | `14` |
 | `CASESIFTER_INVITE_REQUIRED` | `false` (invite optional) |
 | `CASESIFTER_INVITE_CODES` | sync:false comma-list — optional while gate is off |
 
-**Stripe runbook:** `docs/STRIPE.md` (product/price, keys, webhook events, Render env, verify).
+No `STRIPE_PUBLISHABLE_KEY` — Checkout and Customer Portal are server-created.
+
+**Stripe runbook:** `docs/STRIPE.md` (product/price, portal, keys, webhook events, Render env, verify).
 
 **Webhook:** `https://casesifter-control.onrender.com/v1/webhooks/stripe`  
-Events: `checkout.session.completed`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`.
+Events: `checkout.session.completed`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.payment_failed`.
 
-**Verify:** `GET /health` → `"stripe":true` → Account → Start trial / Manage billing → Stripe Checkout (or admin `POST /v1/trial` for demos without a card). Without Stripe env, checkout is a local/dev entitlement grant and Account shows the red “Stripe not configured” banner.
+**Verify:** `GET /health` → `"stripe":true` → Account → Start trial (Checkout with seat qty) → Manage billing → Customer Portal (or admin `POST /v1/trial` for demos without a card). Without Stripe env, checkout is a local/dev entitlement grant and Account shows the red “Stripe not configured” banner.
 
 ### app (static from `frontend/`)
 

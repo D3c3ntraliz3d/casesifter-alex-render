@@ -50,8 +50,8 @@ Full operator checklist: **`docs/STRIPE.md`**.
 
 1. Set on `casesifter-control`: `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_ID`, `CASESIFTER_INVITE_REQUIRED=false` (invite optional), optional `CASESIFTER_INVITE_CODES=…`, `CASESIFTER_PUBLIC_URL=https://casesifter-app.onrender.com` until custom app domain works (Blueprint default matches; override Dashboard if still `app.casesifter.com`).
 2. Sign up on marketing with password + terms (invite optional) → success → **Open web app** (`casesifter-app.onrender.com`).
-3. In Account: **Sign in** → **Start 14-day trial** → Stripe Checkout (card collected; charge after trial). Without keys, Account shows **Stripe not configured — trial started without a card (local/dev).** and **Manage billing** marks Pro-dev locally (no Checkout tab).
-4. Webhook: `https://casesifter-control.onrender.com/v1/webhooks/stripe` — enable `checkout.session.completed`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`.
+3. In Account: **Sign in** → pick seats → **Start 14-day trial** → Stripe Checkout at **$79/seat** (card collected; charge after trial). After Checkout, **Manage billing** opens the Customer Portal when `has_billing_portal`. Without keys, Account shows **Stripe not configured — trial started without a card (local/dev).** and Subscribe marks Pro-dev locally (no Checkout tab).
+4. Webhook: `https://casesifter-control.onrender.com/v1/webhooks/stripe` — enable `checkout.session.completed`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.payment_failed`. Enable Customer Portal + quantity updates in Stripe.
 5. Redeploy control → `curl -sS https://casesifter-control.onrender.com/health` → `"stripe":true`.
 6. Demo shortcut (no card): admin `POST /v1/trial` with `CONTROL_ADMIN_TOKEN`.
 
@@ -75,7 +75,7 @@ Then attach `app.casesifter.com` on the Render `casesifter-app` service. Details
 ## What John must provide
 
 - Invite gate is **off** (`CASESIFTER_INVITE_REQUIRED=false` in Blueprint). If live Render still has `true`, sync Blueprint or set env + redeploy `casesifter-control`. Optional `CASESIFTER_INVITE_CODES` may remain set.
-- Stripe keys + Solo $149 `price_…` + webhook signing secret — see `docs/STRIPE.md` (`control` `/health` shows `"stripe":false` until `STRIPE_SECRET_KEY` **and** `STRIPE_PRICE_ID` are set)
+- Stripe keys + `$79/seat` price `price_1UMIUnD6sOleRtjBjVbHzMdP` + webhook signing secret — see `docs/STRIPE.md` (`control` `/health` shows `"stripe":false` until `STRIPE_SECRET_KEY` **and** `STRIPE_PRICE_ID` are set). Secrets stay Render-only.
 - DNS: `app` CNAME → `casesifter-app.onrender.com` + attach domain in Render
 - Unsuspend `casesifter-analysis` when ready for scans
 - Render dashboard access or `RENDER_API_KEY` if agent help is needed for the above

@@ -64,6 +64,7 @@ class DiagnosticsBody(BaseModel):
 
 class CheckoutBody(BaseModel):
     trial: bool = False
+    quantity: int = Field(default=1, ge=1, le=50)
 
 
 def _load() -> dict[str, Any]:
@@ -100,13 +101,104 @@ def _ensure_user_identity(user: dict[str, Any], *, cohort: str | None = None) ->
 
 def _entitlement_payload(user: dict[str, Any]) -> dict[str, Any]:
     _ensure_user_identity(user)
+    sub = user.get("subscription") or {}
+    seats = sub.get("seats")
+    try:
+        seats_n = int(seats) if seats is not None else None
+    except (TypeError, ValueError):
+        seats_n = None
     return {
         **_user_plan(user),
         "email": user["email"],
         "support_code": user.get("support_code"),
         "user_id": user.get("user_id"),
         "cohort": user.get("cohort"),
+        "seats": seats_n,
+        "has_billing_portal": bool(user.get("stripe_customer_id")),
     }
+
+
+def _as_dict(obj: Any) -> dict[str, Any]:
+    if isinstance(obj, dict):
+        return obj
+    if hasattr(obj, "to_dict"):
+        try:
+            return obj.to_dict()
+        except Exception:
+            pass
+    try:
+        return dict(obj)
+    except Exception:
+        return {}
+
+
+def _subscription_quantity(sub: dict[str, Any]) -> int | None:
+    items = sub.get("items") or {}
+    data = items.get("data") if isinstance(items, dict) else None
+    if isinstance(data, list) and data:
+        first = _as_dict(data[0])
+        qty = first.get("quantity")
+        try:
+            return max(1, int(qty))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _apply_subscription_fields(
+    user: dict[str, Any],
+    *,
+    status: str | None,
+    subscription_id: str | None = None,
+    customer_id: str | None = None,
+    seats: int | None = None,
+    current_period_end: Any = None,
+    plan: str | None = "pro",
+) -> None:
+    if customer_id:
+        user["stripe_customer_id"] = str(customer_id)
+    sub = dict(user.get("subscription") or {})
+    if status is not None:
+        sub["status"] = status
+    if plan is not None:
+        sub["plan"] = plan
+    if subscription_id and str(subscription_id).startswith("sub_"):
+        sub["stripe_subscription_id"] = str(subscription_id)
+        # Legacy alias — never store Checkout session ids (cs_…).
+        sub["stripe_id"] = str(subscription_id)
+    if seats is not None:
+        sub["seats"] = int(seats)
+    if current_period_end is not None:
+        sub["current_period_end"] = current_period_end
+    user["subscription"] = sub
+
+
+def _find_user_for_stripe(
+    data: dict[str, Any], obj: dict[str, Any]
+) -> tuple[dict[str, Any] | None, str | None]:
+    meta = obj.get("metadata") or {}
+    if not isinstance(meta, dict):
+        meta = _as_dict(meta)
+    email = meta.get("email") or obj.get("customer_email") or obj.get("client_reference_id")
+    if not email:
+        # Invoice / some subscription payloads expose customer_details.
+        details = obj.get("customer_details") or {}
+        if isinstance(details, dict):
+            email = details.get("email")
+        else:
+            email = _as_dict(details).get("email")
+    if email:
+        key = str(email).lower()
+        user = data["users"].get(key)
+        if user:
+            return user, key
+    customer_id = obj.get("customer")
+    if customer_id:
+        cid = str(customer_id)
+        for key, user in data["users"].items():
+            if user.get("stripe_customer_id") == cid:
+                return user, key
+    return None, None
 
 
 def _invite_ok(code: str | None) -> bool:
@@ -269,47 +361,84 @@ def grant_trial(body: TrialBody):
 
 @app.post("/v1/checkout")
 def checkout(body: CheckoutBody = CheckoutBody(), authorization: str | None = Header(default=None)):
-    user, _, _ = _session_user(authorization)
+    user, _, data = _session_user(authorization)
+    quantity = int(body.quantity)
     if not STRIPE_SECRET or not STRIPE_PRICE_ID:
         # Dev fallback: no Stripe configured, so there's no way to collect a card.
-        data = _load()
+        u = data["users"][user["email"]]
         if body.trial:
-            data["users"][user["email"]]["trial_until"] = time.time() + TRIAL_DAYS * 86400
+            u["trial_until"] = time.time() + TRIAL_DAYS * 86400
+            sub = dict(u.get("subscription") or {})
+            sub["seats"] = quantity
+            u["subscription"] = sub
             message = "Stripe not configured — trial started without a card (local/dev)."
         else:
-            data["users"][user["email"]]["subscription"] = {
-                "status": "active",
-                "plan": "pro-dev",
-                "current_period_end": time.time() + 30 * 86400,
-            }
+            _apply_subscription_fields(
+                u,
+                status="active",
+                seats=quantity,
+                current_period_end=time.time() + 30 * 86400,
+                plan="pro-dev",
+            )
             message = "Stripe not configured — marked Pro for local/dev."
         _save(data)
         return {
             "mode": "dev",
             "url": None,
             "message": message,
-            "entitlement": _user_plan(data["users"][user["email"]]),
+            "entitlement": _entitlement_payload(u),
         }
     try:
         import stripe
 
         stripe.api_key = STRIPE_SECRET
-        session_kwargs = dict(
+        meta = {"email": user["email"], "seats": str(quantity)}
+        session_kwargs: dict[str, Any] = dict(
             mode="subscription",
-            line_items=[{"price": STRIPE_PRICE_ID, "quantity": 1}],
+            line_items=[{"price": STRIPE_PRICE_ID, "quantity": quantity}],
             success_url=APP_PUBLIC_URL.rstrip("/") + "/?billing=success",
             cancel_url=APP_PUBLIC_URL.rstrip("/") + "/?billing=cancel",
-            customer_email=user["email"],
             client_reference_id=user["email"],
-            metadata={"email": user["email"]},
+            metadata=meta,
         )
+        customer_id = user.get("stripe_customer_id")
+        if customer_id:
+            session_kwargs["customer"] = customer_id
+        else:
+            session_kwargs["customer_email"] = user["email"]
+        subscription_data: dict[str, Any] = {"metadata": meta}
         if body.trial:
             # Card is still collected up front; billing simply doesn't start until the trial ends.
-            session_kwargs["subscription_data"] = {"trial_period_days": TRIAL_DAYS}
+            subscription_data["trial_period_days"] = TRIAL_DAYS
+        session_kwargs["subscription_data"] = subscription_data
         session = stripe.checkout.Session.create(**session_kwargs)
         return {"mode": "stripe", "url": session.url}
     except Exception as exc:
         raise HTTPException(502, f"Stripe checkout failed: {exc}") from exc
+
+
+@app.post("/v1/billing-portal")
+def billing_portal(authorization: str | None = Header(default=None)):
+    user, _, _ = _session_user(authorization)
+    customer_id = user.get("stripe_customer_id")
+    if not customer_id:
+        raise HTTPException(
+            400,
+            "No Stripe customer yet — Subscribe or start a trial first.",
+        )
+    if not STRIPE_SECRET:
+        raise HTTPException(503, "Stripe not configured.")
+    try:
+        import stripe
+
+        stripe.api_key = STRIPE_SECRET
+        session = stripe.billing_portal.Session.create(
+            customer=customer_id,
+            return_url=APP_PUBLIC_URL.rstrip("/"),
+        )
+        return {"url": session.url}
+    except Exception as exc:
+        raise HTTPException(502, f"Stripe billing portal failed: {exc}") from exc
 
 
 @app.post("/v1/webhooks/stripe")
@@ -330,34 +459,144 @@ async def stripe_webhook(request: Request):
         raise HTTPException(400, f"Webhook error: {exc}") from exc
 
     etype = event["type"] if isinstance(event, dict) else event.type
-    obj = event["data"]["object"] if isinstance(event, dict) else event.data.object
-    email = None
-    if isinstance(obj, dict):
-        email = (obj.get("metadata") or {}).get("email") or obj.get("customer_email")
-        if not email and obj.get("client_reference_id"):
-            email = obj.get("client_reference_id")
-    if not email:
-        return {"ok": True, "skipped": "no email"}
+    raw_obj = event["data"]["object"] if isinstance(event, dict) else event.data.object
+    obj = _as_dict(raw_obj)
 
     data = _load()
-    user = data["users"].get(str(email).lower())
-    if not user:
-        return {"ok": True, "skipped": "unknown user"}
+    user, email_key = _find_user_for_stripe(data, obj)
 
-    if etype in {"checkout.session.completed", "customer.subscription.updated", "customer.subscription.created"}:
-        status = obj.get("status") if isinstance(obj, dict) else "active"
-        if etype.startswith("checkout"):
-            status = "active"
+    if etype == "checkout.session.completed":
+        if not user:
+            return {"ok": True, "skipped": "unknown user"}
+        customer_id = obj.get("customer")
+        subscription_id = obj.get("subscription")
+        meta = obj.get("metadata") or {}
+        if not isinstance(meta, dict):
+            meta = _as_dict(meta)
+        seats = None
+        try:
+            seats = int(meta.get("seats")) if meta.get("seats") is not None else None
+        except (TypeError, ValueError):
+            seats = None
+        status = "active"
+        period_end = None
+        if subscription_id:
+            try:
+                sub = _as_dict(stripe.Subscription.retrieve(str(subscription_id)))
+                status = sub.get("status") or status
+                period_end = sub.get("current_period_end")
+                qty = _subscription_quantity(sub)
+                if qty is not None:
+                    seats = qty
+                if not customer_id:
+                    customer_id = sub.get("customer")
+            except Exception:
+                pass
+        if seats is None:
+            seats = 1
+        # Never persist Checkout session id (cs_…) as the subscription id.
+        sub_id = str(subscription_id) if subscription_id and str(subscription_id).startswith("sub_") else None
+        _apply_subscription_fields(
+            user,
+            status=status,
+            subscription_id=sub_id,
+            customer_id=str(customer_id) if customer_id else None,
+            seats=seats,
+            current_period_end=period_end,
+            plan="pro",
+        )
+        data["users"][email_key or user["email"]] = user
+        _save(data)
+        return {"ok": True}
+
+    if etype in {"customer.subscription.created", "customer.subscription.updated"}:
+        if not user:
+            # Resolve via subscription metadata.email if customer lookup missed.
+            meta = obj.get("metadata") or {}
+            if not isinstance(meta, dict):
+                meta = _as_dict(meta)
+            if meta.get("email"):
+                email_key = str(meta["email"]).lower()
+                user = data["users"].get(email_key)
+            if not user:
+                return {"ok": True, "skipped": "unknown user"}
+        seats = _subscription_quantity(obj)
+        meta = obj.get("metadata") or {}
+        if not isinstance(meta, dict):
+            meta = _as_dict(meta)
+        if seats is None and meta.get("seats") is not None:
+            try:
+                seats = int(meta.get("seats"))
+            except (TypeError, ValueError):
+                seats = None
+        sub_id = obj.get("id")
+        if sub_id and not str(sub_id).startswith("sub_"):
+            sub_id = None
+        _apply_subscription_fields(
+            user,
+            status=obj.get("status") or "active",
+            subscription_id=str(sub_id) if sub_id else None,
+            customer_id=str(obj["customer"]) if obj.get("customer") else None,
+            seats=seats,
+            current_period_end=obj.get("current_period_end"),
+            plan="pro",
+        )
+        data["users"][email_key or user["email"]] = user
+        _save(data)
+        return {"ok": True}
+
+    if etype == "customer.subscription.deleted":
+        if not user:
+            return {"ok": True, "skipped": "unknown user"}
+        if obj.get("customer"):
+            user["stripe_customer_id"] = str(obj["customer"])
         user["subscription"] = {
-            "status": status or "active",
-            "plan": "pro",
-            "stripe_id": obj.get("id") if isinstance(obj, dict) else None,
-            "current_period_end": obj.get("current_period_end") if isinstance(obj, dict) else None,
+            "status": "canceled",
+            "plan": None,
+            "seats": (user.get("subscription") or {}).get("seats"),
+            "stripe_subscription_id": (
+                str(obj["id"]) if obj.get("id") and str(obj["id"]).startswith("sub_") else None
+            ),
         }
-    elif etype in {"customer.subscription.deleted"}:
-        user["subscription"] = {"status": "canceled", "plan": None}
-    _save(data)
-    return {"ok": True}
+        data["users"][email_key or user["email"]] = user
+        _save(data)
+        return {"ok": True}
+
+    if etype == "invoice.payment_failed":
+        if not user:
+            # Try subscription metadata when invoice has no customer match yet.
+            sub_ref = obj.get("subscription")
+            if sub_ref:
+                try:
+                    sub = _as_dict(stripe.Subscription.retrieve(str(sub_ref)))
+                    user, email_key = _find_user_for_stripe(data, sub)
+                    if not user:
+                        meta = sub.get("metadata") or {}
+                        if not isinstance(meta, dict):
+                            meta = _as_dict(meta)
+                        if meta.get("email"):
+                            email_key = str(meta["email"]).lower()
+                            user = data["users"].get(email_key)
+                except Exception:
+                    pass
+        if not user:
+            return {"ok": True, "skipped": "unknown user"}
+        _apply_subscription_fields(
+            user,
+            status="past_due",
+            subscription_id=(
+                str(obj["subscription"])
+                if obj.get("subscription") and str(obj["subscription"]).startswith("sub_")
+                else None
+            ),
+            customer_id=str(obj["customer"]) if obj.get("customer") else None,
+            plan="pro",
+        )
+        data["users"][email_key or user["email"]] = user
+        _save(data)
+        return {"ok": True}
+
+    return {"ok": True, "ignored": etype}
 
 
 @app.post("/v1/dms/webhook")

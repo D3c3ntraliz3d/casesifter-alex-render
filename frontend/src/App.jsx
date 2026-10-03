@@ -20,6 +20,7 @@ import {
   signupCloud,
   reportProblem,
   startCheckout,
+  openBillingPortal,
   patchDocument,
   pickDesktopDocuments,
   getDesktopReport,
@@ -2322,7 +2323,7 @@ function CaseRiskSummary({ byRisk, pendingCount, onOpenReport }) {
 
 const PLAN_SUMMARY = (
   <>
-    <strong>Solo</strong> $149/attorney/mo · <strong>Firm</strong> $119/attorney/mo (2+ seats). Month-to-month, cancel anytime.
+    <strong>$79/seat/month</strong>. Month-to-month, cancel anytime. Choose seats before checkout; change quantity later in Manage billing.
   </>
 );
 
@@ -2336,6 +2337,7 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
   const [problemNote, setProblemNote] = useState("");
   const [showTerms, setShowTerms] = useState(false);
   const [working, setWorking] = useState("");
+  const [seatQty, setSeatQty] = useState(1);
 
   if (!entitlement) {
     return <div className="card"><p>Loading account status…</p></div>;
@@ -2343,6 +2345,7 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
 
   const signedIn = Boolean(entitlement.hasSession || entitlement.email);
   const busy = Boolean(working);
+  const seats = Math.min(50, Math.max(1, Number(seatQty) || 1));
 
   async function guard(action, fn) {
     setWorking(action);
@@ -2357,7 +2360,7 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
   }
 
   async function openCheckout(trial) {
-    const session = await startCheckout(trial);
+    const session = await startCheckout(trial, seats);
     if (session?.url) {
       window.open(session.url, "_blank", "noopener,noreferrer");
     } else if (session?.mode === "dev") {
@@ -2365,6 +2368,18 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
       onError(session.message || "Trial updated (Stripe not configured).");
     }
     await onRefresh();
+  }
+
+  async function manageBilling() {
+    if (entitlement.has_billing_portal) {
+      const session = await openBillingPortal();
+      if (session?.url) {
+        window.open(session.url, "_blank", "noopener,noreferrer");
+        return;
+      }
+      throw new Error(session?.message || "Could not open billing portal.");
+    }
+    await openCheckout(false);
   }
 
   return (
@@ -2376,6 +2391,7 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
         {" · "}
         {entitlement.active ? "Scans unlocked" : "Scans locked"}
         {signedIn ? ` · ${entitlement.email}` : ""}
+        {entitlement.seats != null ? ` · ${entitlement.seats} seat${entitlement.seats === 1 ? "" : "s"}` : ""}
       </p>
       <p className="footnote">{entitlement.message}</p>
 
@@ -2462,6 +2478,19 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
       {entitlement.mode === "cloud" && signedIn && (
         <div className="case-form">
           <p className="plan-summary">{PLAN_SUMMARY}</p>
+          {(!entitlement.active || !entitlement.has_billing_portal) && (
+            <label>
+              Seats
+              <input
+                type="number"
+                min={1}
+                max={50}
+                step={1}
+                value={seats}
+                onChange={(e) => setSeatQty(e.target.value)}
+              />
+            </label>
+          )}
           <div className="actions">
             {!entitlement.active && (
               <button
@@ -2477,9 +2506,15 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
               className="btn secondary"
               type="button"
               disabled={busy}
-              onClick={() => guard("subscribe", () => openCheckout(false))}
+              onClick={() => guard("subscribe", () => (
+                entitlement.has_billing_portal ? manageBilling() : openCheckout(false)
+              ))}
             >
-              {working === "subscribe" ? "Opening checkout…" : entitlement.active ? "Manage billing" : "Subscribe now"}
+              {working === "subscribe"
+                ? (entitlement.has_billing_portal ? "Opening portal…" : "Opening checkout…")
+                : entitlement.has_billing_portal
+                  ? "Manage billing"
+                  : "Subscribe now"}
             </button>
             <button
               className="btn secondary"
@@ -2494,8 +2529,8 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
             </button>
           </div>
           <p className="footnote">
-            Trials and subscriptions run through Stripe’s hosted checkout — CaseSifter never sees or stores your
-            card number.{" "}
+            Trials and new subscriptions use Stripe Checkout; Manage billing opens the Customer Portal when
+            available. CaseSifter never sees or stores your card number.{" "}
             {isDesktopApp()
               ? "Files stay on this PC; analysis runs remotely and is deleted after the report is saved."
               : "Analysis runs ephemerally in the cloud — we do not keep a document vault."}
@@ -2548,6 +2583,18 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
             {PLAN_SUMMARY} A 14-day trial requires a card up front but you won’t be charged unless it converts —
             cancel any time before the trial ends.
           </p>
+
+          <label>
+            Seats
+            <input
+              type="number"
+              min={1}
+              max={50}
+              step={1}
+              value={seats}
+              onChange={(e) => setSeatQty(e.target.value)}
+            />
+          </label>
 
           <label className="terms-row">
             <input
@@ -2633,13 +2680,14 @@ function TermsModal({ onClose }) {
           </p>
           <h4>3. Billing and trials</h4>
           <p>
-            Paid plans are billed monthly per seat and processed by Stripe; CaseSifter never receives or stores
-            your card number. A free trial period requires a valid card on file — unless you cancel before the
-            trial ends, it converts automatically into a paid subscription at the then-current plan price.
+            Paid plans are <strong>$79 per seat per month</strong>, billed through Stripe; CaseSifter never
+            receives or stores your card number. A free trial period requires a valid card on file — unless you
+            cancel before the trial ends, it converts automatically into a paid subscription at the then-current
+            per-seat price. Manage seats and payment methods in the Stripe Customer Portal from Account → Manage billing.
           </p>
           <h4>4. Cancellation</h4>
           <p>
-            You may cancel at any time from the Account tab or by emailing{" "}
+            You may cancel at any time from Account → Manage billing (Customer Portal) or by emailing{" "}
             <a href="mailto:support@casesifter.com">support@casesifter.com</a>; cancellation takes effect at
             the end of the current billing period.
           </p>

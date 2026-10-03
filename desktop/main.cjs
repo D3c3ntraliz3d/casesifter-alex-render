@@ -686,9 +686,10 @@ ipcMain.handle("cs:report-problem", async (_e, note) => {
   });
 });
 
-ipcMain.handle("cs:checkout", async (_e, trial) => {
+ipcMain.handle("cs:checkout", async (_e, trial, quantity = 1) => {
   const cfg = loadConfig();
   if (!cfg.sessionToken) throw new Error("Sign in first.");
+  const seats = Math.min(50, Math.max(1, Number(quantity) || 1));
   return remoteJson(`${cfg.controlPlaneUrl.replace(/\/$/, "")}/v1/checkout`, {
     method: "POST",
     headers: {
@@ -696,7 +697,7 @@ ipcMain.handle("cs:checkout", async (_e, trial) => {
       "Content-Type": "application/json",
       Accept: "application/json",
     },
-    body: JSON.stringify({ trial: Boolean(trial) }),
+    body: JSON.stringify({ trial: Boolean(trial), quantity: seats }),
   });
 });
 

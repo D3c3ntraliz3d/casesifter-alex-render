@@ -67,6 +67,7 @@ services:
         sync: false
       - key: STRIPE_WEBHOOK_SECRET
         sync: false
+      # Soft-launch: price_1UMIUnD6sOleRtjBjVbHzMdP ($79/seat/mo). Secrets stay in Dashboard.
       - key: STRIPE_PRICE_ID
         sync: false
       - key: CONTROL_ADMIN_TOKEN
