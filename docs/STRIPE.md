@@ -30,6 +30,7 @@ UI shows that message as the red Account banner and **does not open** a Checkout
 When Stripe **is** configured:
 
 - Checkout returns `{ "mode": "stripe", "url": "https://checkout.stripe.com/…" }` (card collected; trial uses `subscription_data.trial_period_days`).
+- Checkout sessions pass `managed_payments[enabled]=false` so Stripe does not require a product `tax_code` (tax collection is deferred). Optional John path later: set `tax_code` on product `prod_VN2ZsVDlIiPkHD` in the Dashboard **or** turn off Managed Payments as the account default — then the session flag can be removed.
 - **Manage billing** (when `has_billing_portal`) opens the **Stripe Customer Portal** via `POST /v1/billing-portal` — not a new Checkout session.
 
 ## Entitlement fields

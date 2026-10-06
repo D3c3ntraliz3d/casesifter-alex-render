@@ -82,3 +82,62 @@ def test_valid_session_checkout_dev_without_stripe(tmp_path, monkeypatch):
     assert body.get("mode") == "dev"
     assert "trial" in (body.get("message") or "").lower()
     assert body.get("entitlement", {}).get("share_anonymized_outcomes") is True
+
+
+def test_checkout_disables_managed_payments(tmp_path, monkeypatch):
+    store = tmp_path / "accounts.json"
+    monkeypatch.setattr(mod, "STORE", store)
+    monkeypatch.setattr(mod, "DATA", tmp_path)
+    monkeypatch.setattr(mod, "STRIPE_SECRET", "sk_test_dummy")
+    monkeypatch.setattr(mod, "STRIPE_PRICE_ID", "price_test_dummy")
+
+    data = {
+        "users": {},
+        "sessions": {"tok_ok": {"email": "pay@example.com", "created_at": 1}},
+        "trials": {},
+        "trial_domains": {},
+        "trial_emails": {},
+    }
+    data["users"]["pay@example.com"] = {
+        "email": "pay@example.com",
+        "name": "",
+        "salt": "x",
+        "password_hash": "y",
+        "created_at": 1,
+        "subscription": {},
+        "trial_until": 0,
+    }
+    mod._ensure_user_identity(data["users"]["pay@example.com"])
+    store.write_text(__import__("json").dumps(data), encoding="utf-8")
+
+    captured: dict = {}
+
+    class _FakeSession:
+        url = "https://checkout.stripe.com/c/pay/cs_test_fake"
+
+    class _FakeCheckoutSession:
+        @staticmethod
+        def create(**kwargs):
+            captured.update(kwargs)
+            return _FakeSession()
+
+    class _FakeCheckout:
+        Session = _FakeCheckoutSession
+
+    class _FakeStripe:
+        api_key = None
+        checkout = _FakeCheckout()
+
+    monkeypatch.setitem(__import__("sys").modules, "stripe", _FakeStripe)
+
+    res = client.post(
+        "/v1/checkout",
+        headers={"Authorization": "Bearer tok_ok"},
+        json={"trial": True, "quantity": 1},
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body.get("mode") == "stripe"
+    assert body.get("url") == _FakeSession.url
+    assert captured.get("managed_payments") == {"enabled": False}
+    assert captured.get("mode") == "subscription"

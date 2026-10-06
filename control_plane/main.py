@@ -616,6 +616,8 @@ def checkout(body: CheckoutBody = CheckoutBody(), authorization: str | None = He
             cancel_url=APP_PUBLIC_URL.rstrip("/") + "/?billing=cancel",
             client_reference_id=user["email"],
             metadata=meta,
+            # No tax collection yet — Managed Payments requires product tax_code.
+            managed_payments={"enabled": False},
         )
         customer_id = user.get("stripe_customer_id")
         if customer_id:
