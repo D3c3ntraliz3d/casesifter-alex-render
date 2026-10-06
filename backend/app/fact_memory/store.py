@@ -328,6 +328,8 @@ class FactMemoryStore:
             "scanned_at": doc.scanned_at.isoformat() if doc.scanned_at else None,
             "extractor_version": doc.extractor_version,
             "status": "complete",
+            "scan_job_id": doc.last_job_id,
+            "has_report": bool(doc.report_enc),
         }
 
     def list_prior_snapshots(
@@ -368,6 +370,34 @@ class FactMemoryStore:
                 snap["filed_date"] = doc.filed_date.isoformat() if doc.filed_date else None
                 out.append(snap)
             return out
+
+    def get_document_report(
+        self, firm_id: str, matter_id: str, document_id: str
+    ) -> dict[str, Any] | None:
+        with self.session() as s:
+            doc = s.execute(
+                select(Document).where(
+                    Document.id == document_id,
+                    Document.firm_id == firm_id,
+                    Document.matter_id == matter_id,
+                )
+            ).scalar_one_or_none()
+            if not doc or not doc.report_enc:
+                return None
+            fernet = self._fernet(s, firm_id)
+            return enc.decrypt_json(fernet, doc.report_enc)
+
+    def get_document(
+        self, firm_id: str, document_id: str
+    ) -> dict[str, Any] | None:
+        with self.session() as s:
+            doc = s.execute(
+                select(Document).where(Document.id == document_id, Document.firm_id == firm_id)
+            ).scalar_one_or_none()
+            if not doc:
+                return None
+            fernet = self._fernet(s, firm_id)
+            return self._document_dict(doc, fernet)
 
     def _facts_for_document(
         self, s: Session, fernet: Fernet, firm_id: str, document_id: str
@@ -415,6 +445,7 @@ class FactMemoryStore:
         extractor_version: str | None = None,
         user_id: str | None = None,
         force: bool = False,
+        report: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Persist document/entities/facts/run/findings. No PDF bytes."""
         with self.session() as s:
@@ -439,7 +470,10 @@ class FactMemoryStore:
                 )
             ).scalar_one_or_none()
             if existing and not force:
-                # Still record a run pointing at existing doc.
+                # Still record a run pointing at existing doc; refresh report if provided.
+                if report is not None:
+                    existing.report_enc = enc.encrypt_json(fernet, report)
+                    existing.last_job_id = job_id
                 run = Run(
                     id=_new_id(),
                     matter_id=matter_id,
@@ -478,6 +512,9 @@ class FactMemoryStore:
             doc.page_count = page_count
             doc.scanned_at = _utcnow()
             doc.extractor_version = extractor_version
+            doc.last_job_id = job_id
+            if report is not None:
+                doc.report_enc = enc.encrypt_json(fernet, report)
 
             # Cap excerpt for vault-compat priors (encrypted). Prefer empty if firm opts out of snippets.
             excerpt = (text_excerpt or "")[:24000] if store_snippets else ""

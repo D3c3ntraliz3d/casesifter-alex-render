@@ -24,7 +24,7 @@ def delete_job_files(job_id: str) -> bool:
     return True
 
 
-def maybe_delete_after_terminal(job_id: str) -> None:
+def maybe_delete_after_terminal(job_id: str, *, retain_report: bool = False) -> None:
     if not settings.ephemeral_jobs:
         return
     progress = load_progress(job_id)
@@ -34,14 +34,21 @@ def maybe_delete_after_terminal(job_id: str) -> None:
     if progress.status in {"complete", "failed"}:
         # Keep report available briefly for the client to fetch, then sweeper removes.
         # Immediate delete of *source* file only to shrink retention surface.
+        # SOURCE_FILE_RETENTION=immediate (product rule: never keep PDFs).
         _delete_source_bytes(job_id)
+        if retain_report:
+            # Persist firms: facts/report live in DB; keep report.json for reopen
+            # until explicitly purged — skip TTL sweep via persist.flag.
+            flag = job_dir(job_id) / "persist.flag"
+            if not flag.exists():
+                flag.write_text("1", encoding="utf-8")
 
 
 def _delete_source_bytes(job_id: str) -> None:
     root = job_dir(job_id)
     if not root.exists():
         return
-    skip = {"progress.json", "report.json", "report.html", "report.pdf"}
+    skip = {"progress.json", "report.json", "report.html", "report.pdf", "persist.flag"}
     for path in list(root.iterdir()):
         if path.name in skip:
             continue
@@ -55,7 +62,11 @@ def _delete_source_bytes(job_id: str) -> None:
 
 
 def sweep_stale_jobs() -> int:
-    """Delete job dirs older than TTL (complete/failed or abandoned)."""
+    """Delete job dirs older than TTL (complete/failed or abandoned).
+
+    Jobs with persist.flag are skipped — report TTL is dropped for persist firms;
+    source PDFs were already deleted immediately after the run.
+    """
     removed = 0
     root = settings.jobs_dir
     if not root.exists():
@@ -64,6 +75,8 @@ def sweep_stale_jobs() -> int:
     now = time.time()
     for child in root.iterdir():
         if not child.is_dir():
+            continue
+        if (child / "persist.flag").exists():
             continue
         try:
             age = now - child.stat().st_mtime

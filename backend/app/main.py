@@ -6,9 +6,12 @@ from app import cases_db
 from app.api import public_router, router
 from app.config import settings
 from app.ephemeral import ensure_sweeper
+from app.fact_memory.matters_api import matters_router
+from app.fact_memory.store import get_store
 from app.scan_watchdog import ensure_watchdog
 from app.sentry_scrub import init_sentry
 from app.v1_analysis import v1
+import os
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -43,9 +46,11 @@ app.add_middleware(
 if _mode == "analysis":
     app.include_router(public_router, prefix="/api")
     app.include_router(v1, prefix="/api")
+    app.include_router(matters_router, prefix="/api")
 else:
     app.include_router(router, prefix="/api")
     app.include_router(v1, prefix="/api")
+    app.include_router(matters_router, prefix="/api")
 
 
 init_sentry(service="analysis-api")
@@ -53,6 +58,11 @@ init_sentry(service="analysis-api")
 
 @app.on_event("startup")
 def _startup() -> None:
+    # Sync settings → env for fact_memory encryption / DATABASE_URL readers.
+    if settings.database_url and not os.environ.get("DATABASE_URL"):
+        os.environ["DATABASE_URL"] = settings.database_url
+    if settings.fact_memory_master_key and not os.environ.get("FACT_MEMORY_MASTER_KEY"):
+        os.environ["FACT_MEMORY_MASTER_KEY"] = settings.fact_memory_master_key
     # Do not refuse boot when keys are missing — vault stays unmounted.
     # Soft-launch: /api/v1 accepts ANALYSIS_API_KEYS or an active control-plane session.
     if _mode == "analysis" and not settings.analysis_api_key_set() and not settings.cloud_control_url:
@@ -61,6 +71,10 @@ def _startup() -> None:
             "/api/v1 will return 401."
         )
     cases_db.ensure_schema()
+    try:
+        get_store()  # init SQLite/Postgres fact memory schema
+    except Exception as exc:
+        logger.warning("Fact memory store init failed: %s", exc)
     ensure_sweeper()
     ensure_watchdog()
     if not settings.gemini_api_key:
@@ -80,6 +94,11 @@ def _startup() -> None:
             settings.gemini_model,
             _mode,
         )
+    logger.info(
+        "Fact memory: PERSIST_FACTS=%s SOURCE_FILE_RETENTION=%s",
+        settings.persist_facts,
+        settings.source_file_retention,
+    )
 
 
 @app.get("/")

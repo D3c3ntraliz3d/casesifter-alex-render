@@ -45,6 +45,8 @@ CREATE TABLE IF NOT EXISTS documents (
   scanned_at TIMESTAMPTZ,
   extractor_version TEXT,
   snapshot_enc TEXT,
+  report_enc TEXT,
+  last_job_id TEXT,
   UNIQUE (matter_id, sha256)
 );
 CREATE INDEX IF NOT EXISTS ix_documents_firm ON documents(firm_id);

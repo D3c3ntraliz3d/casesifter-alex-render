@@ -102,6 +102,9 @@ class Document(Base):
     extractor_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # Vault-compatible snapshot JSON (entities/facts/fingerprint) — encrypted blob.
     snapshot_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Full report JSON for reopen without job TTL (encrypted). No PDF bytes.
+    report_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_job_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     matter: Mapped["Matter"] = relationship(back_populates="documents")
     facts: Mapped[list["Fact"]] = relationship(back_populates="document", cascade="all, delete-orphan")

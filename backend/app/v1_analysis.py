@@ -1,4 +1,9 @@
-"""Public v1 analysis API for the thin desktop client (ephemeral jobs)."""
+"""Public v1 analysis API for the thin desktop client (ephemeral jobs).
+
+When matter_id is supplied and the firm has persist_facts, priors are loaded from
+fact memory, compare_to_case runs, facts/findings are persisted, and the source
+PDF is deleted immediately. Report TTL is skipped for persist firms.
+"""
 
 from __future__ import annotations
 
@@ -139,6 +144,26 @@ def _require_analysis_auth(
         raise HTTPException(402, str(exc)) from exc
 
 
+def resolve_firm_context(auth: dict) -> dict:
+    """Map session email (or API-key ops) → firm_id / user_id. 1:1 firm per account."""
+    from app.fact_memory.store import get_store
+
+    store = get_store()
+    email = (auth.get("email") or "").strip().lower()
+    if email:
+        return store.ensure_firm_for_email(email)
+    # API-key / local open mode: shared ops firm (still firm-scoped rows).
+    return store.ensure_firm_for_email("ops@casesifter.local", name="Ops / API key")
+
+
+def _should_persist(auth: dict, firm_ctx: dict | None) -> bool:
+    if not settings.persist_facts_enabled():
+        return False
+    if firm_ctx is None:
+        return False
+    return bool(firm_ctx.get("persist_facts", True))
+
+
 @v1.post("/jobs", response_model=UploadResponse)
 async def create_ephemeral_job(
     file: UploadFile = File(...),
@@ -146,6 +171,9 @@ async def create_ephemeral_job(
     display_name: str | None = Form(default=None),
     doc_kind: str | None = Form(default=None),
     peer_snapshots: str | None = Form(default=None),
+    matter_id: str | None = Form(default=None),
+    case_id: str | None = Form(default=None),  # alias for matter_id
+    filed_date: str | None = Form(default=None),
     _auth: dict = Depends(_require_analysis_auth),
 ):
     ensure_sweeper()
@@ -158,8 +186,6 @@ async def create_ephemeral_job(
 
     peers: list[dict] = []
     if peer_snapshots and peer_snapshots.strip():
-        import json
-
         try:
             raw = json.loads(peer_snapshots)
         except json.JSONDecodeError as exc:
@@ -167,6 +193,24 @@ async def create_ephemeral_job(
         if not isinstance(raw, list):
             raise HTTPException(400, "peer_snapshots must be a JSON list.")
         peers = [row for row in raw[:80] if isinstance(row, dict)]
+
+    resolved_matter = (matter_id or case_id or "").strip() or None
+    firm_ctx = None
+    persist = False
+    if resolved_matter:
+        firm_ctx = resolve_firm_context(_auth)
+        persist = _should_persist(_auth, firm_ctx)
+        from app.fact_memory.store import get_store
+
+        store = get_store()
+        matter = store.get_matter(firm_ctx["firm_id"], resolved_matter)
+        if not matter:
+            raise HTTPException(404, "Matter not found for this account.")
+        if persist:
+            priors = store.list_prior_snapshots(firm_ctx["firm_id"], resolved_matter)
+            # Prefer matter priors over client peer_snapshots when both present.
+            if priors:
+                peers = priors
 
     job_id = uuid.uuid4().hex
     dest_dir = job_dir(job_id)
@@ -188,10 +232,29 @@ async def create_ephemeral_job(
             handle.write(chunk)
 
     create_job(job_id, safe_name)
-    update_job(job_id, message="Queued for ephemeral analysis.")
+    update_job(
+        job_id,
+        message="Queued for analysis."
+        + (" Matter fact memory enabled." if persist else ""),
+    )
+    if persist:
+        # Marker so sweeper retains report (facts live in DB; PDF still deleted).
+        (dest_dir / "persist.flag").write_text(resolved_matter or "", encoding="utf-8")
+
     thread = threading.Thread(
         target=_run_ephemeral,
-        args=(job_id, dest, submitted_by, display_name, doc_kind, peers),
+        args=(
+            job_id,
+            dest,
+            submitted_by,
+            display_name,
+            doc_kind,
+            peers,
+            resolved_matter,
+            firm_ctx,
+            filed_date,
+            persist,
+        ),
         daemon=True,
         name=f"ephemeral-{job_id[:8]}",
     )
@@ -206,6 +269,10 @@ def _run_ephemeral(
     display_name: str | None,
     doc_kind: str | None,
     prior_snapshots: list[dict] | None = None,
+    matter_id: str | None = None,
+    firm_ctx: dict | None = None,
+    filed_date: str | None = None,
+    persist: bool = False,
 ) -> None:
     if not acquire_scan_slot(job_id, timeout=600):
         emit_scan_failed(
@@ -222,10 +289,10 @@ def _run_ephemeral(
             message="Scan queue timed out.",
             error="Another scan held the queue for too long.",
         )
-        maybe_delete_after_terminal(job_id)
+        maybe_delete_after_terminal(job_id, retain_report=persist)
         return
     try:
-        run_pipeline(
+        report = run_pipeline(
             job_id,
             dest,
             submitted_by=submitted_by,
@@ -233,6 +300,17 @@ def _run_ephemeral(
             doc_kind=doc_kind,
             prior_snapshots=prior_snapshots or None,
         )
+        if persist and matter_id and firm_ctx and report is not None:
+            _persist_pipeline_result(
+                job_id=job_id,
+                source=dest,
+                report=report,
+                matter_id=matter_id,
+                firm_ctx=firm_ctx,
+                display_name=display_name,
+                doc_kind=doc_kind,
+                filed_date=filed_date,
+            )
     except Exception as exc:
         emit_scan_failed(job_id=job_id, stage="failed", error_message=str(exc))
         update_job(
@@ -245,7 +323,72 @@ def _run_ephemeral(
         )
     finally:
         release_scan_slot(job_id)
-        maybe_delete_after_terminal(job_id)
+        maybe_delete_after_terminal(job_id, retain_report=persist)
+
+
+def _persist_pipeline_result(
+    *,
+    job_id: str,
+    source: Path,
+    report,
+    matter_id: str,
+    firm_ctx: dict,
+    display_name: str | None,
+    doc_kind: str | None,
+    filed_date: str | None,
+) -> None:
+    from app.fact_memory.store import get_store
+    from app.ingestion import sha256_file
+
+    store = get_store()
+    digest = ""
+    if source.exists():
+        digest = sha256_file(source)
+    elif report.audit and report.audit.sha256:
+        digest = report.audit.sha256
+    comparison = report.comparison or {}
+    facts = comparison.get("facts") or []
+    entities = comparison.get("entities") or {}
+    for mod in report.modules or []:
+        extras = getattr(mod, "extras", None) or {}
+        cc = extras.get("case_consistency") if isinstance(extras, dict) else None
+        if isinstance(cc, dict):
+            facts = facts or cc.get("facts") or []
+            break
+    page_count = len(report.page_dimensions or []) or None
+    finding_dicts = [f.model_dump(mode="json") for f in (report.findings or [])]
+    report_dict = report.model_dump(mode="json")
+    try:
+        result = store.persist_scan(
+            firm_id=firm_ctx["firm_id"],
+            matter_id=matter_id,
+            job_id=job_id,
+            sha256=digest,
+            original_filename=source.name,
+            display_name=display_name or source.name,
+            doc_type=doc_kind,
+            filed_date=filed_date,
+            page_count=page_count,
+            entities=entities if isinstance(entities, dict) else {},
+            facts=facts if isinstance(facts, list) else [],
+            findings=finding_dicts,
+            text_fingerprint=comparison.get("text_fingerprint"),
+            text_excerpt=(comparison.get("text_excerpt") or "")[:24000],
+            page_offsets=comparison.get("page_offsets"),
+            amounts=comparison.get("amounts"),
+            extractor_version=settings.app_version,
+            user_id=firm_ctx.get("user_id"),
+            report=report_dict,
+        )
+        logger.info(
+            "Persisted facts for matter=%s job=%s persisted=%s deduped=%s",
+            matter_id,
+            job_id,
+            result.get("persisted"),
+            result.get("deduped"),
+        )
+    except Exception:
+        logger.exception("Failed to persist fact memory for job %s", job_id)
 
 
 @v1.get("/jobs/{job_id}")
@@ -255,6 +398,14 @@ def get_ephemeral_job(job_id: str, _auth: dict = Depends(_require_analysis_auth)
         raise HTTPException(404, "Unknown or expired job.")
     payload = progress.model_dump(mode="json")
     payload["ephemeral"] = True
+    persist_flag = job_dir(job_id) / "persist.flag"
+    if persist_flag.exists():
+        payload["ephemeral"] = False
+        payload["persist_facts"] = True
+        try:
+            payload["matter_id"] = persist_flag.read_text(encoding="utf-8").strip() or None
+        except OSError:
+            payload["matter_id"] = None
     if progress.status == "complete":
         report = load_report(job_id)
         payload["report"] = report.model_dump(mode="json") if report else None
@@ -289,7 +440,6 @@ def ephemeral_case_chat(
 ):
     """Answer from client-supplied excerpts only — request-scoped, no document vault."""
     docs = [item.model_dump() for item in body.documents]
-    # Cap total excerpt payload.
     total = sum(len(d.get("text_excerpt") or "") for d in docs)
     if total > 600_000:
         raise HTTPException(413, "Excerpt packet too large. Rescan fewer documents or shorten excerpts.")
@@ -321,12 +471,7 @@ def ephemeral_fact_conflicts(
     body: FactConflictPacketBody,
     _auth: dict = Depends(_require_analysis_auth),
 ):
-    """Case-level labeled-fact conflicts from a desktop report packet (no vault).
-
-    Ephemeral /v1/jobs scans omit case_id, so occupancy_start and peers never
-    enter compare_to_case at scan time. The thin client posts cached
-    comparison.facts / text_excerpt here to rebuild the case board.
-    """
+    """Case-level labeled-fact conflicts from a desktop report packet (no vault)."""
     from app.case_consistency import fact_conflicts_from_packet
 
     docs = [item.model_dump() for item in body.documents]

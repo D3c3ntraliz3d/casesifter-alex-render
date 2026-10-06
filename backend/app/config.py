@@ -77,6 +77,13 @@ class Settings(BaseSettings):
     ocr_max_pages: int = 40
     ocr_sparse_char_threshold: int = 80
 
+    # Persistent per-matter fact memory (no PDF retention).
+    # SOURCE_FILE_RETENTION=immediate keeps current delete-after-run behavior.
+    source_file_retention: str = "immediate"
+    persist_facts: bool = True  # global default; per-firm firms.persist_facts can opt out
+    database_url: str | None = None  # Postgres in prod; SQLite fallback when unset
+    fact_memory_master_key: str | None = None  # wraps per-firm Fernet keys
+
     # Scan watchdog: fail + release slot when a running job goes silent or runs too long.
     scan_stall_seconds: int = 420  # 7 minutes with no progress update
     scan_max_seconds: int = 1080  # 18 minutes wall-clock once running
@@ -92,6 +99,9 @@ class Settings(BaseSettings):
     # Separate Gemini vision pass for logo/chrome. On by default — strongest
     # upperhand lane for wrong-era / template chrome on consumer statements.
     logo_chrome_pass: bool = True
+
+    def persist_facts_enabled(self) -> bool:
+        return bool(self.persist_facts)
 
     @property
     def jobs_dir(self) -> Path:
