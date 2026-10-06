@@ -20,6 +20,7 @@ import {
   logoutCloud,
   openCheckoutUrl,
   reportProblem,
+  signupCloud,
   startCheckout,
   openBillingPortal,
   patchDocument,
@@ -100,18 +101,6 @@ const COURT_FILING_KINDS = new Set([
   "memorandum", "reply", "opposition", "filing", "proof_of_service",
   "rji", "notice_of_pendency", "calendar",
 ]);
-
-/** Marketing signup — prefer apex; onrender marketing is the fallback. */
-const MARKETING_SIGNUP_URL = "https://casesifter.com/signup.html";
-const MARKETING_SIGNUP_FALLBACK = "https://casesifter-marketing.onrender.com/signup.html";
-
-function marketingSignupUrl() {
-  return MARKETING_SIGNUP_URL || MARKETING_SIGNUP_FALLBACK;
-}
-
-function goToMarketingSignup() {
-  window.location.href = marketingSignupUrl();
-}
 
 function profileForKind(kind) {
   if (!kind) {
@@ -561,7 +550,8 @@ export default function App() {
 
   async function handleNewCaseIntent() {
     if (!signedIn) {
-      goToMarketingSignup();
+      setError("");
+      setView("account");
       return false;
     }
     if (!canCreateCase) {
@@ -2495,6 +2485,9 @@ const PLAN_SUMMARY = (
 function AccountPanel({ entitlement, onRefresh, onError }) {
   const [email, setEmail] = useState(() => entitlement?.email || "");
   const [password, setPassword] = useState("");
+  const [name, setName] = useState("");
+  const [inviteCode, setInviteCode] = useState("");
+  const [acceptedTerms, setAcceptedTerms] = useState(false);
   const [license, setLicense] = useState("");
   const [problemNote, setProblemNote] = useState("");
   const [showTerms, setShowTerms] = useState(false);
@@ -2538,6 +2531,31 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
       onError(session.message || "Trial updated (Stripe not configured).");
     }
     await onRefresh();
+  }
+
+  async function startTrialSignedOut() {
+    if (!email || !email.includes("@")) throw new Error("Enter a valid work email.");
+    if (!password || password.length < 6) throw new Error("Password must be at least 6 characters.");
+    if (!acceptedTerms) {
+      throw new Error("Agree to the Terms of Service and Privacy Policy to continue.");
+    }
+    try {
+      await signupCloud(email, password, name.trim() || null, true, inviteCode.trim() || null);
+    } catch (err) {
+      const msg = String(err?.message || "");
+      if (/already exists/i.test(msg)) {
+        try {
+          await loginCloud(email, password);
+        } catch {
+          throw new Error(
+            "That email already has an account, but the password did not match. Sign in with the correct password, then start your trial.",
+          );
+        }
+      } else {
+        throw err;
+      }
+    }
+    await openCheckoutTrial();
   }
 
   async function manageBilling() {
@@ -2718,12 +2736,23 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
           }}
         >
           <label>
+            Name <span className="field-optional">(optional)</span>
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              autoComplete="name"
+              placeholder="Your name"
+            />
+          </label>
+          <label>
             Email
             <input
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               required
+              autoComplete="email"
               placeholder={entitlement.email || "you@firm.com"}
             />
           </label>
@@ -2735,29 +2764,66 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
               onChange={(e) => setPassword(e.target.value)}
               required
               minLength={6}
+              autoComplete="current-password"
+            />
+          </label>
+          <label>
+            Invite code <span className="field-optional">(optional)</span>
+            <input
+              type="text"
+              value={inviteCode}
+              onChange={(e) => setInviteCode(e.target.value)}
+              autoComplete="off"
+              placeholder="Leave blank unless your firm sent one"
             />
           </label>
 
+          <div className="terms-row">
+            <input
+              id="account-accepted-terms"
+              type="checkbox"
+              checked={acceptedTerms}
+              onChange={(e) => setAcceptedTerms(e.target.checked)}
+            />
+            <label htmlFor="account-accepted-terms">
+              I agree to the{" "}
+              <button
+                type="button"
+                className="linkish"
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setShowTerms(true);
+                }}
+              >
+                Terms of Service and Privacy Policy
+              </button>
+              .
+            </label>
+          </div>
+
           <p className="plan-summary">
-            {PLAN_SUMMARY} New accounts sign up on the marketing site, then continue to Checkout.
+            {PLAN_SUMMARY} Sign in if you already have an account, or start a 14-day free trial (card required).
           </p>
 
           <div className="actions">
             <button className="btn" type="submit" disabled={busy}>
               {working === "login" ? "Signing in…" : "Sign in"}
             </button>
-            <a className="btn gold" href={marketingSignupUrl()}>
-              Create account
-            </a>
+            <button
+              className="btn gold"
+              type="button"
+              disabled={busy}
+              onClick={() => guard("trial", () => startTrialSignedOut())}
+            >
+              {working === "trial" ? "Opening checkout…" : "Start a 14-day free trial"}
+            </button>
           </div>
           <p className="footnote">
             {isDesktopApp()
-              ? "Files stay on this PC. Analysis runs remotely and is deleted after the report is saved."
-              : "No account yet? Create one on casesifter.com, then return here to sign in."}
+              ? "Files stay on this PC. Analysis runs remotely and is deleted after the report is saved. Start trial opens Stripe Checkout (card required)."
+              : "Start a 14-day free trial creates your account and opens Stripe Checkout (card required). CaseSifter never sees your card number."}
           </p>
-          <button type="button" className="linkish" style={{ marginTop: 8 }} onClick={() => setShowTerms(true)}>
-            Terms of Service and Privacy Policy
-          </button>
         </form>
       )}
 

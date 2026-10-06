@@ -948,7 +948,23 @@ table.data.docs .doc-actions .btn {
   font-size: 13px;
   color: var(--muted);
 }
-.terms-row input { margin-top: 3px; }
+.terms-row input[type="checkbox"] {
+  margin-top: 3px;
+  width: auto;
+  padding: 0;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+.terms-row label {
+  display: block;
+  font-size: inherit;
+  color: inherit;
+  font-weight: 400;
+}
+.field-optional {
+  font-weight: 400;
+  opacity: 0.75;
+}
 
 .modal-overlay {
   position: fixed;

@@ -63,9 +63,10 @@ Clear 403 copy: *“A trial was already started for this company email domain…
 
 ## New case gate (app)
 
-- Logged out → **New case** sends the browser to `https://casesifter.com/signup.html`.
+- Logged out → **New case** opens **Account** (Sign in or Start a 14-day free trial → Stripe Checkout).
 - Signed in with `billing_state` in `none` / `canceled` / `past_due` → Account (and Checkout trial when `none`).
 - `active` / `trialing` → normal create-case flow.
+- Marketing `signup.html` still works (session handoff `?cs_token=` + `?checkout=trial`); Account can also signup+checkout standalone.
 
 ## Pricing (match Account UI)
 
@@ -140,8 +141,8 @@ Optional (already set in Blueprint): `CASESIFTER_TRIAL_DAYS=14`, `CASESIFTER_INV
 
 ### G. End-to-end Account path
 
-1. Sign up on `https://casesifter.com/signup.html` → **Continue to checkout** → app with `?checkout=trial`.
-2. Or open `https://casesifter-app.onrender.com` → **Account** → Sign in → **Start free trial** → Stripe Checkout (1 seat, card + 14-day trial).
+1. Open `https://casesifter-app.onrender.com` → **Account** → fill email/password/terms → **Start a 14-day free trial** → Stripe Checkout (1 seat, card + 14-day trial).
+2. Or sign up on `https://casesifter.com/signup.html` → **Continue to checkout** → app with `?checkout=trial` (marketing handoff still supported).
 3. Complete Checkout with a [test card](https://docs.stripe.com/testing#cards) (`4242…`) in test mode.
 4. Success redirect: `https://casesifter-app.onrender.com/?billing=success`
 5. Header badge: **Trial · N days left**; Account shows **Manage billing** + Sign out only (no dual trial/subscribe).
