@@ -22,8 +22,8 @@ Set on Render: `STRIPE_PRICE_ID=price_1UMIUnD6sOleRtjBjVbHzMdP`.
 
 | Button (Account) | Body | Dev behavior |
 |---|---|---|
-| **Start 14-day trial** | `{ "trial": true, "quantity": N }` | Sets `trial_until` locally; message: `Stripe not configured — trial started without a card (local/dev).` |
-| **Subscribe now** | `{ "trial": false, "quantity": N }` | Marks `subscription.status=active`, `plan=pro-dev`, `seats=N` for ~30 days; message: `Stripe not configured — marked Pro for local/dev.` |
+| **Start free trial** | `{ "trial": true, "quantity": 1 }` | Sets `trial_until` locally; message: `Stripe not configured — trial started without a card (local/dev).` |
+| (no “Subscribe now” for entitled users) | `{ "trial": false, "quantity": N }` | Marks `subscription.status=active`, `plan=pro-dev`, `seats=N` for ~30 days (dev only). |
 
 UI shows that message as the red Account banner and **does not open** a Checkout tab (`url` is `null`, `mode` is `"dev"`).
 
@@ -32,9 +32,44 @@ When Stripe **is** configured:
 - Checkout returns `{ "mode": "stripe", "url": "https://checkout.stripe.com/…" }` (card collected; trial uses `subscription_data.trial_period_days`).
 - **Manage billing** (when `has_billing_portal`) opens the **Stripe Customer Portal** via `POST /v1/billing-portal` — not a new Checkout session.
 
+## Entitlement fields
+
+`GET /v1/entitlement` (and signup/login payloads) include:
+
+| Field | Values / meaning |
+|---|---|
+| `billing_state` | `none` \| `trialing` \| `active` \| `past_due` \| `canceled` |
+| `trial_days_left` | ceil days remaining while `trialing` (local `trial_until` or Stripe `trial_end`) |
+| `has_billing_portal` | true when `stripe_customer_id` exists |
+| `active` / `plan` / `seats` | unchanged |
+
+App UI: header shows **Trial · N days left** while trialing; Account CTAs follow `billing_state` (Start free trial when `none`; Manage billing + Sign out when trialing/active).
+
+## Domain trial limit
+
+Stored in `accounts.json`:
+
+- `trial_domains`: `domain → { email, started_at, user_id }` for **corporate** domains
+- `trial_emails`: `email → { … }` for **free consumer** providers (gmail, outlook, yahoo, icloud, proton, etc.)
+
+Rules:
+
+- Corporate: **one trial per email domain** (blocks `a@firm.com` then `b@firm.com`).
+- Free providers: **one trial per email address**.
+- Claim is recorded on successful `checkout.session.completed` / first `trialing` (abandoned Checkout does not burn the slot).
+- `POST /v1/checkout` with `trial=true` still **403**s if the domain/email is already claimed or another account on that corporate domain is already `trialing`/`active`.
+
+Clear 403 copy: *“A trial was already started for this company email domain…”* (or the per-email variant for free mail).
+
+## New case gate (app)
+
+- Logged out → **New case** sends the browser to `https://casesifter.com/signup.html`.
+- Signed in with `billing_state` in `none` / `canceled` / `past_due` → Account (and Checkout trial when `none`).
+- `active` / `trialing` → normal create-case flow.
+
 ## Pricing (match Account UI)
 
-**$79/seat/month.** Checkout line-item quantity = seats (1–50). Account seat picker defaults to 1.
+**$79/seat/month.** Checkout line-item quantity = seats (1–50). Soft-launch trial Checkout defaults to **1 seat**.
 
 ---
 
@@ -95,7 +130,7 @@ Optional (already set in Blueprint): `CASESIFTER_TRIAL_DAYS=14`, `CASESIFTER_INV
 
 ### F. Redeploy + health
 
-1. After saving env vars: **Manual Deploy** (or wait for auto-redeploy) on `casesifter-control`.
+1. After saving env vars: **Manual Deploy** (or wait for auto-redeploy) on `casesifter-control` **and** `casesifter-app` (trial UX / New case gate). Redeploy marketing if you want the **Continue to checkout** CTA.
 2. Verify:
    ```bash
    curl -sS https://casesifter-control.onrender.com/health
@@ -105,13 +140,13 @@ Optional (already set in Blueprint): `CASESIFTER_TRIAL_DAYS=14`, `CASESIFTER_INV
 
 ### G. End-to-end Account path
 
-1. Open `https://casesifter-app.onrender.com` → **Account** → Sign in.
-2. Set seats (default 1) → **Start 14-day trial** → Stripe Checkout with quantity.
+1. Sign up on `https://casesifter.com/signup.html` → **Continue to checkout** → app with `?checkout=trial`.
+2. Or open `https://casesifter-app.onrender.com` → **Account** → Sign in → **Start free trial** → Stripe Checkout (1 seat, card + 14-day trial).
 3. Complete Checkout with a [test card](https://docs.stripe.com/testing#cards) (`4242…`) in test mode.
 4. Success redirect: `https://casesifter-app.onrender.com/?billing=success`
-5. Cancel path: `…/?billing=cancel`
-6. Account entitlement: active, `seats` matches Checkout quantity, `has_billing_portal` true.
-7. **Manage billing** → Customer Portal (change quantity → webhook syncs seats; cancel → access revoked).
+5. Header badge: **Trial · N days left**; Account shows **Manage billing** + Sign out only (no dual trial/subscribe).
+6. **Manage billing** → Customer Portal.
+7. Second corporate signup on the same domain → trial Checkout **403**.
 8. Confirm Stripe Dashboard → Webhooks → recent deliveries **200**.
 
 ### H. Go live (after soft-launch verify)
@@ -127,12 +162,12 @@ Optional (already set in Blueprint): `CASESIFTER_TRIAL_DAYS=14`, `CASESIFTER_INV
 
 | Endpoint | Role |
 |---|---|
-| `POST /v1/checkout` | Hosted Checkout; body `{ trial, quantity }` (quantity 1–50); reuses `stripe_customer_id` when present |
+| `POST /v1/checkout` | Hosted Checkout; body `{ trial, quantity }` (quantity 1–50); reuses `stripe_customer_id` when present; trial respects domain/email limit |
 | `POST /v1/billing-portal` | Customer Portal session; **400** if no `stripe_customer_id` yet |
-| `POST /v1/webhooks/stripe` | Entitlement sync (customer/sub ids, seats, status, period end; `invoice.payment_failed` → `past_due`) |
-| `GET /v1/entitlement` | Includes `seats`, `has_billing_portal` |
+| `POST /v1/webhooks/stripe` | Entitlement sync + trial domain/email claim on first trialing |
+| `GET /v1/entitlement` | Includes `billing_state`, `trial_days_left`, `seats`, `has_billing_portal` |
 
-Persisted on the user record (JSON store): `stripe_customer_id`, `subscription.stripe_subscription_id` (`sub_…`, never Checkout `cs_…`), `subscription.seats`, status, period end.
+Persisted on the user record (JSON store): `stripe_customer_id`, `subscription.stripe_subscription_id` (`sub_…`, never Checkout `cs_…`), `subscription.seats`, status, period end, optional `trial_end`. Store-level: `trial_domains`, `trial_emails`.
 
 Success/cancel URLs:
 
@@ -147,6 +182,7 @@ Portal return URL: `{CASESIFTER_PUBLIC_URL}`
 | Env keys | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_ID`, `CASESIFTER_PUBLIC_URL` |
 | Health `stripe` flag | `bool(STRIPE_SECRET and STRIPE_PRICE_ID)` |
 | Checkout + seats + trial | `POST /v1/checkout` |
+| Domain trial limit | `trial_domains` / `trial_emails` in `accounts.json` |
 | Customer Portal | `POST /v1/billing-portal` |
 | Webhook events | `POST /v1/webhooks/stripe` |
 | Blueprint secrets | `render.yaml` → `casesifter-control` |

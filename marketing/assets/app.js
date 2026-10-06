@@ -39,14 +39,15 @@ function showFormStatus(el, message, { error = false } = {}) {
   }
 }
 
-async function preferAppDomainWhenLive(openApp) {
+async function preferAppDomainWhenLive(openApp, { checkoutTrial = false } = {}) {
   if (!openApp) return;
-  openApp.href = APP_URL_DEFAULT;
+  const suffix = checkoutTrial ? "/?checkout=trial" : "";
+  openApp.href = `${APP_URL_DEFAULT}${suffix}`;
   try {
     await fetch(APP_URL_PREFERRED, { method: "HEAD", mode: "no-cors" });
-    openApp.href = APP_URL_PREFERRED;
+    openApp.href = `${APP_URL_PREFERRED}${suffix}`;
   } catch {
-    openApp.href = APP_URL_DEFAULT;
+    openApp.href = `${APP_URL_DEFAULT}${suffix}`;
   }
 }
 
@@ -59,7 +60,7 @@ async function wireSignup() {
   const success = document.getElementById("signup-success");
   const openApp = document.getElementById("open-app");
   if (openApp) {
-    openApp.href = APP_URL_DEFAULT;
+    openApp.href = `${APP_URL_DEFAULT}/?checkout=trial`;
   }
 
   form.addEventListener("submit", async (e) => {
@@ -149,8 +150,8 @@ async function wireSignup() {
       form.hidden = true;
       showFormStatus(status, "");
       if (success) success.hidden = false;
-      // Default CTA is onrender; upgrade to app.casesifter.com only when it resolves.
-      await preferAppDomainWhenLive(openApp);
+      // Default CTA opens Checkout trial on the app; upgrade hostname when DNS resolves.
+      await preferAppDomainWhenLive(openApp, { checkoutTrial: true });
     } catch {
       showFormStatus(
         status,

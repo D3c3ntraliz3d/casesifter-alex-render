@@ -17,7 +17,6 @@ import {
   listCases,
   loginCloud,
   logoutCloud,
-  signupCloud,
   reportProblem,
   startCheckout,
   openBillingPortal,
@@ -100,6 +99,18 @@ const COURT_FILING_KINDS = new Set([
   "memorandum", "reply", "opposition", "filing", "proof_of_service",
   "rji", "notice_of_pendency", "calendar",
 ]);
+
+/** Marketing signup — prefer apex; onrender marketing is the fallback. */
+const MARKETING_SIGNUP_URL = "https://casesifter.com/signup.html";
+const MARKETING_SIGNUP_FALLBACK = "https://casesifter-marketing.onrender.com/signup.html";
+
+function marketingSignupUrl() {
+  return MARKETING_SIGNUP_URL || MARKETING_SIGNUP_FALLBACK;
+}
+
+function goToMarketingSignup() {
+  window.location.href = marketingSignupUrl();
+}
 
 function profileForKind(kind) {
   if (!kind) {
@@ -245,6 +256,7 @@ export default function App() {
   const [entitlement, setEntitlement] = useState(null);
   const [busy, setBusy] = useState(false);
   const [query, setQuery] = useState("");
+  const checkoutTrialStarted = useRef(false);
 
   async function refreshCases() {
     const rows = await listCases();
@@ -278,6 +290,43 @@ export default function App() {
     });
     refreshEntitlement();
   }, []);
+
+  // Post-signup: ?checkout=trial → start Stripe Checkout once when billing_state is none.
+  useEffect(() => {
+    if (!entitlement) return;
+    if (checkoutTrialStarted.current) return;
+    const signedIn = Boolean(entitlement.hasSession || entitlement.email);
+    if (!signedIn) return;
+    if ((entitlement.billing_state || "none") !== "none") return;
+    let params;
+    try {
+      params = new URLSearchParams(window.location.search || "");
+    } catch {
+      return;
+    }
+    if (params.get("checkout") !== "trial") return;
+    checkoutTrialStarted.current = true;
+    params.delete("checkout");
+    const next = `${window.location.pathname}${params.toString() ? `?${params}` : ""}${window.location.hash || ""}`;
+    window.history.replaceState({}, "", next);
+    (async () => {
+      setError("");
+      try {
+        const session = await startCheckout(true, 1);
+        if (session?.url) {
+          window.location.href = session.url;
+          return;
+        }
+        if (session?.mode === "dev") {
+          setError(session.message || "Trial updated (Stripe not configured).");
+        }
+        await refreshEntitlement();
+      } catch (err) {
+        setError(err.message || "Could not start checkout.");
+        setView("account");
+      }
+    })();
+  }, [entitlement]);
 
   // Desktop: refresh while any doc is queued/scanning so status flips show up.
   useEffect(() => {
@@ -502,6 +551,99 @@ export default function App() {
     }
   }
 
+  const billingState = entitlement?.billing_state || (entitlement?.active ? "active" : "none");
+  const signedIn = Boolean(entitlement?.hasSession || entitlement?.email);
+  const canCreateCase = billingState === "active" || billingState === "trialing";
+
+  async function handleNewCaseIntent() {
+    if (!signedIn) {
+      goToMarketingSignup();
+      return false;
+    }
+    if (!canCreateCase) {
+      setError("");
+      setView("account");
+      if (billingState === "none") {
+        try {
+          const session = await startCheckout(true, 1);
+          if (session?.url) {
+            window.open(session.url, "_blank", "noopener,noreferrer");
+          } else if (session?.mode === "dev") {
+            setError(session.message || "Trial updated (Stripe not configured).");
+            await refreshEntitlement();
+          }
+        } catch (err) {
+          setError(err.message || "Could not start checkout.");
+        }
+      }
+      return false;
+    }
+    return true;
+  }
+
+  function planBadge() {
+    if (!entitlement) {
+      return <span className="status-dot">…</span>;
+    }
+    if (billingState === "trialing" && entitlement.trial_days_left != null) {
+      const n = entitlement.trial_days_left;
+      return (
+        <span className="status-dot live">
+          Trial · {n} day{n === 1 ? "" : "s"} left
+        </span>
+      );
+    }
+    if (signedIn && billingState === "none") {
+      return (
+        <button
+          type="button"
+          className="status-dot clickable"
+          onClick={() => {
+            setError("");
+            refreshEntitlement();
+            setView("account");
+          }}
+        >
+          Start trial
+        </button>
+      );
+    }
+    if (entitlement.active) {
+      return (
+        <span className={`status-dot live`}>
+          {entitlement.plan || "Active"}
+        </span>
+      );
+    }
+    if (!signedIn) {
+      return (
+        <button
+          type="button"
+          className="status-dot clickable"
+          onClick={() => {
+            setError("");
+            setView("account");
+          }}
+        >
+          Sign in
+        </button>
+      );
+    }
+    return (
+      <button
+        type="button"
+        className="status-dot clickable"
+        onClick={() => {
+          setError("");
+          refreshEntitlement();
+          setView("account");
+        }}
+      >
+        {billingState === "past_due" ? "Past due" : "No active plan"}
+      </button>
+    );
+  }
+
   return (
     <div className="app">
       <header className="masthead">
@@ -560,9 +702,7 @@ export default function App() {
           >
             Account
           </button>
-          <span className={`status-dot ${entitlement?.active ? "live" : ""}`}>
-            {entitlement?.active ? (entitlement.plan || "Active") : "No active plan"}
-          </span>
+          {planBadge()}
         </nav>
       </header>
 
@@ -576,6 +716,7 @@ export default function App() {
           archivedCount={archivedCases.length}
           query={query}
           busy={busy}
+          onRequestNewCase={handleNewCaseIntent}
           onCreate={async (payload) => {
             setBusy(true);
             setError("");
@@ -671,6 +812,7 @@ function CasesPage({
   archivedCount,
   query,
   busy,
+  onRequestNewCase,
   onCreate,
   onOpen,
   onArchive,
@@ -722,6 +864,14 @@ function CasesPage({
   const allOpenSelected = cases.length > 0 && cases.every((c) => selectedOpen.has(c.id));
   const allArchivedSelected = archived.length > 0 && archived.every((c) => selectedArchived.has(c.id));
 
+  async function openNewCaseForm() {
+    if (onRequestNewCase) {
+      const ok = await onRequestNewCase();
+      if (!ok) return;
+    }
+    setShowNew(true);
+  }
+
   return (
     <>
       <div className="page-head">
@@ -737,7 +887,17 @@ function CasesPage({
             {archivedCount ? ` · ${archivedCount} archived` : ""}
           </p>
         </div>
-        <button className="btn gold" type="button" onClick={() => setShowNew((v) => !v)}>
+        <button
+          className="btn gold"
+          type="button"
+          onClick={() => {
+            if (showNew) {
+              setShowNew(false);
+              return;
+            }
+            openNewCaseForm();
+          }}
+        >
           {showNew ? "Cancel" : "New case"}
         </button>
       </div>
@@ -793,7 +953,7 @@ function CasesPage({
             {totalCount === 0 && (
               <>
                 <p className="footnote">Create a case, add filings, and CaseSifter flags what needs a look.</p>
-                <button className="btn gold" type="button" onClick={() => setShowNew(true)}>
+                <button className="btn gold" type="button" onClick={() => openNewCaseForm()}>
                   New case
                 </button>
               </>
@@ -2323,21 +2483,17 @@ function CaseRiskSummary({ byRisk, pendingCount, onOpenReport }) {
 
 const PLAN_SUMMARY = (
   <>
-    <strong>$79/seat/month</strong>. Month-to-month, cancel anytime. Choose seats before checkout; change quantity later in Manage billing.
+    <strong>$79/seat/month</strong>. Month-to-month, cancel anytime. A free trial collects a card up front and converts to paid after 14 days unless you cancel.
   </>
 );
 
 function AccountPanel({ entitlement, onRefresh, onError }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [name, setName] = useState("");
   const [license, setLicense] = useState("");
-  const [acceptedTerms, setAcceptedTerms] = useState(false);
-  const [inviteCode, setInviteCode] = useState("");
   const [problemNote, setProblemNote] = useState("");
   const [showTerms, setShowTerms] = useState(false);
   const [working, setWorking] = useState("");
-  const [seatQty, setSeatQty] = useState(1);
 
   if (!entitlement) {
     return <div className="card"><p>Loading account status…</p></div>;
@@ -2345,7 +2501,8 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
 
   const signedIn = Boolean(entitlement.hasSession || entitlement.email);
   const busy = Boolean(working);
-  const seats = Math.min(50, Math.max(1, Number(seatQty) || 1));
+  const billingState = entitlement.billing_state
+    || (entitlement.active ? (entitlement.plan === "trial" ? "trialing" : "active") : "none");
 
   async function guard(action, fn) {
     setWorking(action);
@@ -2359,27 +2516,38 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
     }
   }
 
-  async function openCheckout(trial) {
-    const session = await startCheckout(trial, seats);
+  async function openCheckoutTrial() {
+    const session = await startCheckout(true, 1);
     if (session?.url) {
       window.open(session.url, "_blank", "noopener,noreferrer");
     } else if (session?.mode === "dev") {
-      // Stripe not configured — control plane already applied local trial/sub.
       onError(session.message || "Trial updated (Stripe not configured).");
     }
     await onRefresh();
   }
 
   async function manageBilling() {
-    if (entitlement.has_billing_portal) {
-      const session = await openBillingPortal();
-      if (session?.url) {
-        window.open(session.url, "_blank", "noopener,noreferrer");
-        return;
-      }
-      throw new Error(session?.message || "Could not open billing portal.");
+    if (!entitlement.has_billing_portal) {
+      throw new Error("No Stripe customer yet — start a free trial first.");
     }
-    await openCheckout(false);
+    const session = await openBillingPortal();
+    if (session?.url) {
+      window.open(session.url, "_blank", "noopener,noreferrer");
+      return;
+    }
+    throw new Error(session?.message || "Could not open billing portal.");
+  }
+
+  function statusLine() {
+    if (billingState === "trialing" && entitlement.trial_days_left != null) {
+      const n = entitlement.trial_days_left;
+      return `Trial · ${n} day${n === 1 ? "" : "s"} left`;
+    }
+    if (billingState === "active") return "Subscription active";
+    if (billingState === "past_due") return "Payment past due";
+    if (billingState === "canceled") return "Subscription canceled";
+    if (billingState === "trialing") return "Trial active";
+    return entitlement.active ? "Scans unlocked" : "Scans locked";
   }
 
   return (
@@ -2389,7 +2557,7 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
       <p>
         Mode: <strong>{entitlement.mode}</strong>
         {" · "}
-        {entitlement.active ? "Scans unlocked" : "Scans locked"}
+        {statusLine()}
         {signedIn ? ` · ${entitlement.email}` : ""}
         {entitlement.seats != null ? ` · ${entitlement.seats} seat${entitlement.seats === 1 ? "" : "s"}` : ""}
       </p>
@@ -2478,44 +2646,42 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
       {entitlement.mode === "cloud" && signedIn && (
         <div className="case-form">
           <p className="plan-summary">{PLAN_SUMMARY}</p>
-          {(!entitlement.active || !entitlement.has_billing_portal) && (
-            <label>
-              Seats
-              <input
-                type="number"
-                min={1}
-                max={50}
-                step={1}
-                value={seats}
-                onChange={(e) => setSeatQty(e.target.value)}
-              />
-            </label>
+          {billingState === "past_due" && (
+            <p className="footnote" style={{ color: "var(--red)", marginTop: 8 }}>
+              Your payment is past due. Update your card in Manage billing to restore scans.
+            </p>
           )}
           <div className="actions">
-            {!entitlement.active && (
+            {billingState === "none" && (
               <button
                 className="btn gold"
                 type="button"
                 disabled={busy}
-                onClick={() => guard("trial", () => openCheckout(true))}
+                onClick={() => guard("trial", () => openCheckoutTrial())}
               >
-                {working === "trial" ? "Opening checkout…" : "Start 14-day trial"}
+                {working === "trial" ? "Opening checkout…" : "Start free trial"}
               </button>
             )}
-            <button
-              className="btn secondary"
-              type="button"
-              disabled={busy}
-              onClick={() => guard("subscribe", () => (
-                entitlement.has_billing_portal ? manageBilling() : openCheckout(false)
-              ))}
-            >
-              {working === "subscribe"
-                ? (entitlement.has_billing_portal ? "Opening portal…" : "Opening checkout…")
-                : entitlement.has_billing_portal
-                  ? "Manage billing"
-                  : "Subscribe now"}
-            </button>
+            {(billingState === "canceled") && (
+              <button
+                className="btn gold"
+                type="button"
+                disabled={busy}
+                onClick={() => guard("trial", () => openCheckoutTrial())}
+              >
+                {working === "trial" ? "Opening checkout…" : "Start free trial"}
+              </button>
+            )}
+            {(billingState === "trialing" || billingState === "active" || billingState === "past_due") && (
+              <button
+                className="btn secondary"
+                type="button"
+                disabled={busy || !entitlement.has_billing_portal}
+                onClick={() => guard("billing", () => manageBilling())}
+              >
+                {working === "billing" ? "Opening portal…" : "Manage billing"}
+              </button>
+            )}
             <button
               className="btn secondary"
               type="button"
@@ -2529,8 +2695,10 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
             </button>
           </div>
           <p className="footnote">
-            Trials and new subscriptions use Stripe Checkout; Manage billing opens the Customer Portal when
-            available. CaseSifter never sees or stores your card number.{" "}
+            {billingState === "none" || billingState === "canceled"
+              ? "Start free trial opens Stripe Checkout (card + 14-day trial). CaseSifter never sees your card number."
+              : "Manage billing opens the Stripe Customer Portal. CaseSifter never sees or stores your card number."}
+            {" "}
             {isDesktopApp()
               ? "Files stay on this PC; analysis runs remotely and is deleted after the report is saved."
               : "Analysis runs ephemerally in the cloud — we do not keep a document vault."}
@@ -2552,10 +2720,6 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
           }}
         >
           <label>
-            Full name
-            <input value={name} onChange={(e) => setName(e.target.value)} placeholder="For your account and receipts" />
-          </label>
-          <label>
             Email
             <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
           </label>
@@ -2569,73 +2733,27 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
               minLength={6}
             />
           </label>
-          <label>
-            Invite code (beta)
-            <input
-              value={inviteCode}
-              onChange={(e) => setInviteCode(e.target.value)}
-              placeholder="Required when beta invites are enabled"
-              autoComplete="off"
-            />
-          </label>
 
           <p className="plan-summary">
-            {PLAN_SUMMARY} A 14-day trial requires a card up front but you won’t be charged unless it converts —
-            cancel any time before the trial ends.
+            {PLAN_SUMMARY} New accounts sign up on the marketing site, then continue to Checkout.
           </p>
-
-          <label>
-            Seats
-            <input
-              type="number"
-              min={1}
-              max={50}
-              step={1}
-              value={seats}
-              onChange={(e) => setSeatQty(e.target.value)}
-            />
-          </label>
-
-          <label className="terms-row">
-            <input
-              type="checkbox"
-              checked={acceptedTerms}
-              onChange={(e) => setAcceptedTerms(e.target.checked)}
-            />
-            <span>
-              I agree to the{" "}
-              <button type="button" className="linkish" onClick={() => setShowTerms(true)}>
-                Terms of Service and Privacy Policy
-              </button>
-              .
-            </span>
-          </label>
 
           <div className="actions">
             <button className="btn" type="submit" disabled={busy}>
               {working === "login" ? "Signing in…" : "Sign in"}
             </button>
-            <button
-              className="btn gold"
-              type="button"
-              disabled={busy || !acceptedTerms || !email || password.length < 6}
-              title={!acceptedTerms ? "Agree to the Terms of Service first" : undefined}
-              onClick={() => guard("trial", async () => {
-                if (!acceptedTerms) throw new Error("Agree to the Terms of Service and Privacy Policy to continue.");
-                if (!email || !email.includes("@")) throw new Error("Enter a valid work email.");
-                if (!password || password.length < 6) throw new Error("Password must be at least 6 characters.");
-                await signupCloud(email, password, name, acceptedTerms, inviteCode);
-                await openCheckout(true);
-              })}
-            >
-              {working === "trial" ? "Opening checkout…" : "Start 14-day trial"}
-            </button>
+            <a className="btn gold" href={marketingSignupUrl()}>
+              Create account
+            </a>
           </div>
           <p className="footnote">
             {isDesktopApp()
               ? "Files stay on this PC. Analysis runs remotely and is deleted after the report is saved."
-              : "Soft-launch: sign up with your invite code, then start a trial. Analysis is ephemeral — no document vault."}
+              : "No account yet? Create one on casesifter.com, then return here to sign in."}
           </p>
+          <button type="button" className="linkish" style={{ marginTop: 8 }} onClick={() => setShowTerms(true)}>
+            Terms of Service and Privacy Policy
+          </button>
         </form>
       )}
 

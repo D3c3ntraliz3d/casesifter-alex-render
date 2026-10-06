@@ -216,6 +216,17 @@ h1, h2, h3, .serif {
   color: var(--green);
   background: var(--green-bg);
 }
+.status-dot.clickable {
+  cursor: pointer;
+  font: inherit;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-weight: 600;
+  font-size: 11px;
+}
+.status-dot.clickable:hover {
+  background: #e2e8f0;
+}
 
 /* —— Page chrome —— */
 .page-head {

@@ -585,6 +585,8 @@ export async function getEntitlement() {
       plan: null,
       message: "Sign in to activate your subscription.",
       hasSession: false,
+      billing_state: "none",
+      trial_days_left: null,
     };
   }
   try {
@@ -708,6 +710,8 @@ export async function logoutCloud() {
     plan: null,
     hasSession: false,
     message: "Signed out.",
+    billing_state: "none",
+    trial_days_left: null,
   };
 }
 

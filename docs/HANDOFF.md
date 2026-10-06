@@ -14,7 +14,7 @@
 
 | Item | Status |
 |---|---|
-| Marketing signup UX + **Open web app** CTA | **Done** — default CTA `https://casesifter-app.onrender.com` (probe-upgrades to `app.casesifter.com` when DNS live) |
+| Marketing signup UX + **Continue to checkout** CTA | **Done** — success → app `/?checkout=trial` (onrender default; probe-upgrades to `app.casesifter.com` when DNS live) |
 | Marketing apex / www on Render | **Live** — `https://casesifter.com` / `www` already serve marketing |
 | Render `casesifter-app` (frontend SPA) | **Deployed** — use onrender URL until `app` CNAME |
 | Browser Account (signup/login/checkout → control plane) | **Done** (`VITE_CONTROL_PLANE_URL`) |
@@ -42,18 +42,19 @@
 | Log in / use product | `https://casesifter-app.onrender.com` → **Account → Sign in** |
 | Avoid | `https://app.casesifter.com` (NXDOMAIN until `app` CNAME) |
 
-**Cross-origin note:** a token stored on the marketing origin is **not** an app session. After signup, the client must **Sign in** on the hosted app with the same credentials.
+**Cross-origin note:** marketing signup stores a token on the marketing origin; the app may still need **Sign in** if that token is not shared. Soft-launch path: signup → **Continue to checkout** (`?checkout=trial`) → Stripe Checkout when the app session is present and `billing_state` is `none`.
 
 ## Invite + Stripe verify path
 
 Full operator checklist: **`docs/STRIPE.md`**.
 
 1. Set on `casesifter-control`: `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PRICE_ID`, `CASESIFTER_INVITE_REQUIRED=false` (invite optional), optional `CASESIFTER_INVITE_CODES=…`, `CASESIFTER_PUBLIC_URL=https://casesifter-app.onrender.com` until custom app domain works (Blueprint default matches; override Dashboard if still `app.casesifter.com`).
-2. Sign up on marketing with password + terms (invite optional) → success → **Open web app** (`casesifter-app.onrender.com`).
-3. In Account: **Sign in** → pick seats → **Start 14-day trial** → Stripe Checkout at **$79/seat** (card collected; charge after trial). After Checkout, **Manage billing** opens the Customer Portal when `has_billing_portal`. Without keys, Account shows **Stripe not configured — trial started without a card (local/dev).** and Subscribe marks Pro-dev locally (no Checkout tab).
-4. Webhook: `https://casesifter-control.onrender.com/v1/webhooks/stripe` — enable `checkout.session.completed`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.payment_failed`. Enable Customer Portal + quantity updates in Stripe.
-5. Redeploy control → `curl -sS https://casesifter-control.onrender.com/health` → `"stripe":true`.
-6. Demo shortcut (no card): admin `POST /v1/trial` with `CONTROL_ADMIN_TOKEN`.
+2. Sign up on marketing → success → **Continue to checkout** (`casesifter-app.onrender.com/?checkout=trial`).
+3. App Account: **Sign in** (if needed) → **Start free trial** → Stripe Checkout at **$79/seat** (card + 14-day trial; auto-bills after). Entitled users see **Manage billing** + Sign out only. Header shows **Trial · N days left** while trialing. **New case** is gated: logged out → signup; signed in without plan → Account/Checkout.
+4. **Domain trial limit:** one trial per corporate email domain (`trial_domains` in `accounts.json`); free mail (gmail/outlook/yahoo/etc.) is one trial per address. Abandoned Checkout does not burn the claim; second concurrent/corporate trial → clear **403**.
+5. Webhook: `https://casesifter-control.onrender.com/v1/webhooks/stripe` — enable `checkout.session.completed`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.payment_failed`. Enable Customer Portal + quantity updates in Stripe.
+6. Redeploy control + app (+ marketing for CTA) → `curl -sS https://casesifter-control.onrender.com/health` → `"stripe":true`.
+7. Demo shortcut (no card): admin `POST /v1/trial` with `CONTROL_ADMIN_TOKEN`.
 
 ## Unsuspend analysis (John)
 

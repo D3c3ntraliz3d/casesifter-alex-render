@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import os
 import secrets
 import time
@@ -31,6 +32,39 @@ INVITE_CODES = {
     for part in os.environ.get("CASESIFTER_INVITE_CODES", "").split(",")
     if part.strip()
 }
+
+# Free consumer mail — trial limit is per email address, not per domain.
+FREE_EMAIL_DOMAINS = {
+    "gmail.com",
+    "googlemail.com",
+    "outlook.com",
+    "hotmail.com",
+    "live.com",
+    "msn.com",
+    "yahoo.com",
+    "ymail.com",
+    "icloud.com",
+    "me.com",
+    "mac.com",
+    "aol.com",
+    "proton.me",
+    "protonmail.com",
+    "pm.me",
+    "gmx.com",
+    "gmx.net",
+    "mail.com",
+    "zoho.com",
+    "hey.com",
+}
+
+DOMAIN_TRIAL_CONFLICT = (
+    "A trial was already started for this company email domain. "
+    "Sign in to that account or contact support."
+)
+EMAIL_TRIAL_CONFLICT = (
+    "A trial was already started for this email address. "
+    "Sign in to that account or contact support."
+)
 
 
 class LoginBody(BaseModel):
@@ -69,12 +103,122 @@ class CheckoutBody(BaseModel):
 
 def _load() -> dict[str, Any]:
     if not STORE.exists():
-        return {"users": {}, "sessions": {}, "trials": {}}
-    return json.loads(STORE.read_text(encoding="utf-8"))
+        return {"users": {}, "sessions": {}, "trials": {}, "trial_domains": {}, "trial_emails": {}}
+    data = json.loads(STORE.read_text(encoding="utf-8"))
+    data.setdefault("users", {})
+    data.setdefault("sessions", {})
+    data.setdefault("trials", {})
+    data.setdefault("trial_domains", {})
+    data.setdefault("trial_emails", {})
+    return data
 
 
 def _save(data: dict[str, Any]) -> None:
+    data.setdefault("trial_domains", {})
+    data.setdefault("trial_emails", {})
     STORE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def _email_domain(email: str) -> str:
+    parts = str(email).lower().rsplit("@", 1)
+    return parts[-1] if len(parts) == 2 else ""
+
+
+def _is_free_email_provider(domain: str) -> bool:
+    return domain.lower() in FREE_EMAIL_DOMAINS
+
+
+def _trial_days_left(end_ts: float | None, now: float | None = None) -> int | None:
+    if end_ts is None:
+        return None
+    try:
+        end = float(end_ts)
+    except (TypeError, ValueError):
+        return None
+    if end <= 0:
+        return None
+    now = time.time() if now is None else now
+    if end <= now:
+        return 0
+    return int(math.ceil((end - now) / 86400))
+
+
+def _claim_record(user: dict[str, Any]) -> dict[str, Any]:
+    _ensure_user_identity(user)
+    return {
+        "email": str(user.get("email") or "").lower(),
+        "started_at": time.time(),
+        "user_id": user.get("user_id"),
+    }
+
+
+def _other_user_holds_trial_claim(data: dict[str, Any], user: dict[str, Any]) -> str | None:
+    """Return a clear 403 message if another account already claimed this trial slot."""
+    email = str(user.get("email") or "").lower()
+    domain = _email_domain(email)
+    user_id = user.get("user_id")
+    if not domain:
+        return None
+
+    if _is_free_email_provider(domain):
+        claim = (data.get("trial_emails") or {}).get(email)
+        if claim and claim.get("user_id") and claim.get("user_id") != user_id:
+            return EMAIL_TRIAL_CONFLICT
+        # Concurrent: another account with same email is impossible; also block if
+        # a different free-mail user somehow shares the claim key.
+        return None
+
+    claim = (data.get("trial_domains") or {}).get(domain)
+    if claim and claim.get("user_id") and claim.get("user_id") != user_id:
+        return DOMAIN_TRIAL_CONFLICT
+
+    # Reject a second concurrent trial while another account on the domain is
+    # already trialing/active (covers race before webhook claim lands).
+    for other in (data.get("users") or {}).values():
+        if not isinstance(other, dict):
+            continue
+        other_email = str(other.get("email") or "").lower()
+        if other_email == email:
+            continue
+        if _email_domain(other_email) != domain:
+            continue
+        if other.get("user_id") and other.get("user_id") == user_id:
+            continue
+        other_sub = other.get("subscription") or {}
+        other_status = str(other_sub.get("status") or "")
+        other_trial = float(other.get("trial_until") or 0)
+        if other_status in {"trialing", "active"} or other_trial > time.time():
+            return DOMAIN_TRIAL_CONFLICT
+    return None
+
+
+def _assert_trial_available(data: dict[str, Any], user: dict[str, Any]) -> None:
+    msg = _other_user_holds_trial_claim(data, user)
+    if msg:
+        raise HTTPException(403, msg)
+
+
+def _record_trial_claim(data: dict[str, Any], user: dict[str, Any]) -> None:
+    """Claim domain/email after trial actually starts (not on abandoned Checkout)."""
+    email = str(user.get("email") or "").lower()
+    domain = _email_domain(email)
+    if not domain:
+        return
+    record = _claim_record(user)
+    if _is_free_email_provider(domain):
+        emails = data.setdefault("trial_emails", {})
+        existing = emails.get(email)
+        if existing and existing.get("user_id") and existing.get("user_id") != user.get("user_id"):
+            return  # do not overwrite another account's claim
+        if not existing:
+            emails[email] = record
+        return
+    domains = data.setdefault("trial_domains", {})
+    existing = domains.get(domain)
+    if existing and existing.get("user_id") and existing.get("user_id") != user.get("user_id"):
+        return
+    if not existing:
+        domains[domain] = record
 
 
 def _hash_password(password: str, salt: str | None = None) -> tuple[str, str]:
@@ -153,6 +297,7 @@ def _apply_subscription_fields(
     customer_id: str | None = None,
     seats: int | None = None,
     current_period_end: Any = None,
+    trial_end: Any = None,
     plan: str | None = "pro",
 ) -> None:
     if customer_id:
@@ -170,6 +315,11 @@ def _apply_subscription_fields(
         sub["seats"] = int(seats)
     if current_period_end is not None:
         sub["current_period_end"] = current_period_end
+    if trial_end is not None:
+        try:
+            sub["trial_end"] = float(trial_end)
+        except (TypeError, ValueError):
+            pass
     user["subscription"] = sub
 
 
@@ -220,25 +370,82 @@ def _user_plan(user: dict[str, Any]) -> dict[str, Any]:
     trial_until = float(user.get("trial_until") or 0)
     sub = user.get("subscription") or {}
     status = str(sub.get("status") or "")
-    if status in {"active", "trialing"}:
+    trial_end_raw = sub.get("trial_end")
+    try:
+        stripe_trial_end = float(trial_end_raw) if trial_end_raw is not None else None
+    except (TypeError, ValueError):
+        stripe_trial_end = None
+    period_end = sub.get("current_period_end")
+
+    if status == "active":
         return {
             "active": True,
             "plan": sub.get("plan") or "pro",
             "message": "Subscription active.",
-            "renews_at": sub.get("current_period_end"),
+            "renews_at": period_end,
+            "billing_state": "active",
+            "trial_days_left": None,
+        }
+    if status == "trialing":
+        end = stripe_trial_end or (trial_until if trial_until > now else None) or period_end
+        days = _trial_days_left(end, now)
+        return {
+            "active": True,
+            "plan": sub.get("plan") or "pro",
+            "message": (
+                f"Trial active — {days} day(s) left."
+                if days is not None
+                else "Trial active."
+            ),
+            "renews_at": period_end,
+            "trial_until": end,
+            "billing_state": "trialing",
+            "trial_days_left": days,
+        }
+    if status == "past_due":
+        return {
+            "active": False,
+            "plan": sub.get("plan") or "pro",
+            "message": "Payment past due — update billing to restore scans.",
+            "renews_at": period_end,
+            "billing_state": "past_due",
+            "trial_days_left": None,
+        }
+    if status == "canceled":
+        # Local admin/dev trial can still unlock after cancel.
+        if trial_until > now:
+            days = _trial_days_left(trial_until, now)
+            return {
+                "active": True,
+                "plan": "trial",
+                "message": f"Trial active — {days} day(s) left.",
+                "trial_until": trial_until,
+                "billing_state": "trialing",
+                "trial_days_left": days,
+            }
+        return {
+            "active": False,
+            "plan": None,
+            "message": "Subscription canceled. Start a new trial or subscribe to analyze files.",
+            "billing_state": "canceled",
+            "trial_days_left": None,
         }
     if trial_until > now:
-        days = int((trial_until - now) / 86400)
+        days = _trial_days_left(trial_until, now)
         return {
             "active": True,
             "plan": "trial",
             "message": f"Trial active — {days} day(s) left.",
             "trial_until": trial_until,
+            "billing_state": "trialing",
+            "trial_days_left": days,
         }
     return {
         "active": False,
         "plan": None,
         "message": "Subscribe or start a trial to analyze files.",
+        "billing_state": "none",
+        "trial_days_left": None,
     }
 
 
@@ -349,8 +556,10 @@ def grant_trial(body: TrialBody):
             "subscription": {},
         }
         data["users"][email] = user
-    user["trial_until"] = time.time() + TRIAL_DAYS * 86400
     _ensure_user_identity(user, cohort=body.cohort or "beta")
+    _assert_trial_available(data, user)
+    user["trial_until"] = time.time() + TRIAL_DAYS * 86400
+    _record_trial_claim(data, user)
     _save(data)
     return {
         "email": email,
@@ -363,6 +572,10 @@ def grant_trial(body: TrialBody):
 def checkout(body: CheckoutBody = CheckoutBody(), authorization: str | None = Header(default=None)):
     user, _, data = _session_user(authorization)
     quantity = int(body.quantity)
+    if body.trial:
+        _ensure_user_identity(user)
+        data["users"][user["email"]] = user
+        _assert_trial_available(data, user)
     if not STRIPE_SECRET or not STRIPE_PRICE_ID:
         # Dev fallback: no Stripe configured, so there's no way to collect a card.
         u = data["users"][user["email"]]
@@ -371,6 +584,7 @@ def checkout(body: CheckoutBody = CheckoutBody(), authorization: str | None = He
             sub = dict(u.get("subscription") or {})
             sub["seats"] = quantity
             u["subscription"] = sub
+            _record_trial_claim(data, u)
             message = "Stripe not configured — trial started without a card (local/dev)."
         else:
             _apply_subscription_fields(
@@ -411,6 +625,10 @@ def checkout(body: CheckoutBody = CheckoutBody(), authorization: str | None = He
             # Card is still collected up front; billing simply doesn't start until the trial ends.
             subscription_data["trial_period_days"] = TRIAL_DAYS
         session_kwargs["subscription_data"] = subscription_data
+        # Persist identity before Checkout so webhook claim can resolve user_id.
+        _ensure_user_identity(user)
+        data["users"][user["email"]] = user
+        _save(data)
         session = stripe.checkout.Session.create(**session_kwargs)
         return {"mode": "stripe", "url": session.url}
     except Exception as exc:
@@ -480,11 +698,13 @@ async def stripe_webhook(request: Request):
             seats = None
         status = "active"
         period_end = None
+        trial_end = None
         if subscription_id:
             try:
                 sub = _as_dict(stripe.Subscription.retrieve(str(subscription_id)))
                 status = sub.get("status") or status
                 period_end = sub.get("current_period_end")
+                trial_end = sub.get("trial_end")
                 qty = _subscription_quantity(sub)
                 if qty is not None:
                     seats = qty
@@ -503,8 +723,11 @@ async def stripe_webhook(request: Request):
             customer_id=str(customer_id) if customer_id else None,
             seats=seats,
             current_period_end=period_end,
+            trial_end=trial_end,
             plan="pro",
         )
+        if status == "trialing" or trial_end:
+            _record_trial_claim(data, user)
         data["users"][email_key or user["email"]] = user
         _save(data)
         return {"ok": True}
@@ -532,15 +755,19 @@ async def stripe_webhook(request: Request):
         sub_id = obj.get("id")
         if sub_id and not str(sub_id).startswith("sub_"):
             sub_id = None
+        status = obj.get("status") or "active"
         _apply_subscription_fields(
             user,
-            status=obj.get("status") or "active",
+            status=status,
             subscription_id=str(sub_id) if sub_id else None,
             customer_id=str(obj["customer"]) if obj.get("customer") else None,
             seats=seats,
             current_period_end=obj.get("current_period_end"),
+            trial_end=obj.get("trial_end"),
             plan="pro",
         )
+        if status == "trialing" or obj.get("trial_end"):
+            _record_trial_claim(data, user)
         data["users"][email_key or user["email"]] = user
         _save(data)
         return {"ok": True}
