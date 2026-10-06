@@ -39,9 +39,14 @@ function showFormStatus(el, message, { error = false } = {}) {
   }
 }
 
-async function preferAppDomainWhenLive(openApp, { checkoutTrial = false } = {}) {
+async function preferAppDomainWhenLive(openApp, { checkoutTrial = false, token = "", email = "" } = {}) {
   if (!openApp) return;
-  const suffix = checkoutTrial ? "/?checkout=trial" : "";
+  const params = new URLSearchParams();
+  if (checkoutTrial) params.set("checkout", "trial");
+  if (token) params.set("cs_token", token);
+  if (email) params.set("cs_email", email);
+  const qs = params.toString();
+  const suffix = qs ? `/?${qs}` : "";
   openApp.href = `${APP_URL_DEFAULT}${suffix}`;
   try {
     await fetch(APP_URL_PREFERRED, { method: "HEAD", mode: "no-cors" });
@@ -132,6 +137,12 @@ async function wireSignup() {
           } catch {
             /* private mode */
           }
+          // Pass token to the app origin (different localStorage) so Checkout works without re-login.
+          await preferAppDomainWhenLive(openApp, {
+            checkoutTrial: true,
+            token: data.token,
+            email,
+          });
         }
       } catch {
         /* non-JSON error body */
@@ -150,8 +161,10 @@ async function wireSignup() {
       form.hidden = true;
       showFormStatus(status, "");
       if (success) success.hidden = false;
-      // Default CTA opens Checkout trial on the app; upgrade hostname when DNS resolves.
-      await preferAppDomainWhenLive(openApp, { checkoutTrial: true });
+      // Default CTA already set above when token present; ensure checkout URL otherwise.
+      if (!openApp?.href?.includes("cs_token=")) {
+        await preferAppDomainWhenLive(openApp, { checkoutTrial: true });
+      }
     } catch {
       showFormStatus(
         status,

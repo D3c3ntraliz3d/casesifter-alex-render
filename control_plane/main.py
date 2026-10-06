@@ -259,6 +259,8 @@ def _entitlement_payload(user: dict[str, Any]) -> dict[str, Any]:
         "cohort": user.get("cohort"),
         "seats": seats_n,
         "has_billing_portal": bool(user.get("stripe_customer_id")),
+        # Soft-launch: anonymized finding outcomes are always on (no opt-out UI).
+        "share_anonymized_outcomes": True,
     }
 
 

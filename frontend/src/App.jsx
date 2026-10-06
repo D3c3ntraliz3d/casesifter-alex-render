@@ -15,8 +15,10 @@ import {
   listCaseChat,
   listCaseGotchas,
   listCases,
+  absorbSessionHandoff,
   loginCloud,
   logoutCloud,
+  openCheckoutUrl,
   reportProblem,
   startCheckout,
   openBillingPortal,
@@ -29,7 +31,6 @@ import {
   saveLicense,
   scanDocument,
   sendFindingFeedback,
-  setShareOutcomes,
   unarchiveCase,
   uploadCaseDocument,
 } from "./api";
@@ -279,6 +280,8 @@ export default function App() {
   }
 
   useEffect(() => {
+    // Marketing signup stores the session on casesifter.com; absorb ?cs_token= handoff here.
+    absorbSessionHandoff();
     // Soft-launch: case vault is optional. Never surface opaque browser
     // "Failed to fetch" (suspended analysis / CORS) as an Account-blocking banner.
     refreshCases().catch((err) => {
@@ -295,7 +298,7 @@ export default function App() {
   useEffect(() => {
     if (!entitlement) return;
     if (checkoutTrialStarted.current) return;
-    const signedIn = Boolean(entitlement.hasSession || entitlement.email);
+    const signedIn = Boolean(entitlement.hasSession);
     if (!signedIn) return;
     if ((entitlement.billing_state || "none") !== "none") return;
     let params;
@@ -314,7 +317,7 @@ export default function App() {
       try {
         const session = await startCheckout(true, 1);
         if (session?.url) {
-          window.location.href = session.url;
+          openCheckoutUrl(session.url);
           return;
         }
         if (session?.mode === "dev") {
@@ -324,6 +327,7 @@ export default function App() {
       } catch (err) {
         setError(err.message || "Could not start checkout.");
         setView("account");
+        await refreshEntitlement();
       }
     })();
   }, [entitlement]);
@@ -552,7 +556,7 @@ export default function App() {
   }
 
   const billingState = entitlement?.billing_state || (entitlement?.active ? "active" : "none");
-  const signedIn = Boolean(entitlement?.hasSession || entitlement?.email);
+  const signedIn = Boolean(entitlement?.hasSession);
   const canCreateCase = billingState === "active" || billingState === "trialing";
 
   async function handleNewCaseIntent() {
@@ -567,13 +571,14 @@ export default function App() {
         try {
           const session = await startCheckout(true, 1);
           if (session?.url) {
-            window.open(session.url, "_blank", "noopener,noreferrer");
+            openCheckoutUrl(session.url);
           } else if (session?.mode === "dev") {
             setError(session.message || "Trial updated (Stripe not configured).");
             await refreshEntitlement();
           }
         } catch (err) {
           setError(err.message || "Could not start checkout.");
+          await refreshEntitlement();
         }
       }
       return false;
@@ -604,7 +609,7 @@ export default function App() {
             setView("account");
           }}
         >
-          Start trial
+          Start 14-day trial
         </button>
       );
     }
@@ -1367,7 +1372,7 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
               setUploadNote(
                 queued
                   ? `Saved ${picked.length}. ${queued} analyzed; use Scan on the rest.`
-                  : `Saved ${picked.length}. Sign in / Start trial if scans are locked, then use Scan.`
+                  : `Saved ${picked.length}. Sign in / Start 14-day trial if scans are locked, then use Scan.`
               );
             } else {
               setUploadNote(
@@ -2483,23 +2488,27 @@ function CaseRiskSummary({ byRisk, pendingCount, onOpenReport }) {
 
 const PLAN_SUMMARY = (
   <>
-    <strong>$79/seat/month</strong>. Month-to-month, cancel anytime. A free trial collects a card up front and converts to paid after 14 days unless you cancel.
+    <strong>$79/seat/month</strong>. Month-to-month, cancel anytime. A 14-day trial collects a card up front and converts to paid after 14 days unless you cancel.
   </>
 );
 
 function AccountPanel({ entitlement, onRefresh, onError }) {
-  const [email, setEmail] = useState("");
+  const [email, setEmail] = useState(() => entitlement?.email || "");
   const [password, setPassword] = useState("");
   const [license, setLicense] = useState("");
   const [problemNote, setProblemNote] = useState("");
   const [showTerms, setShowTerms] = useState(false);
   const [working, setWorking] = useState("");
 
+  useEffect(() => {
+    if (entitlement?.email && !email) setEmail(entitlement.email);
+  }, [entitlement?.email]);
+
   if (!entitlement) {
     return <div className="card"><p>Loading account status…</p></div>;
   }
 
-  const signedIn = Boolean(entitlement.hasSession || entitlement.email);
+  const signedIn = Boolean(entitlement.hasSession);
   const busy = Boolean(working);
   const billingState = entitlement.billing_state
     || (entitlement.active ? (entitlement.plan === "trial" ? "trialing" : "active") : "none");
@@ -2511,6 +2520,9 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
       await fn();
     } catch (err) {
       onError(err.message);
+      if (/session expired|sign in again|invalid session/i.test(String(err.message || ""))) {
+        await onRefresh();
+      }
     } finally {
       setWorking("");
     }
@@ -2519,8 +2531,10 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
   async function openCheckoutTrial() {
     const session = await startCheckout(true, 1);
     if (session?.url) {
-      window.open(session.url, "_blank", "noopener,noreferrer");
-    } else if (session?.mode === "dev") {
+      openCheckoutUrl(session.url);
+      return;
+    }
+    if (session?.mode === "dev") {
       onError(session.message || "Trial updated (Stripe not configured).");
     }
     await onRefresh();
@@ -2528,11 +2542,11 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
 
   async function manageBilling() {
     if (!entitlement.has_billing_portal) {
-      throw new Error("No Stripe customer yet — start a free trial first.");
+      throw new Error("No Stripe customer yet — start a 14-day trial first.");
     }
     const session = await openBillingPortal();
     if (session?.url) {
-      window.open(session.url, "_blank", "noopener,noreferrer");
+      openCheckoutUrl(session.url);
       return;
     }
     throw new Error(session?.message || "Could not open billing portal.");
@@ -2553,12 +2567,12 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
   return (
     <div className="card">
       <p className="kicker">Hybrid control plane</p>
-      <h2 className="serif" style={{ marginTop: 4 }}>Subscription & data sharing</h2>
+      <h2 className="serif" style={{ marginTop: 4 }}>Subscription</h2>
       <p>
         Mode: <strong>{entitlement.mode}</strong>
         {" · "}
         {statusLine()}
-        {signedIn ? ` · ${entitlement.email}` : ""}
+        {signedIn && entitlement.email ? ` · ${entitlement.email}` : ""}
         {entitlement.seats != null ? ` · ${entitlement.seats} seat${entitlement.seats === 1 ? "" : "s"}` : ""}
       </p>
       <p className="footnote">{entitlement.message}</p>
@@ -2608,22 +2622,6 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
         </form>
       )}
 
-      <label className="share-row">
-        <input
-          type="checkbox"
-          checked={Boolean(entitlement.share_anonymized_outcomes)}
-          onChange={async (e) => {
-            try {
-              await setShareOutcomes(e.target.checked);
-              await onRefresh();
-            } catch (err) {
-              onError(err.message);
-            }
-          }}
-        />
-        Share anonymized finding outcomes (types, severity, confidence — never the PDF)
-      </label>
-
       {entitlement.mode === "license" && (
         <form
           className="case-form"
@@ -2659,7 +2657,7 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
                 disabled={busy}
                 onClick={() => guard("trial", () => openCheckoutTrial())}
               >
-                {working === "trial" ? "Opening checkout…" : "Start free trial"}
+                {working === "trial" ? "Opening checkout…" : "Start 14-day trial"}
               </button>
             )}
             {(billingState === "canceled") && (
@@ -2669,7 +2667,7 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
                 disabled={busy}
                 onClick={() => guard("trial", () => openCheckoutTrial())}
               >
-                {working === "trial" ? "Opening checkout…" : "Start free trial"}
+                {working === "trial" ? "Opening checkout…" : "Start 14-day trial"}
               </button>
             )}
             {(billingState === "trialing" || billingState === "active" || billingState === "past_due") && (
@@ -2696,7 +2694,7 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
           </div>
           <p className="footnote">
             {billingState === "none" || billingState === "canceled"
-              ? "Start free trial opens Stripe Checkout (card + 14-day trial). CaseSifter never sees your card number."
+              ? "Start 14-day trial opens Stripe Checkout (card required). CaseSifter never sees your card number."
               : "Manage billing opens the Stripe Customer Portal. CaseSifter never sees or stores your card number."}
             {" "}
             {isDesktopApp()
@@ -2721,7 +2719,13 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
         >
           <label>
             Email
-            <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
+            <input
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              required
+              placeholder={entitlement.email || "you@firm.com"}
+            />
           </label>
           <label>
             Password

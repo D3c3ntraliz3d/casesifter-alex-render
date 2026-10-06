@@ -41,6 +41,66 @@ function clearSession() {
   }
 }
 
+/** True when a control-plane response means the Bearer token is gone/expired. */
+function isSessionAuthFailure(res, detail = "") {
+  if (res && (res.status === 401 || res.status === 403)) return true;
+  const msg = String(detail || "").toLowerCase();
+  return /invalid session|bearer token required|unknown user|session expired/.test(msg);
+}
+
+function sessionExpiredError() {
+  return new Error("Session expired. Sign in again to start your trial.");
+}
+
+/**
+ * Absorb marketing→app session handoff (?cs_token= / #cs_token=).
+ * Signup stores the token on casesifter.com; the app is a different origin.
+ */
+export function absorbSessionHandoff() {
+  if (typeof window === "undefined") return false;
+  let token = "";
+  let email = "";
+  try {
+    const params = new URLSearchParams(window.location.search || "");
+    token = (params.get("cs_token") || params.get("token") || "").trim();
+    email = (params.get("cs_email") || params.get("email") || "").trim();
+    const hash = (window.location.hash || "").replace(/^#/, "");
+    if (hash) {
+      const hp = new URLSearchParams(hash);
+      if (!token) token = (hp.get("cs_token") || hp.get("token") || "").trim();
+      if (!email) email = (hp.get("cs_email") || hp.get("email") || "").trim();
+    }
+    if (!token) return false;
+    setSession(token, email || undefined);
+    params.delete("cs_token");
+    params.delete("token");
+    params.delete("cs_email");
+    params.delete("email");
+    const qs = params.toString();
+    const next = `${window.location.pathname}${qs ? `?${qs}` : ""}${window.location.hash && !hash.includes("cs_token") && !hash.includes("token=") ? window.location.hash : ""}`;
+    window.history.replaceState({}, "", next || window.location.pathname);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Open Stripe Checkout / Customer Portal URL in this tab (reliable after await). */
+export function openCheckoutUrl(url) {
+  if (!url) return false;
+  try {
+    window.location.assign(url);
+    return true;
+  } catch {
+    try {
+      window.open(url, "_blank", "noopener,noreferrer");
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
 function controlUrl(path) {
   return `${CONTROL_PLANE_URL}${path.startsWith("/") ? path : `/${path}`}`;
 }
@@ -564,6 +624,8 @@ export async function getEntitlement() {
   const cs = desktop();
   if (cs) return callDesktop(cs.entitlement());
 
+  absorbSessionHandoff();
+
   // Local vault / Vite proxy (no remote analysis URL): keep open/license mode for John.
   if (!ANALYSIS_API_URL) {
     try {
@@ -587,24 +649,63 @@ export async function getEntitlement() {
       hasSession: false,
       billing_state: "none",
       trial_days_left: null,
+      share_anonymized_outcomes: true,
     };
   }
   try {
     const res = await fetch(controlUrl("/v1/entitlement"), { headers: controlHeaders() });
-    const data = await readJson(res);
+    if (!res.ok) {
+      const detail = await safeDetail(res);
+      if (isSessionAuthFailure(res, detail)) {
+        clearSession();
+        return {
+          active: false,
+          mode: "cloud",
+          plan: null,
+          message: "Session expired. Sign in again.",
+          hasSession: false,
+          billing_state: "none",
+          trial_days_left: null,
+          share_anonymized_outcomes: true,
+        };
+      }
+      throw new Error(detail || "Request failed.");
+    }
+    const data = await res.json();
+    let email = data.email;
+    if (!email) {
+      try {
+        email = localStorage.getItem(SESSION_EMAIL_KEY) || undefined;
+      } catch {
+        email = undefined;
+      }
+    }
+    if (email) setSession(token, email);
     return {
       ...data,
       mode: "cloud",
       hasSession: true,
-      email: data.email || (() => {
-        try {
-          return localStorage.getItem(SESSION_EMAIL_KEY) || undefined;
-        } catch {
-          return undefined;
-        }
-      })(),
+      email,
+      // Soft-launch: anonymized finding outcomes are always on for cloud users.
+      share_anonymized_outcomes: true,
     };
-  } catch {
+  } catch (err) {
+    const raw = String(err?.message || err || "");
+    if (isSessionAuthFailure(null, raw)) {
+      clearSession();
+      return {
+        active: false,
+        mode: "cloud",
+        plan: null,
+        message: "Session expired. Sign in again.",
+        hasSession: false,
+        billing_state: "none",
+        trial_days_left: null,
+        share_anonymized_outcomes: true,
+      };
+    }
+    // True network / CORS failure only (not 401). Keep token + email; Checkout will
+    // surface a network error — never mis-label auth failure as "unreachable".
     let email;
     try {
       email = localStorage.getItem(SESSION_EMAIL_KEY) || undefined;
@@ -615,10 +716,11 @@ export async function getEntitlement() {
       active: false,
       mode: "cloud",
       plan: "cloud-cached",
-      hasSession: true,
+      hasSession: Boolean(getSessionToken()),
       email,
       message: "Control plane unreachable. Sign in when online.",
       cached: true,
+      share_anonymized_outcomes: true,
     };
   }
 }
@@ -715,39 +817,48 @@ export async function logoutCloud() {
   };
 }
 
+async function controlAuthedJson(path, options = {}) {
+  const token = getSessionToken();
+  if (!token) throw new Error("Sign in first.");
+  let res;
+  try {
+    res = await fetch(controlUrl(path), {
+      ...options,
+      headers: { ...controlHeaders(), ...(options.headers || {}) },
+    });
+  } catch (err) {
+    throw controlUnreachableError(err);
+  }
+  if (!res.ok) {
+    const detail = await safeDetail(res);
+    if (isSessionAuthFailure(res, detail)) {
+      clearSession();
+      throw sessionExpiredError();
+    }
+    throw new Error(detail || "Request failed.");
+  }
+  return res.json();
+}
+
 export async function startCheckout(trial = false, quantity = 1) {
   const seats = Math.min(50, Math.max(1, Number(quantity) || 1));
   const cs = desktop();
   if (cs) return callDesktop(cs.checkout(trial, seats));
-  const token = getSessionToken();
-  if (!token) throw new Error("Sign in first.");
-  let res;
-  try {
-    res = await fetch(controlUrl("/v1/checkout"), {
-      method: "POST",
-      headers: { ...controlHeaders(), "Content-Type": "application/json" },
-      body: JSON.stringify({ trial: Boolean(trial), quantity: seats }),
-    });
-  } catch (err) {
-    throw controlUnreachableError(err);
-  }
-  return readJson(res);
+  return controlAuthedJson("/v1/checkout", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ trial: Boolean(trial), quantity: seats }),
+  });
 }
 
 export async function openBillingPortal() {
-  const token = getSessionToken();
-  if (!token) throw new Error("Sign in first.");
-  let res;
-  try {
-    res = await fetch(controlUrl("/v1/billing-portal"), {
-      method: "POST",
-      headers: { ...controlHeaders(), "Content-Type": "application/json" },
-      body: JSON.stringify({}),
-    });
-  } catch (err) {
-    throw controlUnreachableError(err);
-  }
-  return readJson(res);
+  const cs = desktop();
+  if (cs?.billingPortal) return callDesktop(cs.billingPortal());
+  return controlAuthedJson("/v1/billing-portal", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
 }
 
 export async function saveLicense(licenseKey) {
@@ -759,20 +870,11 @@ export async function saveLicense(licenseKey) {
   return readJson(res);
 }
 
-export async function setShareOutcomes(enabled) {
+/** Soft-launch: anonymized outcomes are always on; UI toggle removed. Desktop API kept as no-op. */
+export async function setShareOutcomes(_enabled) {
   if (desktop()) return getEntitlement();
-  // Hosted soft-launch: share preference is local-only until vault settings exist.
-  try {
-    const res = await apiFetch("/api/settings/share-outcomes", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ enabled }),
-    });
-    if (res.status === 404) return getEntitlement();
-    return readJson(res);
-  } catch {
-    return getEntitlement();
-  }
+  const ent = await getEntitlement();
+  return { ...ent, share_anonymized_outcomes: true };
 }
 
 export async function sendFindingFeedback(payload) {
