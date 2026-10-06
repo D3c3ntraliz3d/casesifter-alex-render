@@ -1,4 +1,4 @@
-"""Optional Sentry with path/text scrubbing."""
+"""Optional Sentry with path/text scrubbing — never send fact values or snippets."""
 
 from __future__ import annotations
 
@@ -9,6 +9,22 @@ from app.config import settings
 
 _PATH_RE = re.compile(r"(?:[A-Za-z]:\\|/)[^\s\"']{3,}")
 _EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
+
+_SENSITIVE_KEYS = {
+    "value",
+    "display",
+    "quote",
+    "snippet",
+    "explanation",
+    "title",
+    "text_excerpt",
+    "claim_quote",
+    "evidence_quote",
+    "why_suspicious",
+    "canonical_name",
+    "aliases",
+    "description",
+}
 
 
 def init_sentry(*, service: str) -> None:
@@ -58,16 +74,31 @@ def _scrub_value(value: Any) -> Any:
             return value[:500] + "…"
         return value
     if isinstance(value, dict):
-        return {k: _scrub_value(v) for k, v in value.items()}
+        out = {}
+        for k, v in value.items():
+            key = str(k)
+            if key.lower() in _SENSITIVE_KEYS or key.endswith("_enc") or "snippet" in key.lower():
+                out[k] = "[redacted]"
+            else:
+                out[k] = _scrub_value(v)
+        return out
     if isinstance(value, list):
-        return [_scrub_value(v) for v in value[:30]]
+        return [_scrub_value(v) for v in value[:50]]
     return value
 
 
 def _scrub_event(event: dict[str, Any]) -> dict[str, Any]:
-    for key in ("breadcrumbs", "request", "extra", "contexts"):
+    # Drop request bodies entirely — may contain uploads / fact payloads.
+    req = event.get("request")
+    if isinstance(req, dict):
+        if "data" in req:
+            req["data"] = "[redacted]"
+        if "cookies" in req:
+            req["cookies"] = "[redacted]"
+        event["request"] = _scrub_value(req)
+    for key in ("breadcrumbs", "extra", "contexts", "exception"):
         if key in event:
             event[key] = _scrub_value(event[key])
-    if "exception" in event:
-        event["exception"] = _scrub_value(event["exception"])
+    if "message" in event and isinstance(event["message"], str):
+        event["message"] = _scrub_value(event["message"])
     return event

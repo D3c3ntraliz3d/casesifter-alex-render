@@ -7,8 +7,8 @@
 - **`desktop/` — frozen, delete before broad launch.** No further Electron feature work.
 - **Local vault stays for John’s testing** (`APP_MODE=vault`). Do not break `/api/cases` locally.
 - **Soft-launch now** (invite beta): marketing signup → hosted web app → Stripe trial → unsuspend analysis with Phase 0 lockdown.
-- **Hard gate before first paid invoice:** Phase 2 `case_id` memory so cross-doc gotchas are durable across browser sessions.
-- Out of scope for soft-launch: full Phase 2 Postgres, Phase 3 folder picker, deleting `desktop/`, control-plane argon2.
+- **Hard gate before first paid invoice:** Persistent per-matter fact memory so cross-doc gotchas survive across sessions (**shipped in code** — needs Render Postgres + unsuspend analysis).
+- Out of scope for soft-launch: Phase 3 folder picker, deleting `desktop/`, control-plane argon2.
 
 ## Soft-launch status
 
@@ -19,11 +19,11 @@
 | Render `casesifter-app` (frontend SPA) | **Deployed** — use onrender URL until `app` CNAME |
 | Browser Account (signup/login/checkout → control plane) | **Done** (`VITE_CONTROL_PLANE_URL`) |
 | Control invite gate + Stripe env in `render.yaml` | **Runbook ready** — John sets secrets (`docs/STRIPE.md`); live `/health` still `"stripe":false` until keys |
-| Render `casesifter-analysis` | **SUSPENDED** — John resumes after secrets/CORS; code/docs ready |
+| Render `casesifter-analysis` | **SUSPENDED** — John must unsuspend in Render Dashboard (this agent cannot). Attach Postgres + set `DATABASE_URL` / `FACT_MEMORY_MASTER_KEY` before sell. |
 | Phase 0 lockdown | **Done** (`APP_MODE=analysis`, CORS not `*`, API key **or** active session) |
 | Phase 1 page anchors / Phase 4 extraction | **Done** |
 | Custom domain `app` | **BLOCKED** — `app.casesifter.com` NXDOMAIN until John adds CNAME + Render attach |
-| Phase 2 case_id memory | **Next before invoicing** |
+| Persistent fact memory (matters / Postgres) | **Code shipped** — gating test + firm-scoped store + `/v1/jobs?matter_id` + hosted Cases UI. **Ops-blocked:** provision Postgres, set secrets, unsuspend analysis. |
 
 ## Soft-launch URLs
 
@@ -104,3 +104,19 @@ After pulling this branch (`APP_MODE=vault`), rescan and confirm forged-exhibit 
 | POST `/api/v1/jobs` (no key/session) | 422 | **401** |
 
 Live while suspended: **503**.
+
+## Persistent fact memory — ops (John)
+
+Agent **cannot** unsuspend Render services or attach databases without dashboard access.
+
+1. **Unsuspend** `casesifter-analysis` in Render Dashboard → Service → Resume.
+2. **Create** a Render Postgres instance (or Blueprint database) and link it to analysis.
+3. Set secrets on analysis (Blueprint already declares `sync: false`):
+   - `DATABASE_URL` — from the Postgres service
+   - `FACT_MEMORY_MASTER_KEY` — long random secret (wraps per-firm Fernet keys)
+   - Existing: `ANALYSIS_API_KEYS`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `SENTRY_DSN`
+4. Confirm `PERSIST_FACTS=true`, `SOURCE_FILE_RETENTION=immediate`.
+5. Redeploy analysis; hit `/api/health` then create a matter from the hosted app and upload two contradicting exhibits.
+6. Legal: ToS/Privacy draft wording is in the app Account modal — **flagged for John review; not claimed approved.**
+
+Schema SQL reference: `backend/app/fact_memory/schema.sql`.

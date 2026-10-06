@@ -23,6 +23,14 @@ services:
         value: "true"
       - key: EPHEMERAL_TTL_HOURS
         value: "6"
+      - key: SOURCE_FILE_RETENTION
+        value: immediate
+      - key: PERSIST_FACTS
+        value: "true"
+      - key: DATABASE_URL
+        sync: false
+      - key: FACT_MEMORY_MASTER_KEY
+        sync: false
       - key: ENTITLEMENT_MODE
         value: cloud
       # Control plane used to validate browser session bearers on /api/v1/*

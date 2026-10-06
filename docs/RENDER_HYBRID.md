@@ -1,6 +1,7 @@
 # CaseSifter — Render services (analysis + control plane + web app)
 
-Ephemeral analysis API, Stripe control plane, and hosted SPA. **No customer document vault.**
+Analysis API with **persistent per-matter fact memory** (encrypted facts/findings; **no PDF vault**),
+Stripe control plane, and hosted SPA.
 
 ## Soft-launch URLs (2026-10)
 
@@ -29,13 +30,18 @@ Ephemeral analysis API, Stripe control plane, and hosted SPA. **No customer docu
 ### analysis (Docker from `backend/`)
 
 - Health: `/api/health` → 200 with `app_mode: analysis`
-- Ephemeral jobs: `POST /api/v1/jobs`, `GET /api/v1/jobs/{id}`, `DELETE /api/v1/jobs/{id}`
+- Jobs: `POST /api/v1/jobs` (optional `matter_id` / `filed_date`), `GET /api/v1/jobs/{id}`
+- Matters: `GET/POST /api/v1/matters`, findings/export/delete under `/api/v1/matters/{id}`
 - Auth on `/api/v1/*`: `X-API-Key` / Bearer matching `ANALYSIS_API_KEYS`, **or** Bearer control-plane session with **active** entitlement (`CLOUD_CONTROL_URL` probe)
-- Unauthorized `/api/v1/jobs` → **401**; vault `/api/cases` → **404**
+- Unauthorized `/api/v1/jobs` → **401**; vault `/api/cases` → **404** in analysis mode
 - Env:
   - `APP_MODE=analysis`
-  - `EPHEMERAL_JOBS=true`
-  - `EPHEMERAL_TTL_HOURS=6`
+  - `EPHEMERAL_JOBS=true` (source PDF still deleted immediately)
+  - `SOURCE_FILE_RETENTION=immediate`
+  - `PERSIST_FACTS=true` (per-firm `persist_facts` can opt out → classic ephemeral)
+  - `DATABASE_URL` — Render Postgres (sync:false). Local/CI falls back to SQLite with the same schema.
+  - `FACT_MEMORY_MASTER_KEY` — wraps per-firm Fernet data keys (sync:false)
+  - `EPHEMERAL_TTL_HOURS=6` — job report TTL for **non-persist** firms only; persist firms skip sweep via `persist.flag`
   - `CORS_ALLOW_ORIGINS` — must include `https://app.casesifter.com`, `https://www.casesifter.com`, `https://casesifter.com` (plus onrender fallbacks). **Never `*` in analysis.**
   - `ANALYSIS_API_KEYS=` (ops keys; sync:false secret)
   - `CLOUD_CONTROL_URL=https://casesifter-control.onrender.com`
@@ -134,3 +140,13 @@ services:
     ports: ["8010:8010"]
     command: uvicorn main:app --host 0.0.0.0 --port 8010
 ```
+
+## Ops: unsuspend analysis + attach Postgres
+
+Cannot be done from this agent without Render credentials.
+
+1. Render Dashboard → `casesifter-analysis` → **Resume** (if Suspended).
+2. Create managed Postgres; copy Internal Database URL into analysis env `DATABASE_URL` (Blueprint key is `sync: false`).
+3. Generate and set `FACT_MEMORY_MASTER_KEY` (never commit). Rotate = re-encrypt firm keys (plan a migration before rotating in prod).
+4. Deploy; verify `/api/health` and `POST /api/v1/matters` with a session Bearer.
+5. Source PDFs still delete immediately; facts persist when `PERSIST_FACTS=true` and firm `persist_facts` is true.

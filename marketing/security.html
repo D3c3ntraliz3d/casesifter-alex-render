@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Security &amp; Privacy — CaseSifter</title>
-  <meta name="description" content="CaseSifter keeps no document vault: lasting copies stay with your firm; cloud analysis is ephemeral and deleted after processing. How data actually moves, tier by tier." />
+  <meta name="description" content="CaseSifter keeps no document vault: lasting copies stay with your firm; source PDFs are deleted immediately after analysis; encrypted facts persist per matter. How data actually moves, tier by tier." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600&family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet" />
@@ -34,10 +34,11 @@
   <main class="wrap">
     <div class="page-hero">
       <p class="kicker">Security &amp; privacy</p>
-      <h1>No document vault. That's the whole pitch.</h1>
+      <h1>We never keep your documents.</h1>
       <p class="lead">
-        CaseSifter does not keep a long-lived copy of your case files. You use the web app to upload for a scan;
-        anything sent for analysis is processed and then deleted. Here's exactly how data moves, tier by tier.
+        Source PDFs are analyzed and deleted from our servers immediately after each scan.
+        CaseSifter keeps an encrypted index of facts per matter (dates, names, amounts, page references)
+        so a filing today can be checked against one from months ago — only your firm can see it.
       </p>
     </div>
 
@@ -45,11 +46,11 @@
       <div class="grid cols-3">
         <div class="card">
           <h3>Where files live</h3>
-          <p>Lasting copies stay with your firm. We do not run a central document library — analysis jobs hold file bytes only for the scan, then delete them.</p>
+          <p>Lasting PDF copies stay with your firm. We do not run a central document library — analysis jobs hold file bytes only for the scan, then delete them.</p>
         </div>
         <div class="card">
-          <h3>What "ephemeral" means</h3>
-          <p>A scan uploads the file bytes to an analysis job, processes them through the pipeline, and deletes the job directory on completion or after a time-to-live sweep — whichever comes first.</p>
+          <h3>What we store (and what we delete)</h3>
+          <p>PDFs are deleted immediately after each run. Encrypted facts, findings, and reports persist per matter until you delete them. Per-firm keys wrap sensitive columns.</p>
         </div>
         <div class="card">
           <h3>What we never do</h3>
@@ -120,7 +121,7 @@
       <div class="footer-grid">
         <div>
           <div class="footer-brand"><div class="mark">CS</div><strong>CaseSifter</strong></div>
-          <p style="max-width: 32ch; color: var(--muted); font-size: 0.88rem; line-height: 1.55;">Find what matters in the record. Browser access · ephemeral analysis · no document vault.</p>
+          <p style="max-width: 32ch; color: var(--muted); font-size: 0.88rem; line-height: 1.55;">Find what matters in the record. Browser access · facts persist per matter · PDFs never stored.</p>
         </div>
         <div class="footer-cols">
           <div class="footer-col">

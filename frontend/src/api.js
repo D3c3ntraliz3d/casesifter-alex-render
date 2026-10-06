@@ -212,15 +212,13 @@ export function jobSourceUrl(jobId) {
 
 function vaultUnavailableError() {
   return new Error(
-    "Case memory is not on the hosted analysis API yet (Phase 2). Account, trial, and Stripe work now; durable case folders ship next."
+    "Case memory is unavailable. Sign in and ensure the analysis service is running."
   );
 }
 
 /**
- * Soft-launch browser build points VITE_ANALYSIS_API_URL at APP_MODE=analysis,
- * which mounts /api/health + /api/v1 only — not durable /api/cases. Hitting
- * /api/cases against a suspended Render service returns HTML 503 without CORS,
- * which the browser surfaces as opaque "Failed to fetch" on Account.
+ * Soft-launch browser build points VITE_ANALYSIS_API_URL at APP_MODE=analysis.
+ * Matters / fact memory live on /api/v1/matters (not the local vault /api/cases).
  */
 function isHostedAnalysis() {
   return Boolean(ANALYSIS_API_URL);
@@ -249,8 +247,11 @@ async function analysisFetch(path, options = {}) {
 export async function listCases() {
   const cs = desktop();
   if (cs) return cs.listCases();
-  // Hosted analysis has no case vault — skip the fetch so Account stays clean.
-  if (isHostedAnalysis()) return [];
+  if (isHostedAnalysis()) {
+    const res = await analysisFetch("/api/v1/matters");
+    const data = await readJson(res);
+    return data.matters || data.cases || [];
+  }
   const res = await apiFetch("/api/cases");
   if (res.status === 404) return [];
   const data = await readJson(res);
@@ -260,7 +261,22 @@ export async function listCases() {
 export async function createCase(payload) {
   const cs = desktop();
   if (cs) return cs.createCase(payload);
-  if (isHostedAnalysis()) throw vaultUnavailableError();
+  if (isHostedAnalysis()) {
+    const body = {
+      name: payload.caption || payload.name || "Untitled matter",
+      caption: payload.caption || payload.name,
+      index_number: payload.index_number || null,
+      court: payload.court || null,
+      county: payload.county || null,
+      notes: payload.notes || null,
+    };
+    const res = await analysisFetch("/api/v1/matters", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    return readJson(res);
+  }
   const res = await apiFetch("/api/cases", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -273,7 +289,10 @@ export async function createCase(payload) {
 export async function getCase(caseId) {
   const cs = desktop();
   if (cs) return cs.getCase(caseId);
-  if (isHostedAnalysis()) throw vaultUnavailableError();
+  if (isHostedAnalysis()) {
+    const res = await analysisFetch(`/api/v1/matters/${caseId}`);
+    return readJson(res);
+  }
   const res = await apiFetch(`/api/cases/${caseId}`);
   if (res.status === 404) throw vaultUnavailableError();
   return readJson(res);
@@ -282,7 +301,10 @@ export async function getCase(caseId) {
 export async function archiveCase(caseId) {
   const cs = desktop();
   if (cs) return cs.archiveCase(caseId);
-  if (isHostedAnalysis()) throw vaultUnavailableError();
+  if (isHostedAnalysis()) {
+    // Hosted matters have no archive yet — treat as no-op soft hide client-side.
+    return { id: caseId, archived_at: new Date().toISOString() };
+  }
   const res = await apiFetch(`/api/cases/${caseId}/archive`, { method: "POST" });
   if (res.status === 404) throw vaultUnavailableError();
   return readJson(res);
@@ -291,7 +313,9 @@ export async function archiveCase(caseId) {
 export async function unarchiveCase(caseId) {
   const cs = desktop();
   if (cs) return cs.unarchiveCase(caseId);
-  if (isHostedAnalysis()) throw vaultUnavailableError();
+  if (isHostedAnalysis()) {
+    return { id: caseId, archived_at: null };
+  }
   const res = await apiFetch(`/api/cases/${caseId}/unarchive`, { method: "POST" });
   if (res.status === 404) throw vaultUnavailableError();
   return readJson(res);
@@ -303,7 +327,10 @@ export async function deleteCase(caseId) {
     await cs.deleteCase(caseId);
     return { deleted: caseId };
   }
-  if (isHostedAnalysis()) throw vaultUnavailableError();
+  if (isHostedAnalysis()) {
+    const res = await analysisFetch(`/api/v1/matters/${caseId}`, { method: "DELETE" });
+    return readJson(res);
+  }
   const res = await apiFetch(`/api/cases/${caseId}`, { method: "DELETE" });
   if (res.status === 404) throw vaultUnavailableError();
   return readJson(res);
@@ -312,7 +339,12 @@ export async function deleteCase(caseId) {
 export async function deleteDocument(caseId, documentId) {
   const cs = desktop();
   if (cs) return cs.deleteDocument(caseId, documentId);
-  if (isHostedAnalysis()) throw vaultUnavailableError();
+  if (isHostedAnalysis()) {
+    const res = await analysisFetch(`/api/v1/matters/${caseId}/documents/${documentId}`, {
+      method: "DELETE",
+    });
+    return readJson(res);
+  }
   const res = await apiFetch(`/api/cases/${caseId}/documents/${documentId}`, {
     method: "DELETE",
   });
@@ -321,7 +353,10 @@ export async function deleteDocument(caseId, documentId) {
 }
 
 export async function updateCase(caseId, payload) {
-  if (isHostedAnalysis()) throw vaultUnavailableError();
+  if (isHostedAnalysis()) {
+    // Name/index edits not yet exposed; return current matter.
+    return getCase(caseId);
+  }
   const res = await apiFetch(`/api/cases/${caseId}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
@@ -336,14 +371,46 @@ function isTransientUploadError(err) {
   return /failed to fetch|networkerror|econnreset|econnrefused|502|503|504|database is locked/i.test(text);
 }
 
-export async function uploadCaseDocument(caseId, file, { displayName, autoScan = true } = {}) {
+export async function uploadCaseDocument(caseId, file, { displayName, autoScan = true, docKind, filedDate } = {}) {
   const cs = desktop();
   if (cs) {
     // Desktop uses native file picker; browser File upload writes via temp is not used.
     // Callers in desktop should use pickAndAddDocuments — keep a clear error if File is passed.
     throw new Error("In the desktop app, use Add files to pick documents from your PC.");
   }
-  if (isHostedAnalysis()) throw vaultUnavailableError();
+  if (isHostedAnalysis()) {
+    // Hosted path: scan via /v1/jobs with matter_id; facts persist, PDF deleted server-side.
+    const { rememberScanFile, sha256OfFile } = await import("./localFiles.js");
+    const sha = await sha256OfFile(file);
+    await rememberScanFile(file, sha);
+    const job = await createAnalysisJob(file, {
+      displayName: displayName || file.name,
+      docKind: docKind || undefined,
+      matterId: caseId,
+      filedDate: filedDate || undefined,
+      submittedBy: "web-app",
+    });
+    // Poll until complete so the matter document row exists.
+    let progress = null;
+    for (let i = 0; i < 120; i += 1) {
+      progress = await getJob(job.job_id, { includeReport: true });
+      if (progress.status === "complete" || progress.status === "failed") break;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    const matter = await getCase(caseId);
+    const docs = matter.documents || [];
+    const match =
+      docs.find((d) => d.sha256 && d.sha256.toLowerCase() === sha.toLowerCase()) ||
+      docs[docs.length - 1] ||
+      null;
+    return {
+      document: match,
+      job_id: job.job_id,
+      job: progress,
+      matter,
+      sha256: sha,
+    };
+  }
   let lastError = new Error("Upload failed.");
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const body = new FormData();
@@ -382,7 +449,18 @@ export async function getDesktopReport(caseId, documentId) {
 }
 
 export async function patchDocument(caseId, documentId, payload) {
-  if (isHostedAnalysis()) throw vaultUnavailableError();
+  if (isHostedAnalysis()) {
+    const res = await analysisFetch(`/api/v1/matters/${caseId}/documents/${documentId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        filed_date: payload.filed_date ?? payload.filedDate ?? null,
+        display_name: payload.display_name,
+        doc_kind: payload.doc_kind,
+      }),
+    });
+    return readJson(res);
+  }
   const res = await apiFetch(`/api/cases/${caseId}/documents/${documentId}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
@@ -393,7 +471,9 @@ export async function patchDocument(caseId, documentId, payload) {
 }
 
 export async function retitleCaseDocuments(caseId) {
-  if (isHostedAnalysis()) throw vaultUnavailableError();
+  if (isHostedAnalysis()) {
+    return getCase(caseId);
+  }
   const res = await apiFetch(`/api/cases/${caseId}/retitle`, { method: "POST" });
   if (res.status === 404) throw vaultUnavailableError();
   return readJson(res);
@@ -441,7 +521,17 @@ export async function listCaseGotchas(caseId) {
     };
   }
   if (isHostedAnalysis()) {
-    return { gotchas: [], factConflicts: [], risksElevated: 0, caseImpact: null };
+    const res = await analysisFetch(`/api/v1/matters/${caseId}/findings`);
+    const data = await readJson(res);
+    const findings = data.findings || [];
+    const gotchas = data.gotchas || [];
+    const factConflicts = data.fact_conflicts || [];
+    return {
+      gotchas,
+      factConflicts,
+      risksElevated: factConflicts.filter((f) => f.severity === "high").length,
+      caseImpact: summarizeCaseImpact(findings),
+    };
   }
   const res = await apiFetch(`/api/cases/${caseId}/gotchas`);
   if (res.status === 404) {
@@ -528,7 +618,25 @@ export async function askCaseChat(caseId, question, { focusDocumentId, documents
   if (cs) {
     return callDesktop(cs.askCaseChat(caseId, question, focusDocumentId));
   }
-  if (isHostedAnalysis()) throw vaultUnavailableError();
+  if (isHostedAnalysis()) {
+    // Packet chat from client-held excerpts only (no server PDF vault).
+    const res = await analysisFetch("/api/v1/case-chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        question,
+        focus_document_id: focusDocumentId || undefined,
+        documents: (documents || []).map((d) => ({
+          document_id: d.id || d.document_id,
+          display_name: d.display_name,
+          original_filename: d.original_filename,
+          doc_kind: d.doc_kind || d.doc_type,
+          text_excerpt: d.text_excerpt || "",
+        })),
+      }),
+    });
+    return readJson(res);
+  }
   const res = await apiFetch(`/api/cases/${caseId}/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -544,7 +652,13 @@ export async function askCaseChat(caseId, question, { focusDocumentId, documents
 export async function scanDocument(caseId, documentId) {
   const cs = desktop();
   if (cs) return cs.analyzeDocument(caseId, documentId);
-  if (isHostedAnalysis()) throw vaultUnavailableError();
+  if (isHostedAnalysis()) {
+    // Hosted scans happen at upload time; reopen stored report.
+    const res = await analysisFetch(`/api/v1/matters/${caseId}/documents/${documentId}/report`);
+    if (res.status === 404) throw new Error("No stored report for this document. Re-upload to scan.");
+    const report = await readJson(res);
+    return { job_id: documentId, status: "complete", report };
+  }
   const res = await apiFetch(`/api/cases/${caseId}/documents/${documentId}/scan`, {
     method: "POST",
   });
@@ -600,23 +714,42 @@ export async function rescanCase(caseId, { waitingOnly = false } = {}) {
       error: errors[0] || null,
     };
   }
-  if (isHostedAnalysis()) throw vaultUnavailableError();
+  if (isHostedAnalysis()) {
+    return { status: "idle", queued: 0, skipped: 0, message: "Re-upload a file to rescan on hosted matters." };
+  }
   const res = await apiFetch(`/api/cases/${caseId}/rescan`, { method: "POST" });
   if (res.status === 404) throw vaultUnavailableError();
   return readJson(res);
 }
 
 /**
- * Create an ephemeral analysis job on the hosted analysis API (soft-launch path).
+ * Create an analysis job on the hosted analysis API.
+ * Pass matterId to persist facts and compare against prior filings in that matter.
  * Requires an active control-plane session (Bearer) or VITE_ANALYSIS_API_KEY.
  */
-export async function createAnalysisJob(file, { displayName, docKind, submittedBy = "web-app" } = {}) {
+export async function createAnalysisJob(
+  file,
+  { displayName, docKind, submittedBy = "web-app", matterId, caseId, filedDate } = {}
+) {
   const body = new FormData();
   body.append("file", file);
   body.append("submitted_by", submittedBy);
   if (displayName) body.append("display_name", displayName);
   if (docKind) body.append("doc_kind", docKind);
+  const mid = matterId || caseId;
+  if (mid) body.append("matter_id", mid);
+  if (filedDate) body.append("filed_date", filedDate);
   const res = await analysisFetch("/api/v1/jobs", { method: "POST", body });
+  return readJson(res);
+}
+
+export async function getMatterDocumentReport(matterId, documentId) {
+  const res = await analysisFetch(`/api/v1/matters/${matterId}/documents/${documentId}/report`);
+  return readJson(res);
+}
+
+export async function exportMatter(matterId) {
+  const res = await analysisFetch(`/api/v1/matters/${matterId}/export`);
   return readJson(res);
 }
 

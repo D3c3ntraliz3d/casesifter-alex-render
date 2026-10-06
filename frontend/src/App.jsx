@@ -405,6 +405,32 @@ export default function App() {
       setView("report");
       return;
     }
+    // Hosted matter memory: prefer persisted report, then live job.
+    try {
+      const { getMatterDocumentReport } = await import("./api");
+      if (doc.has_report || !doc.scan_job_id) {
+        try {
+          const report = await getMatterDocumentReport(caseId || caseData?.id, doc.id);
+          setJob({
+            job_id: doc.scan_job_id || doc.id,
+            status: "complete",
+            stage: "complete",
+            percent: 100,
+            message: "Report from matter fact memory.",
+            filename: doc.display_name || doc.original_filename,
+            report,
+            ephemeral: false,
+            persist_facts: true,
+          });
+          setView("report");
+          return;
+        } catch {
+          /* fall through to job */
+        }
+      }
+    } catch {
+      /* ignore */
+    }
     if (!doc.scan_job_id) {
       setJob(null);
       setError("This document has not been scanned yet.");
@@ -1847,6 +1873,25 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
                   <div className="doc-risk">
                     {doc.risk_level ? (RISK[doc.risk_level] || doc.risk_level) : "—"}
                   </div>
+                  <label className="footnote" style={{ display: "block", marginTop: 4 }}>
+                    Filed{" "}
+                    <input
+                      type="date"
+                      value={doc.filed_date || ""}
+                      disabled={busy || Boolean(caseData.archived_at)}
+                      onChange={async (e) => {
+                        try {
+                          await patchDocument(caseData.id, doc.id, {
+                            filed_date: e.target.value || null,
+                          });
+                          await onRefresh();
+                        } catch (err) {
+                          onError(err.message);
+                        }
+                      }}
+                      style={{ maxWidth: "11rem" }}
+                    />
+                  </label>
                   {doc.last_error ? (
                     <div className="footnote" style={{ color: "var(--red)" }}>{doc.last_error}</div>
                   ) : null}
@@ -2716,8 +2761,8 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
               : "Manage billing opens the Stripe Customer Portal. CaseSifter never sees or stores your card number."}
             {" "}
             {isDesktopApp()
-              ? "Files stay on this PC; analysis runs remotely and is deleted after the report is saved."
-              : "Analysis runs ephemerally in the cloud — we do not keep a document vault."}
+              ? "Files stay on this PC; analysis runs remotely and source files are deleted from our servers immediately after each scan."
+              : "We never keep your documents. Files are analyzed and deleted immediately. An encrypted fact index per matter (dates, names, amounts, page refs) stays so new filings can be checked against older ones — only your firm can see it."}
           </p>
         </div>
       )}
@@ -2821,8 +2866,8 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
           </div>
           <p className="footnote">
             {isDesktopApp()
-              ? "Files stay on this PC. Analysis runs remotely and is deleted after the report is saved. Start trial opens Stripe Checkout (card required)."
-              : "Start a 14-day free trial creates your account and opens Stripe Checkout (card required). CaseSifter never sees your card number."}
+              ? "Files stay on this PC. Analysis runs remotely; source files are deleted from our servers immediately after each scan. Start trial opens Stripe Checkout (card required)."
+              : "We never keep your documents. An encrypted fact index per matter lets new filings be checked against older ones. Start trial opens Stripe Checkout (card required). CaseSifter never sees your card number."}
           </p>
         </form>
       )}
@@ -2852,7 +2897,7 @@ function TermsModal({ onClose }) {
         </div>
         <div className="modal-body">
           <p className="footnote" style={{ color: "var(--red)" }}>
-            Draft placeholder text — have counsel review and replace this before relying on it commercially.
+            Draft for John&apos;s review — not approved legal text. Do not publish as final ToS/Privacy without his sign-off.
           </p>
           <h4>1. The service</h4>
           <p>
@@ -2862,9 +2907,12 @@ function TermsModal({ onClose }) {
           </p>
           <h4>2. Files and data</h4>
           <p>
-            When you scan a document, its content is sent to CaseSifter’s analysis service for processing, then
-            deleted once your report is generated. CaseSifter does not retain a document library (no vault).
-            Desktop clients keep local copies on your PC; the hosted web app analyzes ephemerally in the browser session.
+            We never keep your documents. Files are analyzed and deleted from our servers immediately after each
+            scan. CaseSifter keeps an encrypted index of facts for each matter (dates, names, amounts, and page
+            references) so it can catch contradictions as new filings come in. Only your firm can see that index,
+            and you can delete a document, a matter, or your entire account at any time. Database backups may retain
+            encrypted copies for a limited window after deletion — exact backup retention will be stated once ops
+            confirms Render Postgres backup settings.
           </p>
           <h4>3. Billing and trials</h4>
           <p>
@@ -2877,7 +2925,7 @@ function TermsModal({ onClose }) {
           <p>
             You may cancel at any time from Account → Manage billing (Customer Portal) or by emailing{" "}
             <a href="mailto:support@casesifter.com">support@casesifter.com</a>; cancellation takes effect at
-            the end of the current billing period.
+            the end of the current billing period. Account closure can purge firm fact memory on request.
           </p>
           <h4>5. Acceptable use</h4>
           <p>
@@ -2887,7 +2935,7 @@ function TermsModal({ onClose }) {
           <h4>6. Privacy</h4>
           <p>
             Anonymized finding outcomes (types, severity, confidence) are shared with CaseSifter only if you opt in
-            in the Account tab, and never include document content.
+            in the Account tab, and never include document content, fact values, or snippets.
           </p>
         </div>
       </div>
@@ -3318,8 +3366,24 @@ function FindingCard({ item, docKind, siblings = [] }) {
   const caseHit = Boolean(item.evidence?.case_consistency);
   const gotcha = Boolean(item.evidence?.gotcha) || item.category === "gotcha";
   const [feedback, setFeedback] = useState(null);
+  const [linkNote, setLinkNote] = useState("");
   const tainted = gotcha && item.evidence?.tainted_support;
   const taintedCopy = tainted ? resolveTaintedCopy(item, siblings) : null;
+  const refs = item.evidence?.refs || [];
+
+  async function openRef(ref) {
+    setLinkNote("");
+    try {
+      const { openLocalDocumentAtPage } = await import("./localFiles.js");
+      await openLocalDocumentAtPage({
+        sha256: ref.sha256,
+        page: ref.page || item.page,
+        displayName: ref.display_name,
+      });
+    } catch (err) {
+      setLinkNote(err.message || "Could not open local file.");
+    }
+  }
 
   return (
     <article className={`finding${gotcha ? " gotcha-card" : ""}`}>
@@ -3354,6 +3418,24 @@ function FindingCard({ item, docKind, siblings = [] }) {
       ) : (
         <p>{item.explanation}</p>
       )}
+      {refs.length > 0 && (
+        <p className="footnote">
+          Open local file:{" "}
+          {refs.map((ref, i) => (
+            <button
+              key={`${ref.sha256 || ref.document_id}-${i}`}
+              type="button"
+              className="linkish"
+              onClick={() => openRef(ref)}
+              style={{ marginRight: 8 }}
+            >
+              {(ref.display_name || "document").slice(0, 40)}
+              {ref.page != null ? ` p.${ref.page}` : ""}
+            </button>
+          ))}
+        </p>
+      )}
+      {linkNote && <p className="footnote" style={{ color: "var(--danger, #b33)" }}>{linkNote}</p>}
       <p className="why">{tainted ? taintedCopy.why : item.why_suspicious}</p>
       {aiLead && (
         <p className="ai-lead">
