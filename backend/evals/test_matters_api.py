@@ -7,6 +7,26 @@ import io
 from fastapi.testclient import TestClient
 
 
+def test_resolve_upload_labels_exhibit_parens_s():
+    """Hosted path must not leave EXHIBIT(S) packets as Unknown."""
+    from app.v1_analysis import _resolve_upload_labels
+
+    fname = "111 - EXHIBIT(S) - P (Motion #4) Settlement Conference Aff.pdf"
+    name, kind = _resolve_upload_labels(fname, fname, None)
+    assert kind == "exhibit"
+    assert name == "Exhibit 111"
+
+    bare = "32 - EXHIBIT(S).pdf"
+    name2, kind2 = _resolve_upload_labels(bare, bare, None)
+    assert kind2 == "exhibit"
+    assert name2 == "Exhibit 32"
+
+    # Explicit user kind still wins for non-exhibit names.
+    name3, kind3 = _resolve_upload_labels("voe.txt", "VOE 2019", "affidavit")
+    assert kind3 == "affidavit"
+    assert name3 == "VOE 2019"
+
+
 def test_matters_crud_and_job_matter_id(tmp_path, monkeypatch):
     monkeypatch.setenv("APP_MODE", "analysis")
     monkeypatch.setenv("APP_ENV", "development")

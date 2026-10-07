@@ -380,6 +380,48 @@ function isTransientUploadError(err) {
   return /failed to fetch|networkerror|econnreset|econnrefused|502|503|504|database is locked/i.test(text);
 }
 
+
+/** NYSCEF EXHIBIT(S) / EXHIBIT_S — keep in sync with backend auto_title heuristics. */
+function looksLikeExhibitFilename(name) {
+  const text = String(name || "");
+  if (!text) return false;
+  return (
+    /(?:^|[\s_\-\u2010-\u2015.\/(])exhibit(?:\s*\(\s*s\s*\))?(?=$|[\s_\-\u2010-\u2015.\/(])/i.test(
+      text
+    ) || /\bexhibit\b/i.test(text)
+  );
+}
+
+function proposeExhibitDisplayName(filename) {
+  const stem = String(filename || "")
+    .replace(/\.[A-Za-z0-9]+$/, "")
+    .replace(/\s*\(\d+\)\s*$/, "")
+    .trim();
+  // "111 - EXHIBIT(S) - P …" → Exhibit 111 (server auto_title is authoritative).
+  const leading = stem.match(/^(\d{1,4})(?:\s*[\-\u2010-\u2015]\s*|\s+)(?=exhibit)/i);
+  if (leading && /exhibit\s*\(\s*s\s*\)/i.test(stem)) {
+    return `Exhibit ${leading[1]}`;
+  }
+  const underscored = stem.match(/^exhibit[_]+([A-Za-z0-9]{1,4})[_]+(\d{1,4})$/i);
+  if (underscored) {
+    return `Exhibit ${underscored[1].toUpperCase()}_${underscored[2]}`;
+  }
+  return null;
+}
+
+function resolveHostedUploadLabels(file, { displayName, docKind } = {}) {
+  const fname = file?.name || "";
+  let resolvedKind = docKind || undefined;
+  let resolvedName = displayName || undefined;
+  if (!resolvedKind && looksLikeExhibitFilename(fname)) {
+    resolvedKind = "exhibit";
+  }
+  if ((!resolvedName || resolvedName === fname) && looksLikeExhibitFilename(fname)) {
+    resolvedName = proposeExhibitDisplayName(fname) || resolvedName || fname;
+  }
+  return { displayName: resolvedName, docKind: resolvedKind };
+}
+
 export async function uploadCaseDocument(caseId, file, { displayName, autoScan = true, docKind, filedDate } = {}) {
   const cs = desktop();
   if (cs) {
@@ -392,9 +434,13 @@ export async function uploadCaseDocument(caseId, file, { displayName, autoScan =
     const { rememberScanFile, sha256OfFile } = await import("./localFiles.js");
     const sha = await sha256OfFile(file);
     await rememberScanFile(file, sha);
-    const job = await createAnalysisJob(file, {
+    const labels = resolveHostedUploadLabels(file, {
       displayName: displayName || file.name,
-      docKind: docKind || undefined,
+      docKind,
+    });
+    const job = await createAnalysisJob(file, {
+      displayName: labels.displayName || file.name,
+      docKind: labels.docKind || undefined,
       matterId: caseId,
       filedDate: filedDate || undefined,
       submittedBy: "web-app",
@@ -740,11 +786,12 @@ export async function createAnalysisJob(
   file,
   { displayName, docKind, submittedBy = "web-app", matterId, caseId, filedDate } = {}
 ) {
+  const labels = resolveHostedUploadLabels(file, { displayName, docKind });
   const body = new FormData();
   body.append("file", file);
   body.append("submitted_by", submittedBy);
-  if (displayName) body.append("display_name", displayName);
-  if (docKind) body.append("doc_kind", docKind);
+  if (labels.displayName) body.append("display_name", labels.displayName);
+  if (labels.docKind) body.append("doc_kind", labels.docKind);
   const mid = matterId || caseId;
   if (mid) body.append("matter_id", mid);
   if (filedDate) body.append("filed_date", filedDate);

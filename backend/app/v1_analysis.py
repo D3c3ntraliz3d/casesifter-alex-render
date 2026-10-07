@@ -40,6 +40,50 @@ _SESSION_ENTITLEMENT_CACHE: dict[str, tuple[float, dict]] = {}
 _SESSION_CACHE_TTL_S = 45.0
 
 
+def _resolve_upload_labels(
+    filename: str,
+    display_name: str | None,
+    doc_kind: str | None,
+    text_sample: str = "",
+) -> tuple[str, str | None]:
+    """Mirror local vault upload labeling for hosted /v1/jobs + matter persist.
+
+    Hosted clients often echo the original filename as display_name and omit
+    doc_kind. Without this, EXHIBIT(S) packets persist as Unknown.
+    """
+    from app.auto_title import looks_like_exhibit_filename, propose_document_title
+    from app.scan_profile import COURT_FILING_KINDS
+
+    safe = Path(filename or "").name
+    try:
+        proposed_name, proposed_kind = propose_document_title(safe, text_sample or "")
+    except Exception:
+        proposed_name, proposed_kind = Path(safe).stem.replace("_", " "), None
+
+    user_name = (display_name or "").strip()
+    # Hosted uploadCaseDocument sends file.name as display_name — treat as unset.
+    if not user_name or user_name == safe or user_name == (filename or "").strip():
+        final_name = proposed_name
+    else:
+        final_name = user_name
+
+    user_kind = (doc_kind or "").strip()
+    if looks_like_exhibit_filename(safe) or looks_like_exhibit_filename(final_name):
+        final_kind = "exhibit"
+        if (
+            (not user_name or user_name == safe or user_name == (filename or "").strip())
+            and proposed_name
+        ):
+            final_name = proposed_name
+    elif user_kind:
+        final_kind = user_kind
+    elif proposed_kind and proposed_kind.strip().lower() not in COURT_FILING_KINDS:
+        final_kind = proposed_kind
+    else:
+        final_kind = None
+    return final_name, final_kind
+
+
 class CaseChatPacketDoc(BaseModel):
     document_id: str = Field(min_length=1, max_length=80)
     display_name: str | None = None
@@ -292,12 +336,30 @@ def _run_ephemeral(
         maybe_delete_after_terminal(job_id, retain_report=persist)
         return
     try:
+        sample = ""
+        if not (doc_kind or "").strip():
+            suffix = dest.suffix.lower()
+            if suffix == ".pdf":
+                try:
+                    from app.scan_profile import peek_pdf_text
+
+                    sample = peek_pdf_text(dest)[:4000]
+                except Exception:
+                    sample = ""
+            elif suffix in {".txt", ".text"}:
+                try:
+                    sample = dest.read_text(encoding="utf-8", errors="ignore")[:4000]
+                except OSError:
+                    sample = ""
+        resolved_name, resolved_kind = _resolve_upload_labels(
+            dest.name, display_name, doc_kind, sample
+        )
         report = run_pipeline(
             job_id,
             dest,
             submitted_by=submitted_by,
-            display_name=display_name,
-            doc_kind=doc_kind,
+            display_name=resolved_name,
+            doc_kind=resolved_kind,
             prior_snapshots=prior_snapshots or None,
         )
         if persist and matter_id and firm_ctx and report is not None:
@@ -307,8 +369,8 @@ def _run_ephemeral(
                 report=report,
                 matter_id=matter_id,
                 firm_ctx=firm_ctx,
-                display_name=display_name,
-                doc_kind=doc_kind,
+                display_name=resolved_name,
+                doc_kind=resolved_kind,
                 filed_date=filed_date,
             )
     except Exception as exc:
