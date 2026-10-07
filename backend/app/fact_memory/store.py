@@ -314,6 +314,16 @@ class FactMemoryStore:
             return True
 
     def _document_dict(self, doc: Document, fernet: Fernet) -> dict[str, Any]:
+        risk_level = None
+        risk_score = None
+        if doc.report_enc:
+            try:
+                report = enc.decrypt_json(fernet, doc.report_enc) or {}
+                if isinstance(report, dict):
+                    risk_level = report.get("risk_level")
+                    risk_score = report.get("risk_score")
+            except Exception:
+                logger.debug("Could not decrypt report risk for doc %s", doc.id, exc_info=True)
         return {
             "id": doc.id,
             "matter_id": doc.matter_id,
@@ -330,6 +340,8 @@ class FactMemoryStore:
             "status": "complete",
             "scan_job_id": doc.last_job_id,
             "has_report": bool(doc.report_enc),
+            "risk_level": risk_level,
+            "risk_score": risk_score,
         }
 
     def list_prior_snapshots(
@@ -594,6 +606,33 @@ class FactMemoryStore:
             s.add(run)
             s.flush()  # ensure run/doc rows exist before findings FK inserts
 
+            # Suppress re-emitting the same material interrupt on later uploads.
+            from app.case_consistency import finding_stable_key
+
+            existing_keys: set[tuple[str, ...]] = set()
+            prior_findings = s.execute(
+                select(FindingRow).where(
+                    FindingRow.firm_id == firm_id,
+                    FindingRow.matter_id == matter_id,
+                    FindingRow.status == "open",
+                )
+            ).scalars().all()
+            for prior in prior_findings:
+                prior_ev = enc.decrypt_json(fernet, prior.evidence_enc) or {}
+                prior_item = {
+                    "id": prior.id,
+                    "finding_type": prior.finding_type,
+                    "title": enc.decrypt_text(fernet, prior.title_enc),
+                    "explanation": enc.decrypt_text(fernet, prior.description_enc),
+                    "evidence": prior_ev,
+                    "field": prior_ev.get("field"),
+                    "fact_named": prior_ev.get("fact_named"),
+                    "claim_quote": prior_ev.get("claim_quote"),
+                    "evidence_quote": prior_ev.get("evidence_quote"),
+                }
+                existing_keys.add(finding_stable_key(prior_item))
+
+            stored_findings = 0
             for finding in findings or []:
                 if not isinstance(finding, dict):
                     continue
@@ -602,6 +641,19 @@ class FactMemoryStore:
                     or finding.get("category")
                     or "finding"
                 )
+                key = finding_stable_key(
+                    {
+                        **finding,
+                        "finding_type": ftype,
+                        "field": (finding.get("evidence") or {}).get("field"),
+                        "fact_named": (finding.get("evidence") or {}).get("fact_named"),
+                        "claim_quote": (finding.get("evidence") or {}).get("claim_quote"),
+                        "evidence_quote": (finding.get("evidence") or {}).get("evidence_quote"),
+                    }
+                )
+                if key in existing_keys:
+                    continue
+                existing_keys.add(key)
                 # Always mint our own finding PK — pipeline ids may exceed varchar(36)
                 # or collide across runs.
                 row = FindingRow(
@@ -620,6 +672,7 @@ class FactMemoryStore:
                     created_at=_utcnow(),
                 )
                 s.add(row)
+                stored_findings += 1
 
             matter.last_activity_at = _utcnow()
             self._audit(s, firm_id, user_id, "document.scan", doc.id)
@@ -630,7 +683,7 @@ class FactMemoryStore:
                 "document_id": doc.id,
                 "run_id": run.id,
                 "fact_count": len(facts or []),
-                "finding_count": len(findings or []),
+                "finding_count": stored_findings,
             }
 
     def _upsert_entities(

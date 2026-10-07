@@ -70,6 +70,45 @@ def purge_firm(auth: dict = Depends(_require_analysis_auth)):
     return {"purged": ctx["firm_id"]}
 
 
+def _elevate_docs_for_conflicts(docs: list[dict], conflicts: list[dict]) -> list[dict]:
+    """Overlay red/yellow on docs cited by material case fact conflicts (triage strip)."""
+    rank = {"green": 0, "yellow": 1, "red": 2}
+    bump: dict[str, str] = {}
+    for conflict in conflicts or []:
+        sev = str(conflict.get("severity") or "")
+        if sev not in {"medium", "high", "critical"}:
+            continue
+        target = "yellow" if sev == "medium" else "red"
+        ids: set[str] = set()
+        for variant in conflict.get("variants") or []:
+            for doc in variant.get("documents") or []:
+                doc_id = doc.get("document_id")
+                if doc_id:
+                    ids.add(str(doc_id))
+        for doc in conflict.get("related_documents") or []:
+            doc_id = doc.get("document_id") or doc.get("id")
+            if doc_id:
+                ids.add(str(doc_id))
+        for doc_id in ids:
+            prev = bump.get(doc_id, "green")
+            if rank.get(target, 0) > rank.get(prev, 0):
+                bump[doc_id] = target
+    if not bump:
+        return docs
+    out = []
+    for doc in docs:
+        row = dict(doc)
+        target = bump.get(str(row.get("id") or ""))
+        if target and rank.get(target, 0) > rank.get(str(row.get("risk_level") or "green"), 0):
+            row["risk_level"] = target
+            if target == "red":
+                row["risk_score"] = max(int(row.get("risk_score") or 0), 70)
+            elif target == "yellow":
+                row["risk_score"] = max(int(row.get("risk_score") or 0), 35)
+        out.append(row)
+    return out
+
+
 @matters_router.get("/{matter_id}")
 def get_matter(matter_id: str, auth: dict = Depends(_require_analysis_auth)):
     ctx = _ctx(auth)
@@ -77,7 +116,12 @@ def get_matter(matter_id: str, auth: dict = Depends(_require_analysis_auth)):
     matter = store.get_matter(ctx["firm_id"], matter_id)
     if not matter:
         raise HTTPException(404, "Matter not found.")
+    from app.case_consistency import aggregate_fact_conflicts
+
     docs = store.list_documents(ctx["firm_id"], matter_id)
+    snaps = store.list_prior_snapshots(ctx["firm_id"], matter_id)
+    conflicts = aggregate_fact_conflicts(snaps)
+    docs = _elevate_docs_for_conflicts(docs, conflicts)
     findings = store.list_findings(ctx["firm_id"], matter_id)
     store.audit(ctx["firm_id"], ctx.get("user_id"), "matter.view", matter_id)
     return {
@@ -106,24 +150,72 @@ def list_findings(matter_id: str, auth: dict = Depends(_require_analysis_auth)):
     store = get_store()
     if not store.get_matter(ctx["firm_id"], matter_id):
         raise HTTPException(404, "Matter not found.")
-    findings = store.list_findings(ctx["firm_id"], matter_id)
+    from app.case_consistency import (
+        aggregate_fact_conflicts,
+        dedupe_gotchas,
+        scrub_misattributed_employment_copy,
+    )
+
+    raw = store.list_findings(ctx["firm_id"], matter_id)
     store.audit(ctx["firm_id"], ctx.get("user_id"), "findings.view", matter_id)
-    # Map to gotchas-ish shape for the Cases UI board.
-    gotchas = [
-        {
-            **f,
-            "category": "case_consistency" if f.get("finding_type") == "fact_conflict" else "gotcha",
-            "why_it_may_matter": f.get("explanation"),
-        }
-        for f in findings
-        if f.get("severity") in {"high", "medium", "critical"}
+
+    # One card per fact pair — persist can re-emit the same interrupt on every scan.
+    findings = [
+        scrub_misattributed_employment_copy(f)
+        for f in dedupe_gotchas(raw)
     ]
+
+    # Case-level aggregate cards (one per attribute cluster). Prefer these for
+    # documentary fact conflicts so the board does not also list pairwise gotchas.
+    snaps = store.list_prior_snapshots(ctx["firm_id"], matter_id)
+    fact_conflicts = [
+        scrub_misattributed_employment_copy(fc)
+        for fc in aggregate_fact_conflicts(snaps)
+        if str(fc.get("severity") or "") in {"high", "medium", "critical"}
+    ]
+    conflict_fields = {
+        str(fc.get("field") or "").strip().lower()
+        for fc in fact_conflicts
+        if fc.get("field")
+    }
+
+    gotchas = []
+    for f in findings:
+        if f.get("severity") not in {"high", "medium", "critical"}:
+            continue
+        ev = f.get("evidence") or {}
+        if ev.get("case_impact") == "noise":
+            continue
+        field = str(ev.get("field") or f.get("field") or "").strip().lower()
+        # Skip documentary fact_conflict rows already covered by aggregate cards.
+        if (
+            (f.get("finding_type") == "fact_conflict" or ev.get("analysis_type") == "fact_conflict")
+            and ev.get("documentary")
+            and (not field or field in conflict_fields)
+        ):
+            continue
+        gotchas.append(
+            {
+                **f,
+                "category": "case_consistency"
+                if f.get("finding_type") == "fact_conflict"
+                else "gotcha",
+                "why_it_may_matter": f.get("why_it_may_matter") or f.get("explanation"),
+                "attorney_why": f.get("attorney_why") or ev.get("attorney_why"),
+                "claim_quote": f.get("claim_quote") or ev.get("claim_quote"),
+                "evidence_quote": f.get("evidence_quote") or ev.get("evidence_quote"),
+                "fact_named": f.get("fact_named") or ev.get("fact_named"),
+                "case_impact": ev.get("case_impact"),
+                "case_impact_bucket": ev.get("case_impact_bucket"),
+                "analysis_type": ev.get("analysis_type") or f.get("finding_type"),
+                "verified": True,
+            }
+        )
+
     return {
         "findings": findings,
         "gotchas": gotchas,
-        "fact_conflicts": [
-            f for f in findings if (f.get("evidence") or {}).get("documentary")
-        ],
+        "fact_conflicts": fact_conflicts,
     }
 
 

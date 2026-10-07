@@ -814,7 +814,13 @@ def _score_pair(left: dict[str, Any], right: dict[str, Any], key: str) -> dict[s
         if str(left.get("value")) == str(right.get("value")):
             return _row(left, right, key, label, "same year", "Years match.", False, False, confidence=40)
         discrepancy = f"{left.get('display')} vs {right.get('display')}"
-        materiality = f"{label} flags when the year differs for the same person/employer."
+        if key == "employment_tax_year":
+            materiality = (
+                "Same person/employer with incompatible employment tax years in "
+                "documentary exhibits is a credibility interrupt."
+            )
+        else:
+            materiality = f"{label} flags when the year differs across the party's own papers."
         return _row(left, right, key, label, discrepancy, materiality, True, False, confidence=80)
     if kind == "address":
         if str(left.get("value")) == str(right.get("value")):
@@ -847,33 +853,51 @@ def _score_pair(left: dict[str, Any], right: dict[str, Any], key: str) -> dict[s
             )
         over = (left.get("month_key") != right.get("month_key")) or deadline
         discrepancy = f"{left.get('display')} vs {right.get('display')}"
-        if key == "date_of_birth":
-            materiality = (
-                "Date of birth cannot differ across the party's own documents — "
-                "identity conflict is a credibility interrupt."
-            )
-        elif key == "occupancy_start":
-            materiality = (
-                "Same person with incompatible occupancy-start dates in their own "
-                "affidavits / pleadings is a credibility interrupt."
-            )
-        elif left.get("documentary") or right.get("graph") or left.get("graph"):
-            materiality = (
-                "Same person/employer with incompatible employment dates in documentary "
-                "exhibits is a credibility interrupt."
-            )
-        else:
-            materiality = (
-                "Date flags when the month or year differs, or when a notice/foreclosure deadline day does not match."
-            )
+        documentary = bool(
+            left.get("documentary") or right.get("documentary") or right.get("graph") or left.get("graph")
+        )
+        materiality = _date_conflict_materiality(key, label, documentary=documentary)
         row = _row(left, right, key, label, discrepancy, materiality, over, False, confidence=76 if over else 40)
-        if left.get("documentary") or right.get("graph") or left.get("graph") or key == "date_of_birth":
+        if documentary or key == "date_of_birth":
             row["documentary"] = True
-        if key == "occupancy_start" and over:
+        if key in {"occupancy_start", "mortgage_origination", "employment_start", "date_of_birth"} and over:
             row["documentary"] = True
             row["case_impact_bucket"] = "credibility"
         return row
     return None
+
+
+def _date_conflict_materiality(key: str, label: str, *, documentary: bool = False) -> str:
+    """Attribute-aware interrupt copy — never slap employment boilerplate on mortgage facts."""
+    if key == "date_of_birth":
+        return (
+            "Date of birth cannot differ across the party's own documents — "
+            "identity conflict is a credibility interrupt."
+        )
+    if key == "occupancy_start":
+        return (
+            "Same person with incompatible occupancy-start dates in their own "
+            "affidavits / pleadings is a credibility interrupt."
+        )
+    if key == "employment_start":
+        return (
+            "Same person/employer with incompatible employment dates in documentary "
+            "exhibits is a credibility interrupt."
+        )
+    if key == "mortgage_origination":
+        return (
+            "Same loan with incompatible mortgage or note origination dates in "
+            "documentary exhibits is a credibility interrupt."
+        )
+    if documentary:
+        return (
+            f"Same nameable fact ({label}) with incompatible dates in documentary "
+            "exhibits is a credibility interrupt."
+        )
+    return (
+        "Date flags when the month or year differs, or when a notice/foreclosure "
+        "deadline day does not match."
+    )
 
 
 def _row(
@@ -1006,10 +1030,34 @@ def _quote_key(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().lower())[:240]
 
 
+def finding_stable_key(item: dict[str, Any]) -> tuple[str, ...]:
+    """Stable dedupe key: type + docs + attribute + values (or gotcha cluster)."""
+    ev = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
+    field = str(ev.get("field") or item.get("field") or "").strip().lower()
+    fact = str(ev.get("fact_named") or item.get("fact_named") or "").strip().lower()[:80]
+    analysis = str(
+        ev.get("analysis_type") or item.get("finding_type") or item.get("analysis_type") or ""
+    ).strip().lower()
+    claim = _quote_key(str(ev.get("claim_quote") or item.get("claim_quote") or ""))
+    evidence = _quote_key(str(ev.get("evidence_quote") or item.get("evidence_quote") or ""))
+    this_v = _quote_key(str(ev.get("this_display") or item.get("this_display") or claim))
+    prior_v = _quote_key(str(ev.get("prior_display") or item.get("prior_display") or evidence))
+    values = tuple(sorted(v for v in (this_v, prior_v) if v))
+    if field or fact or values:
+        return ("pair", analysis or "finding", field or fact or "fact",) + values
+    return _gotcha_cluster_key(item)
+
+
 def _gotcha_cluster_key(item: dict[str, Any]) -> tuple[str, ...]:
     """One card per fact theme (service at an address, settlement date), not per sentence."""
     if item.get("tainted_support") and item.get("document_id"):
         return ("tainted", str(item.get("document_id")))
+    ev = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
+    field = str(ev.get("field") or item.get("field") or "").strip().lower()
+    if field:
+        claim = _quote_key(str(ev.get("claim_quote") or item.get("claim_quote") or ""))
+        evidence = _quote_key(str(ev.get("evidence_quote") or item.get("evidence_quote") or ""))
+        return ("field", field, claim, evidence)
     blob = f"{item.get('claim_quote') or ''} {item.get('evidence_quote') or ''}".lower()
     dates = tuple(sorted(set(re.findall(r"\b(?:\d{1,2}/\d{1,2}/\d{2,4}|(?:19|20)\d{2})\b", blob))))[:2]
     nums = tuple(sorted(set(re.findall(r"\b\d{3,5}\b", blob))))[:2]
@@ -1019,7 +1067,7 @@ def _gotcha_cluster_key(item: dict[str, Any]) -> tuple[str, ...]:
         return ("settlement",) + dates + nums
     if re.search(r"\b(resid|lived|address)\b", blob) and nums:
         return ("residence",) + nums
-    fact = str(item.get("fact_named") or "").strip().lower()[:80]
+    fact = str(item.get("fact_named") or ev.get("fact_named") or "").strip().lower()[:80]
     if fact:
         return ("fact", fact)
     return (
@@ -1034,7 +1082,7 @@ def dedupe_gotchas(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     grouped: dict[tuple[str, ...], dict[str, Any]] = {}
     order: list[tuple[str, ...]] = []
     for item in items:
-        key = _gotcha_cluster_key(item)
+        key = finding_stable_key(item)
         related = {
             "document_id": item.get("document_id"),
             "display_name": item.get("display_name") or item.get("claim_source") or item.get("evidence_source"),
@@ -1051,6 +1099,62 @@ def dedupe_gotchas(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if related.get("document_id") and related["document_id"] not in seen:
             existing.setdefault("related_documents", []).append(related)
     return [grouped[key] for key in order]
+
+
+def scrub_misattributed_employment_copy(item: dict[str, Any]) -> dict[str, Any]:
+    """Rewrite employment boilerplate when the fact is not employment-related."""
+    ev = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
+    field = str(ev.get("field") or item.get("field") or "").strip().lower()
+    employment_fields = {"employment_start", "employment_tax_year", "employer_of_record", "annual_income"}
+    if field in employment_fields:
+        return item
+    blobs = [
+        str(item.get("explanation") or ""),
+        str(item.get("why_it_may_matter") or ""),
+        str(item.get("attorney_why") or ""),
+        str(ev.get("attorney_why") or ""),
+        str(item.get("why_suspicious") or ""),
+    ]
+    if not any(re.search(r"(?i)\bemploy(?:er|ment)\b", b) for b in blobs):
+        return item
+    meta = FACT_META.get(field) or {}
+    label = str(meta.get("label") or ev.get("fact_named") or item.get("fact_named") or field or "fact")
+    kind = meta.get("kind") or ""
+    if kind == "date" or field in {"mortgage_origination", "occupancy_start", "date_of_birth"}:
+        replacement = _date_conflict_materiality(field, label, documentary=True)
+    elif field == "stated_principal" or kind == "money":
+        replacement = (
+            f"Same loan with incompatible {label.lower()} figures in documentary "
+            "exhibits is a damages / credibility interrupt."
+        )
+    else:
+        replacement = (
+            f"Same nameable fact ({label}) with incompatible values in documentary "
+            "exhibits is a credibility interrupt."
+        )
+    out = dict(item)
+    for key in ("explanation", "why_it_may_matter", "attorney_why", "why_suspicious"):
+        text = str(out.get(key) or "")
+        if re.search(r"(?i)\bemploy(?:er|ment)\b", text):
+            # Keep leading quote/discrepancy sentence when present; replace the bad tail.
+            if "Discrepancy:" in text:
+                head, _, _tail = text.partition("Discrepancy:")
+                # head already ends before Discrepancy; rebuild with correct materiality.
+                disc = ""
+                m = re.search(r"Discrepancy:\s*([^.]+)\.", text)
+                if m:
+                    disc = f" Discrepancy: {m.group(1).strip()}."
+                out[key] = (head.strip() + disc + " " + replacement).strip()
+            else:
+                out[key] = replacement
+    if isinstance(out.get("evidence"), dict):
+        ev2 = dict(out["evidence"])
+        for key in ("attorney_why", "materiality_reason", "case_impact_rationale"):
+            text = str(ev2.get(key) or "")
+            if re.search(r"(?i)\bemploy(?:er|ment)\b", text):
+                ev2[key] = replacement
+        out["evidence"] = ev2
+    return out
 
 
 def fact_conflicts_from_packet(documents: list[dict[str, Any]]) -> list[dict[str, Any]]:

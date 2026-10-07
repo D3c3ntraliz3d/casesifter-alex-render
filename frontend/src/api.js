@@ -581,11 +581,28 @@ export async function listCaseGotchas(caseId) {
     const findings = data.findings || [];
     const gotchas = data.gotchas || [];
     const factConflicts = data.fact_conflicts || [];
+    // Case impact count must match the filtered board cards (gotchas + conflicts).
+    const boardMaterial = [
+      ...factConflicts.filter((f) => f.severity !== "info"),
+      ...gotchas.filter((f) => f.case_impact !== "noise" && f.severity !== "info"),
+    ];
     return {
       gotchas,
       factConflicts,
       risksElevated: factConflicts.filter((f) => f.severity === "high").length,
-      caseImpact: summarizeCaseImpact(findings),
+      caseImpact: {
+        ...summarizeCaseImpact(findings),
+        material_count: boardMaterial.length,
+        material: boardMaterial.slice(0, 12).map((f) => ({
+          id: f.id,
+          title: f.title,
+          severity: f.severity,
+          impact: f.case_impact || "material_review",
+          bucket: f.case_impact_bucket,
+          tainted_support: Boolean(f.tainted_support || f.evidence?.tainted_support),
+          analysis_type: f.analysis_type || f.finding_type || f.evidence?.analysis_type,
+        })),
+      },
     };
   }
   const res = await apiFetch(`/api/cases/${caseId}/gotchas`);

@@ -1970,6 +1970,32 @@ function relatedDocs(item, documents) {
   return fallback ? [fallback] : [];
 }
 
+function boardItemKey(item) {
+  const field = String(item.field || item.evidence?.field || item.fact_named || "").toLowerCase();
+  const claim = String(item.claim_quote || item.evidence?.claim_quote || "").toLowerCase().slice(0, 120);
+  const evidence = String(item.evidence_quote || item.evidence?.evidence_quote || "").toLowerCase().slice(0, 120);
+  const variants = (item.variants || [])
+    .map((v) => String(v.display || v.value || "").toLowerCase())
+    .sort()
+    .join("|");
+  if (field || claim || evidence || variants) {
+    return [field, claim, evidence, variants].join("::");
+  }
+  return String(item.id || item.title || Math.random());
+}
+
+function dedupeBoardItems(items) {
+  const seen = new Set();
+  const out = [];
+  for (const item of items || []) {
+    const key = boardItemKey(item);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+  return out;
+}
+
 function CaseGotchaBoard({ caseId, documents, onOpenReport, onRisksElevated }) {
   const [gotchas, setGotchas] = useState([]);
   const [factConflicts, setFactConflicts] = useState([]);
@@ -1999,13 +2025,24 @@ function CaseGotchaBoard({ caseId, documents, onOpenReport, onRisksElevated }) {
     };
   }, [caseId, documents, onRisksElevated]);
 
-  const materialGotchas = gotchas.filter(
-    (item) => item.case_impact !== "noise" && item.severity !== "info",
+  const materialGotchas = dedupeBoardItems(
+    gotchas.filter((item) => item.case_impact !== "noise" && item.severity !== "info"),
   );
-  const total = materialGotchas.length + factConflicts.length;
+  // Prefer aggregate fact-conflict cards; drop gotcha rows that duplicate the same field.
+  const conflictFields = new Set(
+    factConflicts.map((item) => String(item.field || "").toLowerCase()).filter(Boolean),
+  );
+  const uniqueGotchas = materialGotchas.filter((item) => {
+    const field = String(item.field || item.evidence?.field || "").toLowerCase();
+    if (!field || !conflictFields.has(field)) return true;
+    const analysis = item.analysis_type || item.finding_type || item.evidence?.analysis_type;
+    return analysis !== "fact_conflict";
+  });
+  const uniqueConflicts = dedupeBoardItems(factConflicts);
+  const total = uniqueGotchas.length + uniqueConflicts.length;
   const impact = caseImpact || {};
-  // case_impact summary is findings-only; factConflicts are case-level aggregate cards.
-  const materialCount = (impact.material_count ?? materialGotchas.length) + factConflicts.length;
+  // Count must match the filtered cards actually rendered (not a stale undeduped array).
+  const materialCount = total;
   const noiseCount = impact.noise_collapsed ?? impact.noise_count ?? 0;
   const fraudCount = impact.fraud_count ?? 0;
 
@@ -2043,7 +2080,7 @@ function CaseGotchaBoard({ caseId, documents, onOpenReport, onRisksElevated }) {
           overlap, he-said-she-said, or no case-impact bucket).
         </p>
       )}
-      {factConflicts.map((item) => (
+      {uniqueConflicts.map((item) => (
         <div key={item.id || item.field} className="gotcha-item">
           <h3>{item.title}</h3>
           <p className="footnote">{item.gotcha_level || "Case fact conflict"}</p>
@@ -2070,7 +2107,7 @@ function CaseGotchaBoard({ caseId, documents, onOpenReport, onRisksElevated }) {
           </div>
         </div>
       ))}
-      {materialGotchas.map((item) => {
+      {uniqueGotchas.map((item) => {
         const sources = relatedDocs(item, documents);
         const tainted = item.tainted_support || item.evidence?.tainted_support;
         return (
