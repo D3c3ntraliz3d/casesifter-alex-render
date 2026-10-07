@@ -3,6 +3,7 @@ import { Archive, FolderOpen, MessageSquare, RefreshCw, RotateCcw, Search, Shiel
 import {
   archiveCase,
   askCaseChat,
+  ANALYSIS_OFFLINE_MESSAGE,
   createCase,
   deleteCase,
   deleteDocument,
@@ -11,6 +12,8 @@ import {
   getCase,
   getEntitlement,
   getJob,
+  isAnalysisUnreachableError,
+  isHostedAnalysis,
   jobSourceUrl,
   listCaseChat,
   listCaseGotchas,
@@ -243,14 +246,26 @@ export default function App() {
   const [job, setJob] = useState(null);
   const [tab, setTab] = useState("summary");
   const [error, setError] = useState("");
+  const [analysisOffline, setAnalysisOffline] = useState(false);
   const [entitlement, setEntitlement] = useState(null);
   const [busy, setBusy] = useState(false);
   const [query, setQuery] = useState("");
   const checkoutTrialStarted = useRef(false);
 
+  function markAnalysisOffline(err) {
+    if (!isHostedAnalysis() || !isAnalysisUnreachableError(err)) return false;
+    setAnalysisOffline(true);
+    setError(ANALYSIS_OFFLINE_MESSAGE);
+    return true;
+  }
+
   async function refreshCases() {
     const rows = await listCases();
     setCases(rows);
+    if (isHostedAnalysis()) {
+      setAnalysisOffline(false);
+      setError((prev) => (prev === ANALYSIS_OFFLINE_MESSAGE ? "" : prev));
+    }
   }
 
   async function refreshCase(id = caseId) {
@@ -271,14 +286,11 @@ export default function App() {
   useEffect(() => {
     // Marketing signup stores the session on casesifter.com; absorb ?cs_token= handoff here.
     absorbSessionHandoff();
-    // Soft-launch: case vault is optional. Never surface opaque browser
-    // "Failed to fetch" (suspended analysis / CORS) as an Account-blocking banner.
+    // Hosted analysis: list/create matters hit casesifter-analysis. Surface a clear
+    // ops banner + gate New case — do not leave an empty "No cases yet" state.
     refreshCases().catch((err) => {
-      const msg = String(err?.message || "");
-      if (/failed to fetch|networkerror|load failed|analysis service unreachable|phase 2/i.test(msg)) {
-        return;
-      }
-      setError(msg);
+      if (markAnalysisOffline(err)) return;
+      setError(String(err?.message || "Could not load cases."));
     });
     refreshEntitlement();
   }, []);
@@ -599,6 +611,10 @@ export default function App() {
       }
       return false;
     }
+    if (analysisOffline) {
+      setError(ANALYSIS_OFFLINE_MESSAGE);
+      return false;
+    }
     return true;
   }
 
@@ -728,6 +744,9 @@ export default function App() {
       </header>
 
       {error && <div className="banner error">{error}</div>}
+      {analysisOffline && !error && view !== "account" && (
+        <div className="banner error">{ANALYSIS_OFFLINE_MESSAGE}</div>
+      )}
 
       {view === "cases" && (
         <CasesPage
@@ -737,6 +756,7 @@ export default function App() {
           archivedCount={archivedCases.length}
           query={query}
           busy={busy}
+          analysisOffline={analysisOffline}
           onRequestNewCase={handleNewCaseIntent}
           onCreate={async (payload) => {
             setBusy(true);
@@ -746,7 +766,7 @@ export default function App() {
               await refreshCases();
               await openCase(created.id);
             } catch (err) {
-              setError(err.message);
+              if (!markAnalysisOffline(err)) setError(err.message);
             } finally {
               setBusy(false);
             }
@@ -833,6 +853,7 @@ function CasesPage({
   archivedCount,
   query,
   busy,
+  analysisOffline = false,
   onRequestNewCase,
   onCreate,
   onOpen,
@@ -849,6 +870,10 @@ function CasesPage({
   const [showNew, setShowNew] = useState(false);
   const [selectedOpen, setSelectedOpen] = useState(() => new Set());
   const [selectedArchived, setSelectedArchived] = useState(() => new Set());
+
+  useEffect(() => {
+    if (analysisOffline) setShowNew(false);
+  }, [analysisOffline]);
 
   useEffect(() => {
     setSelectedOpen((prev) => {
@@ -900,17 +925,21 @@ function CasesPage({
           <p className="kicker">Your matters</p>
           <h2 className="serif">Cases</h2>
           <p className="footnote">
-            {query.trim()
-              ? `${cases.length} match${cases.length === 1 ? "" : "es"}`
-              : totalCount === 0
-                ? "Open a case, drop in files, see what stands out."
-                : `${totalCount} open · tap one to continue`}
-            {archivedCount ? ` · ${archivedCount} archived` : ""}
+            {analysisOffline
+              ? "Cases are unavailable until analysis is back online."
+              : query.trim()
+                ? `${cases.length} match${cases.length === 1 ? "" : "es"}`
+                : totalCount === 0
+                  ? "Open a case, drop in files, see what stands out."
+                  : `${totalCount} open · tap one to continue`}
+            {!analysisOffline && archivedCount ? ` · ${archivedCount} archived` : ""}
           </p>
         </div>
         <button
           className="btn gold"
           type="button"
+          disabled={busy || (analysisOffline && !showNew)}
+          title={analysisOffline ? ANALYSIS_OFFLINE_MESSAGE : undefined}
           onClick={() => {
             if (showNew) {
               setShowNew(false);
@@ -967,18 +996,26 @@ function CasesPage({
           <div className="empty">
             <FolderOpen size={28} strokeWidth={1.5} />
             <p>
-              {totalCount === 0
-                ? "No cases yet"
-                : "Nothing matches that search"}
+              {analysisOffline
+                ? "Can't reach analysis"
+                : totalCount === 0
+                  ? "No cases yet"
+                  : "Nothing matches that search"}
             </p>
-            {totalCount === 0 && (
+            {analysisOffline ? (
+              <p className="footnote">
+                On Render: attach Postgres and set DATABASE_URL + FACT_MEMORY_MASTER_KEY on{" "}
+                <strong>casesifter-analysis</strong>, then Resume and confirm{" "}
+                <code>/api/health</code> is 200. Account and billing still work.
+              </p>
+            ) : totalCount === 0 ? (
               <>
                 <p className="footnote">Create a case, add filings, and CaseSifter flags what needs a look.</p>
                 <button className="btn gold" type="button" onClick={() => openNewCaseForm()}>
                   New case
                 </button>
               </>
-            )}
+            ) : null}
           </div>
         ) : (
           <>

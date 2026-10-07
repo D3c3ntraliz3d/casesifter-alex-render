@@ -220,16 +220,25 @@ function vaultUnavailableError() {
  * Soft-launch browser build points VITE_ANALYSIS_API_URL at APP_MODE=analysis.
  * Matters / fact memory live on /api/v1/matters (not the local vault /api/cases).
  */
-function isHostedAnalysis() {
+export function isHostedAnalysis() {
   return Boolean(ANALYSIS_API_URL);
+}
+
+/** Operator-facing copy when hosted analysis (matters + scans) is down. */
+export const ANALYSIS_OFFLINE_MESSAGE =
+  "Analysis service unreachable (suspended or offline). New cases and scans need it. On Render: (1) attach Postgres and set DATABASE_URL + FACT_MEMORY_MASTER_KEY on casesifter-analysis, (2) Resume the service, (3) confirm /api/health returns 200. Account and billing still work.";
+
+export function isAnalysisUnreachableError(err) {
+  const msg = String(err?.message || err || "");
+  return /analysis service unreachable|failed to fetch|networkerror|load failed|503|service suspended|phase 2/i.test(
+    msg
+  );
 }
 
 function analysisUnreachableError(cause) {
   const raw = String(cause?.message || cause || "");
   if (/failed to fetch|networkerror|load failed|503|service suspended/i.test(raw)) {
-    return new Error(
-      "Analysis service unreachable (suspended or offline). Account and billing still work; resume casesifter-analysis on Render to scan."
-    );
+    return new Error(ANALYSIS_OFFLINE_MESSAGE);
   }
   return cause instanceof Error ? cause : new Error(raw || "Analysis request failed.");
 }
