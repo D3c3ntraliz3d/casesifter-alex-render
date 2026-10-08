@@ -1,3 +1,5 @@
+import { rememberScanFile, sha256OfFile } from "./localFiles.js";
+
 const jsonHeaders = { Accept: "application/json" };
 
 /** Soft-launch hosted URLs (Vite build-time). Fallbacks keep local + marketing signup working. */
@@ -459,55 +461,40 @@ export async function uploadCaseDocument(
     // Bulk callers pass waitForComplete:false so one slow/failed job cannot wipe the batch.
     // #region agent log
     const _dbg = (message, data, hypothesisId) => {
+      const payload = {
+        sessionId: "de3dd9",
+        runId: "post-fix",
+        hypothesisId,
+        location: "api.js:uploadCaseDocument",
+        message,
+        data,
+        timestamp: Date.now(),
+      };
+      // Local Cursor ingest (works on http://localhost only; mixed-content blocked on HTTPS).
       fetch("http://127.0.0.1:7576/ingest/14fa87bc-56ce-47bf-bc32-89e0afe8ad7c", {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "de3dd9" },
-        body: JSON.stringify({
-          sessionId: "de3dd9",
-          runId: "upload-localfiles",
-          hypothesisId,
-          location: "api.js:uploadCaseDocument",
-          message,
-          data,
-          timestamp: Date.now(),
-        }),
+        body: JSON.stringify(payload),
       }).catch(() => {});
-    };
-    _dbg("hosted upload enter", { fileName: file?.name || "", hosted: true }, "D");
-    let localFilesMod;
-    try {
-      // Vite resolves this to the hashed /assets/localFiles-*.js URL at build time.
-      const chunkProbeUrl = new URL("./localFiles.js", import.meta.url).href;
-      let probe = { ok: false, status: 0, contentType: "", bodyStart: "" };
-      try {
-        const res = await fetch(chunkProbeUrl, { cache: "no-store" });
-        const text = await res.text();
-        probe = {
-          ok: res.ok,
-          status: res.status,
-          contentType: res.headers.get("content-type") || "",
-          bodyStart: text.slice(0, 80),
-          looksLikeHtml: /^\s*</.test(text),
-        };
-      } catch (probeErr) {
-        probe = { ok: false, status: -1, error: String(probeErr?.message || probeErr) };
+      // HTTPS-safe sink on analysis (readable via GET /api/agent-debug).
+      if (ANALYSIS_API_URL) {
+        fetch(`${ANALYSIS_API_URL}/api/agent-debug`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Accept: "application/json" },
+          body: JSON.stringify(payload),
+        }).catch(() => {});
       }
-      _dbg("localFiles chunk probe before import", { chunkProbeUrl, probe }, "A");
-      localFilesMod = await import("./localFiles.js");
-      _dbg("localFiles dynamic import ok", { keys: Object.keys(localFilesMod || {}) }, "C");
-    } catch (importErr) {
-      _dbg(
-        "localFiles dynamic import FAILED",
-        {
-          name: importErr?.name || "",
-          message: String(importErr?.message || importErr),
-          href: typeof window !== "undefined" ? window.location.href : "",
-        },
-        "B"
-      );
-      throw importErr;
-    }
-    const { rememberScanFile, sha256OfFile } = localFilesMod;
+    };
+    _dbg(
+      "hosted upload enter (static localFiles import)",
+      {
+        fileName: file?.name || "",
+        hosted: true,
+        hasRemember: typeof rememberScanFile === "function",
+        hasSha: typeof sha256OfFile === "function",
+      },
+      "D"
+    );
     // #endregion
     const sha = await sha256OfFile(file);
     await rememberScanFile(file, sha);
