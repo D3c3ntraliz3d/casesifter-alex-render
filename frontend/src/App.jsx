@@ -309,6 +309,12 @@ export default function App() {
     if (!id) return null;
     const data = await getCase(id);
     setCaseData(data);
+    // A successful matter read means analysis is reachable. Drop a stale outage
+    // banner left behind by an earlier failed fetch.
+    if (isHostedAnalysis()) {
+      setAnalysisOffline(false);
+      setError((prev) => (prev === ANALYSIS_OFFLINE_MESSAGE ? "" : prev));
+    }
     return data;
   }
 
@@ -1273,7 +1279,12 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
   const inputRef = useRef(null);
   const backfillKeyRef = useRef("");
   const scanningRef = useRef(false);
-  const docs = dedupeDocumentList(caseData.documents || []);
+  // New array every render would retrigger effects that list this as a dependency.
+  const docs = useMemo(
+    () => dedupeDocumentList(caseData.documents || []),
+    [caseData.documents]
+  );
+  const docIdKey = docs.map((d) => d.id).join("\n");
   const waitingDocs = docs.filter((d) => d.status === "uploaded" || d.status === "failed");
   const visibleDocs = docs.filter((doc) =>
     matchesQuery(
@@ -1315,11 +1326,19 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
   }, [caseData.id, docs]);
 
   useEffect(() => {
+    const ids = new Set(docIdKey ? docIdKey.split("\n") : []);
     setSelectedDocs((prev) => {
-      const ids = new Set(docs.map((d) => d.id));
-      return new Set([...prev].filter((id) => ids.has(id)));
+      let changed = false;
+      const next = new Set();
+      for (const id of prev) {
+        if (ids.has(id)) next.add(id);
+        else changed = true;
+      }
+      // Same Set reference: otherwise every case view re-renders forever.
+      if (!changed) return prev;
+      return next;
     });
-  }, [docs]);
+  }, [docIdKey]);
 
   function toggleDocSelect(id) {
     setSelectedDocs((prev) => {
@@ -2171,6 +2190,14 @@ function CaseGotchaBoard({ caseId, documents, onOpenReport, onRisksElevated }) {
   const [factConflicts, setFactConflicts] = useState([]);
   const [caseImpact, setCaseImpact] = useState(null);
   const [showNoise, setShowNoise] = useState(false);
+  const refreshRef = useRef(onRisksElevated);
+  refreshRef.current = onRisksElevated;
+  const elevatedFor = useRef("");
+  // Identity of `documents` changes on every parent render. Key the fetch on content.
+  const docKey = (documents || [])
+    .map((d) => `${d.id}:${d.status}:${d.risk_level || ""}`)
+    .sort()
+    .join("|");
 
   useEffect(() => {
     let cancelled = false;
@@ -2180,8 +2207,11 @@ function CaseGotchaBoard({ caseId, documents, onOpenReport, onRisksElevated }) {
         setGotchas(data.gotchas || []);
         setFactConflicts(data.factConflicts || []);
         setCaseImpact(data.caseImpact || null);
-        if (data.risksElevated && typeof onRisksElevated === "function") {
-          onRisksElevated();
+        // One refresh per document snapshot. Calling this on every response
+        // reloads the matter, which changes `documents`, which fetches again.
+        if (data.risksElevated && elevatedFor.current !== docKey) {
+          elevatedFor.current = docKey;
+          refreshRef.current?.();
         }
       })
       .catch(() => {
@@ -2193,7 +2223,7 @@ function CaseGotchaBoard({ caseId, documents, onOpenReport, onRisksElevated }) {
     return () => {
       cancelled = true;
     };
-  }, [caseId, documents, onRisksElevated]);
+  }, [caseId, docKey]);
 
   const materialGotchas = dedupeBoardItems(
     gotchas.filter((item) => item.case_impact !== "noise" && item.severity !== "info"),
