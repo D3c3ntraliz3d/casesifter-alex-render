@@ -463,7 +463,16 @@ app.add_middleware(
 @app.get("/health")
 def health():
     # Checkout requires both secret + price id; expose that as stripe readiness.
-    return {"status": "ok", "stripe": bool(STRIPE_SECRET and STRIPE_PRICE_ID)}
+    # RENDER_GIT_COMMIT is injected by Render at deploy — report the real live SHA.
+    git_commit = (os.environ.get("RENDER_GIT_COMMIT") or "").strip() or None
+    payload = {
+        "status": "ok",
+        "stripe": bool(STRIPE_SECRET and STRIPE_PRICE_ID),
+        "git_commit_source": "RENDER_GIT_COMMIT",
+        "git_commit": git_commit,
+        "git_commit_short": git_commit[:12] if git_commit else None,
+    }
+    return payload
 
 
 @app.post("/v1/signup")

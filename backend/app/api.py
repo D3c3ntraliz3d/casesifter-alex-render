@@ -61,7 +61,7 @@ SAFE_ID = re.compile(r"^[a-f0-9]{16,64}$")
 
 def _health_payload() -> dict:
     ensure_watchdog()
-    # RENDER_GIT_COMMIT is injected by Render — use it to confirm which SHA is live.
+    # RENDER_GIT_COMMIT is injected by Render at deploy — this is the real live SHA.
     git_commit = (os.environ.get("RENDER_GIT_COMMIT") or "").strip() or None
     mode = settings.resolve_app_mode()
     payload = {
@@ -71,9 +71,14 @@ def _health_payload() -> dict:
         "app_mode": mode,
         # Bumped when blank-kind forensic + PORT CMD restore ships — proves live SHA without dashboard.
         "build": "analysis-lockdown-v2",
+        "git_commit_source": "RENDER_GIT_COMMIT",
     }
     if git_commit:
-        payload["git_commit"] = git_commit[:12]
+        payload["git_commit"] = git_commit
+        payload["git_commit_short"] = git_commit[:12]
+    else:
+        payload["git_commit"] = None
+        payload["git_commit_short"] = None
     return payload
 
 

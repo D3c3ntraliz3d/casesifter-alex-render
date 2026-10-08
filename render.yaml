@@ -96,14 +96,15 @@ services:
     name: casesifter-app
     runtime: static
     rootDir: frontend
-    buildCommand: npm ci && npm run build
+    # RENDER_GIT_COMMIT is injected by Render; write-build-info embeds it in /build-info.json
+    buildCommand: npm ci && node scripts/write-build-info.mjs && npm run build
     staticPublishPath: dist
     buildFilter:
       paths:
         - frontend/**
         - render.yaml
     routes:
-      # SPA fallback — client router / deep links land on index.html
+      # SPA fallback — existing files in dist (e.g. /build-info.json) are served first
       - type: rewrite
         source: /*
         destination: /index.html

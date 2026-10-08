@@ -141,6 +141,18 @@ services:
     command: uvicorn main:app --host 0.0.0.0 --port 8010
 ```
 
+## Earlier outage (P0) — cause and prevention
+
+**Cause:** `casesifter-analysis` was **Suspended by user** in the Render Dashboard (`x-render-routing: suspend-by-user` / HTTP 503). This was not an application crash loop and not a missing health check. While suspended, New case / add filings / scans failed; Account and Stripe control plane kept working.
+
+**What now prevents a silent repeat:**
+1. **Ops rule:** Do **not** Suspend analysis to debug — use Manual Deploy / branch retarget / logs instead. Suspending recreates P0 immediately.
+2. **Product gate:** Hosted UI disables New case and shows a short dismissible offline banner when analysis `/api/health` fails (no fake empty case list).
+3. **Bulk preflight:** Hosted batch upload checks `/api/health` before queuing jobs and offers **Retry failed** if the service blips mid-batch.
+4. **Deploy SHA visibility:** Analysis/control `/health` and app `/build-info.json` report `RENDER_GIT_COMMIT` so “which SHA is live” is verifiable without the dashboard.
+
+Postgres + `DATABASE_URL` + `FACT_MEMORY_MASTER_KEY` must stay set; missing secrets break fact-memory writes even when health is 200.
+
 ## Ops: unsuspend analysis + attach Postgres
 
 Cannot be done from this agent without Render credentials.
@@ -148,8 +160,9 @@ Cannot be done from this agent without Render credentials.
 1. Render Dashboard → `casesifter-analysis` → **Resume** (if Suspended).
 2. Create managed Postgres; copy Internal Database URL into analysis env `DATABASE_URL` (Blueprint key is `sync: false`).
 3. Generate and set `FACT_MEMORY_MASTER_KEY` (never commit). Rotate = re-encrypt firm keys (plan a migration before rotating in prod).
-4. Deploy; verify `/api/health` and `POST /api/v1/matters` with a session Bearer.
-5. Source PDFs still delete immediately; facts persist when `PERSIST_FACTS=true` and firm `persist_facts` is true.
+4. Deploy; verify `/api/health` (includes `git_commit` = full `RENDER_GIT_COMMIT`) and `POST /api/v1/matters` with a session Bearer.
+5. Confirm app SHA: `GET https://casesifter-app.onrender.com/build-info.json`.
+6. Source PDFs still delete immediately; facts persist when `PERSIST_FACTS=true` and firm `persist_facts` is true.
 
 ## Cutover checklist (John) — cloud-agent branch → `main`
 
