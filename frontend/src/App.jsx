@@ -4,6 +4,7 @@ import {
   archiveCase,
   askCaseChat,
   ANALYSIS_OFFLINE_MESSAGE,
+  checkAnalysisHealth,
   createCase,
   deleteCase,
   deleteDocument,
@@ -154,8 +155,32 @@ function docListTitle(doc) {
   const display = (doc.display_name || "").trim();
   const original = (doc.original_filename || "").trim();
   // Prefer a human rename; otherwise shorten the export name.
+  // Keep exhibit descriptions ("Exhibit 111 — Settlement Aff"), not only "Exhibit N".
   if (display && display !== original) return display;
+  if (/^exhibit\s+\S+/i.test(display) && display.includes("—")) return display;
   return shortDocLabel(display || original);
+}
+
+/** Collapse duplicate matter rows (same sha, or repeated AOM / RPAPL 1303 labels). */
+function dedupeDocumentList(docs) {
+  const seen = new Set();
+  const out = [];
+  for (const doc of docs || []) {
+    const sha = String(doc.sha256 || "").toLowerCase();
+    const label = `${doc.display_name || ""} ${doc.original_filename || ""}`
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim();
+    const aom1303 =
+      /\b(aom|affidavit of mailing|1303|rpapl\s*1303)\b/.test(label)
+        ? `aom1303:${label.replace(/\s+/g, " ")}`
+        : null;
+    const key = sha ? `sha:${sha}` : aom1303 || `id:${doc.id}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(doc);
+  }
+  return out;
 }
 
 function partiesFromCaption(caption = "") {
@@ -246,6 +271,7 @@ export default function App() {
   const [job, setJob] = useState(null);
   const [tab, setTab] = useState("summary");
   const [error, setError] = useState("");
+  const [bannerDismissed, setBannerDismissed] = useState(false);
   const [analysisOffline, setAnalysisOffline] = useState(false);
   const [entitlement, setEntitlement] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -255,9 +281,20 @@ export default function App() {
   function markAnalysisOffline(err) {
     if (!isHostedAnalysis() || !isAnalysisUnreachableError(err)) return false;
     setAnalysisOffline(true);
+    setBannerDismissed(false);
     setError(ANALYSIS_OFFLINE_MESSAGE);
     return true;
   }
+
+  function dismissBanner() {
+    setBannerDismissed(true);
+    setError("");
+  }
+
+  // New errors re-open the single dismissible banner.
+  useEffect(() => {
+    if (error) setBannerDismissed(false);
+  }, [error]);
 
   async function refreshCases() {
     const rows = await listCases();
@@ -743,10 +780,27 @@ export default function App() {
         </nav>
       </header>
 
-      {error && <div className="banner error">{error}</div>}
-      {analysisOffline && !error && view !== "account" && (
-        <div className="banner error">{ANALYSIS_OFFLINE_MESSAGE}</div>
-      )}
+      {(() => {
+        const bannerText =
+          error ||
+          (analysisOffline && view !== "account" && !bannerDismissed
+            ? ANALYSIS_OFFLINE_MESSAGE
+            : "");
+        if (!bannerText || bannerDismissed) return null;
+        return (
+          <div className="banner error dismissible" role="alert">
+            <span className="banner-text">{bannerText}</span>
+            <button
+              type="button"
+              className="banner-dismiss"
+              aria-label="Dismiss"
+              onClick={dismissBanner}
+            >
+              <X size={16} />
+            </button>
+          </div>
+        );
+      })()}
 
       {view === "cases" && (
         <CasesPage
@@ -1004,9 +1058,7 @@ function CasesPage({
             </p>
             {analysisOffline ? (
               <p className="footnote">
-                On Render: attach Postgres and set DATABASE_URL + FACT_MEMORY_MASTER_KEY on{" "}
-                <strong>casesifter-analysis</strong>, then Resume and confirm{" "}
-                <code>/api/health</code> is 200. Account and billing still work.
+                Account and billing still work. Try again shortly, or contact support if this continues.
               </p>
             ) : totalCount === 0 ? (
               <>
@@ -1217,10 +1269,11 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
   const [scanBacklogError, setScanBacklogError] = useState("");
   const [selectedDocs, setSelectedDocs] = useState(() => new Set());
   const [stampById, setStampById] = useState({});
+  const [failedBatch, setFailedBatch] = useState([]);
   const inputRef = useRef(null);
   const backfillKeyRef = useRef("");
   const scanningRef = useRef(false);
-  const docs = caseData.documents || [];
+  const docs = dedupeDocumentList(caseData.documents || []);
   const waitingDocs = docs.filter((d) => d.status === "uploaded" || d.status === "failed");
   const visibleDocs = docs.filter((doc) =>
     matchesQuery(
@@ -1450,6 +1503,98 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
     if (rejected.length) onError(`Skipped unsupported file(s): ${rejected.join(", ")}`);
     if (!valid.length) return;
     onError("");
+
+    // Hosted: preflight health, queue every file first, then poll — do not await
+    // the full pipeline per file (one blip must not wipe the batch).
+    if (isHostedAnalysis()) {
+      setBusy(true);
+      setFailedBatch([]);
+      try {
+        const health = await checkAnalysisHealth();
+        if (!health.ok) {
+          onError(ANALYSIS_OFFLINE_MESSAGE);
+          setUploadNote("");
+          return;
+        }
+        const pending = [];
+        const queueFailed = [];
+        for (let i = 0; i < valid.length; i += 1) {
+          setUploadNote(`Registering ${i + 1} of ${valid.length}: ${valid[i].name}`);
+          try {
+            const result = await uploadCaseDocument(caseData.id, valid[i], {
+              autoScan: true,
+              waitForComplete: false,
+            });
+            pending.push({
+              file: valid[i],
+              jobId: result.job_id,
+              sha256: result.sha256,
+              name: valid[i].name,
+            });
+          } catch (err) {
+            queueFailed.push({ file: valid[i], error: err.message || "upload failed" });
+          }
+        }
+        let done = 0;
+        let ok = 0;
+        const analysisFailed = [];
+        for (const item of pending) {
+          setUploadNote(`Analyzing ${done + 1} of ${pending.length}: ${item.name}`);
+          let progress = null;
+          try {
+            for (let i = 0; i < 120; i += 1) {
+              progress = await getJob(item.jobId, { includeReport: false });
+              if (progress.status === "complete" || progress.status === "failed") break;
+              await new Promise((r) => setTimeout(r, 1000));
+            }
+            if (progress?.status === "complete") ok += 1;
+            else {
+              analysisFailed.push({
+                file: item.file,
+                error: progress?.error || progress?.message || "analysis failed",
+              });
+            }
+          } catch (err) {
+            analysisFailed.push({ file: item.file, error: err.message || "analysis failed" });
+          }
+          done += 1;
+        }
+        const allFailed = [
+          ...queueFailed.map((f) => ({ file: f.file, error: f.error })),
+          ...analysisFailed,
+        ];
+        setFailedBatch(allFailed.map((f) => f.file));
+        try {
+          await onRefresh();
+        } catch {
+          /* ignore */
+        }
+        if (allFailed.length) {
+          onError(
+            ok
+              ? `Queued ${pending.length}; ${ok} finished. Failed: ${allFailed
+                  .map((f) => `${f.file.name}: ${f.error}`)
+                  .join(" · ")}`
+              : `None of ${valid.length} files finished. ${allFailed
+                  .map((f) => `${f.file.name}: ${f.error}`)
+                  .join(" · ")}`
+          );
+          setUploadNote(
+            `${ok} of ${valid.length} complete. Use Retry failed for the rest.`
+          );
+        } else {
+          onError("");
+          setUploadNote(
+            `Added and analyzed ${ok} file${ok === 1 ? "" : "s"}.`
+          );
+        }
+      } finally {
+        setBusy(false);
+        if (inputRef.current) inputRef.current.value = "";
+      }
+      return;
+    }
+
     const failed = [];
     const scanIssues = [];
     let added = 0;
@@ -1493,6 +1638,13 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
         : ""
     );
     if (inputRef.current) inputRef.current.value = "";
+  }
+
+  async function retryFailedUploads() {
+    if (!failedBatch.length) return;
+    const again = failedBatch.slice();
+    setFailedBatch([]);
+    await onUpload(again);
   }
 
   async function saveRename(doc) {
@@ -1649,6 +1801,22 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
           {caseData.court || "Court not set"}
         </p>
         {uploadNote && <p className="footnote">{uploadNote}</p>}
+        {failedBatch.length > 0 && !caseData.archived_at && (
+          <div className="banner scan-backlog warn">
+            <div>
+              <strong>
+                {failedBatch.length} file{failedBatch.length === 1 ? "" : "s"} failed in the last batch
+              </strong>
+              <p className="footnote" style={{ margin: "4px 0 0" }}>
+                {failedBatch.map((f) => f.name).slice(0, 4).join(", ")}
+                {failedBatch.length > 4 ? ` +${failedBatch.length - 4} more` : ""}
+              </p>
+            </div>
+            <button className="btn gold" type="button" disabled={busy} onClick={retryFailedUploads}>
+              Retry failed
+            </button>
+          </div>
+        )}
         {!caseData.archived_at && waitingDocs.length > 0 && (
           <div className={`banner scan-backlog${backlogHint ? " warn" : ""}`}>
             <div>
@@ -1912,10 +2080,12 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
                   </div>
                   <label className="footnote" style={{ display: "block", marginTop: 4 }}>
                     Filed{" "}
+                    <span className="filed-value">{doc.filed_date || "—"}</span>{" "}
                     <input
                       type="date"
                       value={doc.filed_date || ""}
                       disabled={busy || Boolean(caseData.archived_at)}
+                      aria-label={`Filed date for ${title}`}
                       onChange={async (e) => {
                         try {
                           await patchDocument(caseData.id, doc.id, {
@@ -2985,8 +3155,8 @@ function TermsModal({ onClose }) {
             scan. CaseSifter keeps an encrypted index of facts for each matter (dates, names, amounts, and page
             references) so it can catch contradictions as new filings come in. Only your firm can see that index,
             and you can delete a document, a matter, or your entire account at any time. Database backups may retain
-            encrypted copies for a limited window after deletion — exact backup retention will be stated once ops
-            confirms Render Postgres backup settings.
+            encrypted copies for a limited window after deletion — exact backup retention will be stated in ops docs
+            once confirmed.
           </p>
           <h4>3. Billing and trials</h4>
           <p>
@@ -3078,13 +3248,58 @@ function ReportViewer({
   const caseAlerts = visibleFindings.filter((f) => f.category === "case_consistency");
   const hiddenCrossDoc = findings.length - visibleFindings.length;
   const [showDoc, setShowDoc] = useState(true);
-  const fileUrl = caseId && documentId
-    ? documentFileUrl(caseId, documentId)
-    : jobSourceUrl(job.job_id);
+  const [localFileUrl, setLocalFileUrl] = useState(null);
+  const vaultUrl = caseId && documentId ? documentFileUrl(caseId, documentId) : null;
+  const remoteUrl = vaultUrl || (job?.job_id ? jobSourceUrl(job.job_id) : null);
+  const fileUrl = localFileUrl || remoteUrl;
   const lowerName = (documentName || job.filename || "").toLowerCase();
   const isPdf = lowerName.endsWith(".pdf");
   const isImage = /\.(png|jpe?g|gif)$/i.test(lowerName);
   const isText = lowerName.endsWith(".txt");
+  const docSha =
+    report?.audit?.sha256 ||
+    documents.find((d) => d.id === documentId)?.sha256 ||
+    null;
+
+  // Hosted: prefer local/session file so Open does not depend on analysis vault /file.
+  useEffect(() => {
+    let revoked = null;
+    let cancelled = false;
+    (async () => {
+      if (!docSha) return;
+      try {
+        const { getSessionCachedFile, getFileHandle, sha256OfFile } = await import("./localFiles.js");
+        let file = getSessionCachedFile(docSha);
+        if (!file) {
+          const row = await getFileHandle(docSha).catch(() => null);
+          if (row?.handle) {
+            try {
+              const perm = await row.handle.queryPermission?.({ mode: "read" });
+              if (perm !== "granted") {
+                const next = await row.handle.requestPermission?.({ mode: "read" });
+                if (next !== "granted") return;
+              }
+              file = await row.handle.getFile();
+              const digest = await sha256OfFile(file);
+              if (digest.toLowerCase() !== String(docSha).toLowerCase()) file = null;
+            } catch {
+              file = null;
+            }
+          }
+        }
+        if (!file || cancelled) return;
+        const url = URL.createObjectURL(file);
+        revoked = url;
+        setLocalFileUrl(url);
+      } catch {
+        /* keep remote / none */
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (revoked) URL.revokeObjectURL(revoked);
+    };
+  }, [docSha]);
 
   return (
     <>
@@ -3125,9 +3340,34 @@ function ReportViewer({
             >
               {showDoc ? "Hide document" : "View document"}
             </button>
-            <a className="btn secondary" href={fileUrl} target="_blank" rel="noreferrer">
-              Open in new tab
-            </a>
+            {fileUrl ? (
+              <a className="btn secondary" href={fileUrl} target="_blank" rel="noreferrer">
+                Open in new tab
+              </a>
+            ) : (
+              <button
+                className="btn secondary"
+                type="button"
+                onClick={async () => {
+                  if (!docSha) {
+                    onError?.("No local file linked for this document.");
+                    return;
+                  }
+                  try {
+                    const { openLocalDocumentAtPage } = await import("./localFiles.js");
+                    await openLocalDocumentAtPage({
+                      sha256: docSha,
+                      page: 1,
+                      displayName: documentName,
+                    });
+                  } catch (err) {
+                    onError?.(err.message || "Could not open local file.");
+                  }
+                }}
+              >
+                Open local file
+              </button>
+            )}
             <a className="btn gold" href={exportUrl(job.job_id, "html")}>Export HTML</a>
             <a className="btn" href={exportUrl(job.job_id, "pdf")}>Export PDF</a>
             <a className="btn secondary" href={exportUrl(job.job_id, "json")}>Export JSON</a>
@@ -3160,9 +3400,19 @@ function ReportViewer({
           <div className="card doc-pane">
             <div className="row" style={{ justifyContent: "space-between", marginBottom: 10 }}>
               <p className="kicker" style={{ margin: 0 }}>Source document</p>
-              <a className="footnote" href={fileUrl} target="_blank" rel="noreferrer">Fullscreen</a>
+              {fileUrl ? (
+                <a className="footnote" href={fileUrl} target="_blank" rel="noreferrer">Fullscreen</a>
+              ) : (
+                <span className="footnote">Link a local file to preview</span>
+              )}
             </div>
-            <DocumentPreview url={fileUrl} isPdf={isPdf} isImage={isImage} isText={isText} name={lowerName} />
+            {fileUrl ? (
+              <DocumentPreview url={fileUrl} isPdf={isPdf} isImage={isImage} isText={isText} name={lowerName} />
+            ) : (
+              <p className="empty-copy">
+                Source PDF is not kept on the hosted analysis service. Open the local file to view pages.
+              </p>
+            )}
           </div>
         )}
 
@@ -3444,19 +3694,35 @@ function FindingCard({ item, docKind, siblings = [] }) {
   const tainted = gotcha && item.evidence?.tainted_support;
   const taintedCopy = tainted ? resolveTaintedCopy(item, siblings) : null;
   const refs = item.evidence?.refs || [];
+  const pageNum = item.page != null ? Math.max(1, Number(item.page) || 1) : null;
 
-  async function openRef(ref) {
+  async function openRef(ref, pageOverride) {
     setLinkNote("");
+    const page = pageOverride ?? ref.page ?? item.page ?? 1;
     try {
       const { openLocalDocumentAtPage } = await import("./localFiles.js");
       await openLocalDocumentAtPage({
-        sha256: ref.sha256,
-        page: ref.page || item.page,
-        displayName: ref.display_name,
+        sha256: ref.sha256 || item.evidence?.sha256,
+        page,
+        displayName: ref.display_name || item.evidence?.display_name,
       });
     } catch (err) {
       setLinkNote(err.message || "Could not open local file.");
     }
+  }
+
+  async function openPageCite(e, page) {
+    e.preventDefault();
+    const ref = refs[0] || {
+      sha256: item.evidence?.sha256,
+      display_name: item.evidence?.display_name,
+      page,
+    };
+    if (!ref.sha256 && !item.evidence?.sha256) {
+      setLinkNote("No local file fingerprint for this page cite.");
+      return;
+    }
+    await openRef({ ...ref, sha256: ref.sha256 || item.evidence?.sha256 }, page);
   }
 
   return (
@@ -3468,7 +3734,22 @@ function FindingCard({ item, docKind, siblings = [] }) {
           {item.severity} · {Math.round(item.confidence)}%
         </span>
       </header>
-      <p className="footnote">{CATEGORY[item.category] || item.category}{item.page ? ` · page ${item.page}` : ""}</p>
+      <p className="footnote">
+        {CATEGORY[item.category] || item.category}
+        {pageNum != null ? (
+          <>
+            {" · "}
+            <a
+              className="linkish"
+              href={`#page=${pageNum}`}
+              onClick={(e) => openPageCite(e, pageNum)}
+              title={`Open local file at page ${pageNum}`}
+            >
+              page {pageNum}
+            </a>
+          </>
+        ) : null}
+      </p>
       {caseHit && item.evidence?.prior_display_name && (
         <p className="footnote">Prior file: {item.evidence.prior_display_name}</p>
       )}
@@ -3495,18 +3776,25 @@ function FindingCard({ item, docKind, siblings = [] }) {
       {refs.length > 0 && (
         <p className="footnote">
           Open local file:{" "}
-          {refs.map((ref, i) => (
-            <button
-              key={`${ref.sha256 || ref.document_id}-${i}`}
-              type="button"
-              className="linkish"
-              onClick={() => openRef(ref)}
-              style={{ marginRight: 8 }}
-            >
-              {(ref.display_name || "document").slice(0, 40)}
-              {ref.page != null ? ` p.${ref.page}` : ""}
-            </button>
-          ))}
+          {refs.map((ref, i) => {
+            const p = ref.page != null ? Math.max(1, Number(ref.page) || 1) : pageNum;
+            return (
+              <a
+                key={`${ref.sha256 || ref.document_id}-${i}`}
+                className="linkish"
+                href={p != null ? `#page=${p}` : "#"}
+                onClick={(e) => {
+                  e.preventDefault();
+                  openRef(ref, p);
+                }}
+                style={{ marginRight: 8 }}
+                title={p != null ? `Open at page ${p}` : "Open local file"}
+              >
+                {(ref.display_name || "document").slice(0, 40)}
+                {p != null ? ` p.${p}` : ""}
+              </a>
+            );
+          })}
         </p>
       )}
       {linkNote && <p className="footnote" style={{ color: "var(--danger, #b33)" }}>{linkNote}</p>}

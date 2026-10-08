@@ -150,3 +150,25 @@ Cannot be done from this agent without Render credentials.
 3. Generate and set `FACT_MEMORY_MASTER_KEY` (never commit). Rotate = re-encrypt firm keys (plan a migration before rotating in prod).
 4. Deploy; verify `/api/health` and `POST /api/v1/matters` with a session Bearer.
 5. Source PDFs still delete immediately; facts persist when `PERSIST_FACTS=true` and firm `persist_facts` is true.
+
+## Cutover checklist (John) — cloud-agent branch → `main`
+
+Do **not** Suspend analysis to “fix” issues. Prefer branch retarget / Manual Deploy.
+
+### Before merge
+1. Confirm analysis `GET /api/health` → **200** (`app_mode: analysis`).
+2. Confirm Postgres attached + `DATABASE_URL` + `FACT_MEMORY_MASTER_KEY` on `casesifter-analysis` (Dashboard → Environment; secrets are not readable via API).
+3. Soft-smoke on tip: New case → EXHIBIT(S) file → AFFIRMATION AFFIDAVIT OF SERVICE file → kinds not Unknown; dismissible banner only (no Render ops text); bulk Retry failed visible after a forced fail.
+4. Merge PR #2 into `main` when checks are green (prefer merge commit for rollback mapping).
+
+### Point Render at `main` (manual — John clicks)
+For each service: **Settings → Branch → `main` → Save → Manual Deploy**
+- `casesifter-analysis`
+- `casesifter-app`
+- `casesifter-control`
+- `casesifter-marketing`
+
+### After cutover
+1. `/api/health` 200 on analysis; control Stripe health `stripe:true`.
+2. One new matter + one exhibit + one affirmation; Case impact not duplicated.
+3. **Rollback:** set each service Branch back to `cursor/cloud-agent-1790049794515-xh7tp` (or pin last-good commit) → Manual Deploy. Do not Suspend.

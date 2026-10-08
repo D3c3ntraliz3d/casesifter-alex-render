@@ -288,6 +288,30 @@ h1, h2, h3, .serif {
   margin-bottom: 16px;
   font-weight: 500;
 }
+.banner.error.dismissible {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.banner.error .banner-text {
+  flex: 1;
+  min-width: 0;
+}
+.banner-dismiss {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: 2px;
+  line-height: 0;
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+.banner-dismiss:hover {
+  opacity: 1;
+}
 .banner.scan-backlog {
   display: flex;
   align-items: center;

@@ -14,7 +14,8 @@ def test_resolve_upload_labels_exhibit_parens_s():
     fname = "111 - EXHIBIT(S) - P (Motion #4) Settlement Conference Aff.pdf"
     name, kind = _resolve_upload_labels(fname, fname, None)
     assert kind == "exhibit"
-    assert name == "Exhibit 111"
+    assert name.startswith("Exhibit 111")
+    assert "Settlement Conference Aff" in name
 
     bare = "32 - EXHIBIT(S).pdf"
     name2, kind2 = _resolve_upload_labels(bare, bare, None)
@@ -25,6 +26,32 @@ def test_resolve_upload_labels_exhibit_parens_s():
     name3, kind3 = _resolve_upload_labels("voe.txt", "VOE 2019", "affidavit")
     assert kind3 == "affidavit"
     assert name3 == "VOE 2019"
+
+
+def test_resolve_upload_labels_handoff_affirmation_affidavit():
+    """Handoff filenames: AFFIRMATION AFFIDAVIT must not resolve to Unknown."""
+    from app.v1_analysis import _resolve_upload_labels
+
+    aos = "17 AFFIRMATION AFFIDAVIT OF SERVICE.pdf"
+    name, kind = _resolve_upload_labels(aos, aos, None)
+    assert kind == "proof_of_service"
+    assert "affidavit" in name.lower() or "service" in name.lower()
+
+    nyscef = "533445_2023_Specialized_Loan_Servi_AFFIRMATION_AFFIDAV_17.pdf"
+    name2, kind2 = _resolve_upload_labels(nyscef, nyscef, None)
+    assert kind2 in {"proof_of_service", "affidavit", "affirmation"}
+    assert kind2 is not None
+
+    support = "62 AFFIDAVIT OR AFFIRMATION IN SUPPORT OF MOTION.pdf"
+    name3, kind3 = _resolve_upload_labels(support, support, None)
+    assert kind3 in {"affidavit", "affirmation", "motion"}
+    assert kind3 is not None
+    assert name3
+
+    bare_pair = "AFFIRMATION AFFIDAVIT.pdf"
+    name4, kind4 = _resolve_upload_labels(bare_pair, bare_pair, None)
+    assert kind4 in {"affidavit", "affirmation"}
+    assert "Affidavit" in name4 or "Affirmation" in name4
 
 
 def test_matters_crud_and_job_matter_id(tmp_path, monkeypatch):

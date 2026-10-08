@@ -203,6 +203,9 @@ export function exportUrl(jobId, kind) {
 export function documentFileUrl(caseId, documentId) {
   const cs = desktop();
   if (cs) return `casesifter-local://${caseId}/${documentId}`;
+  // Hosted soft-launch: PDFs are not retained on analysis — callers must prefer
+  // local IndexedDB/session blob open (#page=N) instead of vault /file.
+  if (isHostedAnalysis()) return null;
   return apiUrl(`/api/cases/${caseId}/documents/${documentId}/file`);
 }
 
@@ -224,13 +227,27 @@ export function isHostedAnalysis() {
   return Boolean(ANALYSIS_API_URL);
 }
 
-/** Operator-facing copy when hosted analysis (matters + scans) is down. */
+/** User-facing copy when hosted analysis (matters + scans) is down. Ops steps stay in docs only. */
 export const ANALYSIS_OFFLINE_MESSAGE =
-  "Analysis service unreachable (suspended or offline). New cases and scans need it. On Render: (1) attach Postgres and set DATABASE_URL + FACT_MEMORY_MASTER_KEY on casesifter-analysis, (2) Resume the service, (3) confirm /api/health returns 200. Account and billing still work.";
+  "Analysis is temporarily unavailable. You can still use Account and billing. Try again shortly, or contact support if this continues.";
+
+/** Preflight for hosted bulk upload — GET analysis /api/health. */
+export async function checkAnalysisHealth() {
+  if (!isHostedAnalysis()) return { ok: true, status: "ok" };
+  try {
+    const res = await analysisFetch("/api/health");
+    if (!res.ok) return { ok: false, status: res.status };
+    const data = await readJson(res).catch(() => ({}));
+    const status = String(data?.status || "").toLowerCase();
+    return { ok: status === "ok" || status === "healthy" || !status, ...data };
+  } catch (err) {
+    return { ok: false, error: err };
+  }
+}
 
 export function isAnalysisUnreachableError(err) {
   const msg = String(err?.message || err || "");
-  return /analysis service unreachable|failed to fetch|networkerror|load failed|503|service suspended|phase 2/i.test(
+  return /analysis (service )?unreachable|analysis is temporarily unavailable|failed to fetch|networkerror|load failed|503|service suspended|phase 2/i.test(
     msg
   );
 }
@@ -397,10 +414,14 @@ function proposeExhibitDisplayName(filename) {
     .replace(/\.[A-Za-z0-9]+$/, "")
     .replace(/\s*\(\d+\)\s*$/, "")
     .trim();
-  // "111 - EXHIBIT(S) - P …" → Exhibit 111 (server auto_title is authoritative).
+  // "111 - EXHIBIT(S) - Settlement Aff.pdf" → Exhibit 111 — Settlement Aff
   const leading = stem.match(/^(\d{1,4})(?:\s*[\-\u2010-\u2015]\s*|\s+)(?=exhibit)/i);
   if (leading && /exhibit\s*\(\s*s\s*\)/i.test(stem)) {
-    return `Exhibit ${leading[1]}`;
+    const rest = stem
+      .replace(/^.*?exhibit\s*\(\s*s\s*\)/i, "")
+      .replace(/^[\s_\-\u2010-\u2015]+/, "")
+      .trim();
+    return rest ? `Exhibit ${leading[1]} — ${rest}` : `Exhibit ${leading[1]}`;
   }
   const underscored = stem.match(/^exhibit[_]+([A-Za-z0-9]{1,4})[_]+(\d{1,4})$/i);
   if (underscored) {
@@ -422,7 +443,11 @@ function resolveHostedUploadLabels(file, { displayName, docKind } = {}) {
   return { displayName: resolvedName, docKind: resolvedKind };
 }
 
-export async function uploadCaseDocument(caseId, file, { displayName, autoScan = true, docKind, filedDate } = {}) {
+export async function uploadCaseDocument(
+  caseId,
+  file,
+  { displayName, autoScan = true, docKind, filedDate, waitForComplete = true } = {}
+) {
   const cs = desktop();
   if (cs) {
     // Desktop uses native file picker; browser File upload writes via temp is not used.
@@ -431,6 +456,7 @@ export async function uploadCaseDocument(caseId, file, { displayName, autoScan =
   }
   if (isHostedAnalysis()) {
     // Hosted path: scan via /v1/jobs with matter_id; facts persist, PDF deleted server-side.
+    // Bulk callers pass waitForComplete:false so one slow/failed job cannot wipe the batch.
     const { rememberScanFile, sha256OfFile } = await import("./localFiles.js");
     const sha = await sha256OfFile(file);
     await rememberScanFile(file, sha);
@@ -445,6 +471,17 @@ export async function uploadCaseDocument(caseId, file, { displayName, autoScan =
       filedDate: filedDate || undefined,
       submittedBy: "web-app",
     });
+    if (!waitForComplete) {
+      return {
+        document: null,
+        job_id: job.job_id,
+        job: { status: "queued", job_id: job.job_id },
+        sha256: sha,
+        status: "queued",
+        display_name: labels.displayName || file.name,
+        original_filename: file.name,
+      };
+    }
     // Poll until complete so the matter document row exists.
     let progress = null;
     for (let i = 0; i < 120; i += 1) {
@@ -464,6 +501,7 @@ export async function uploadCaseDocument(caseId, file, { displayName, autoScan =
       job: progress,
       matter,
       sha256: sha,
+      status: progress?.status || "queued",
     };
   }
   let lastError = new Error("Upload failed.");

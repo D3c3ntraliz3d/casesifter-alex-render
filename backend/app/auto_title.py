@@ -123,6 +123,25 @@ def propose_document_title(
             "notice_of_pendency": "Notice of Pendency",
             "calendar": "Calendar",
         }.get(kind, kind.title())
+        # "AFFIRMATION AFFIDAVIT" / "AFFIRMATION AFFIDAVIT OF SERVICE" → Affidavit / Affidavit of Service
+        if kind == "proof_of_service" and re.search(
+            r"(?i)\b(affidavit|affirmation)\b.{0,40}\bof\s+service\b", cleaned
+        ):
+            return _truncate(_with_file_number("Affidavit of Service", stem)), kind
+        if kind in {"affidavit", "affirmation"} and re.search(
+            r"(?i)^\s*(affirmation\s+)?affidavit(\s+or\s+affirmation)?\s*$", cleaned
+        ):
+            return _truncate(_with_file_number("Affidavit", stem)), "affidavit"
+        if kind in {"affidavit", "affirmation"} and re.search(
+            r"(?i)\baffirmation\b.+\baffidavit\b|\baffidavit\b.+\baffirmation\b", cleaned
+        ):
+            titled = _filename_title(cleaned)
+            if re.search(r"(?i)\bof\s+service\b", cleaned):
+                return _truncate(_with_file_number("Affidavit of Service", stem)), "proof_of_service"
+            name = "Affidavit" if len(cleaned) < 40 else (
+                titled if _keeps_file_identity(titled, stem) else f"Affidavit — {titled}"
+            )
+            return _truncate(_with_file_number(name, stem)), "affidavit"
         titled = _filename_title(cleaned)
         name = titled if _keeps_file_identity(titled, stem) else f"{label} — {titled}"
         return _truncate(_with_file_number(name, stem)), kind
@@ -155,19 +174,21 @@ def exhibit_title_from_filename(filename: str) -> str | None:
         return f"Exhibit {tag}"
     # NYSCEF "EXHIBIT(S)" packets — do not let body "in order to" retitle these as Order.
     # Prefer the leading docket number ("32 - EXHIBIT(S)") over a trailing description token
-    # ("… - S Bank Statement"), which is not an exhibit letter.
+    # ("… - S Bank Statement"), which is not an exhibit letter. Keep the description when present.
     parens = EXHIBIT_PARENS_S_RE.search(stem)
     if not parens:
         return None
     tag = (parens.group(1) or "").upper()
     number = parens.group(2)
+    rest = stem[parens.end() :].strip(" \t_-–—")
     if lead_no:
-        return f"Exhibit {lead_no}"
+        return f"Exhibit {lead_no} — {rest}" if rest else f"Exhibit {lead_no}"
     if tag and number:
-        return f"Exhibit {tag}_{number}"
+        base = f"Exhibit {tag}_{number}"
+        return f"{base} — {rest}" if rest else base
     if tag:
-        return f"Exhibit {tag}"
-    return "Exhibit"
+        return f"Exhibit {tag} — {rest}" if rest else f"Exhibit {tag}"
+    return f"Exhibit — {rest}" if rest else "Exhibit"
 
 
 def looks_like_exhibit_filename(name: str) -> bool:

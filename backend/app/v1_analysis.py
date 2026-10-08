@@ -52,7 +52,6 @@ def _resolve_upload_labels(
     doc_kind. Without this, EXHIBIT(S) packets persist as Unknown.
     """
     from app.auto_title import looks_like_exhibit_filename, propose_document_title
-    from app.scan_profile import COURT_FILING_KINDS
 
     safe = Path(filename or "").name
     try:
@@ -77,8 +76,10 @@ def _resolve_upload_labels(
             final_name = proposed_name
     elif user_kind:
         final_kind = user_kind
-    elif proposed_kind and proposed_kind.strip().lower() not in COURT_FILING_KINDS:
-        final_kind = proposed_kind
+    elif proposed_kind:
+        # Keep court-filing kinds (affidavit, affirmation, proof_of_service, …).
+        # Nulling COURT_FILING_KINDS left hosted Affirmation/Affidavit rows as Unknown.
+        final_kind = proposed_kind.strip().lower()
     else:
         final_kind = None
     return final_name, final_kind
