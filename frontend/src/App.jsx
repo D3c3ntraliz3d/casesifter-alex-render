@@ -1560,9 +1560,19 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
         for (const item of pending) {
           setUploadNote(`Analyzing ${done + 1} of ${pending.length}: ${item.name}`);
           let progress = null;
+          let blips = 0;
           try {
             for (let i = 0; i < 120; i += 1) {
-              progress = await getJob(item.jobId, { includeReport: false });
+              try {
+                progress = await getJob(item.jobId, { includeReport: false });
+                blips = 0;
+              } catch (err) {
+                // A scan can stall the status call. One dropped poll is not an outage.
+                if (!isAnalysisUnreachableError(err) || blips >= 5) throw err;
+                blips += 1;
+                await new Promise((r) => setTimeout(r, 2000));
+                continue;
+              }
               if (progress.status === "complete" || progress.status === "failed") break;
               await new Promise((r) => setTimeout(r, 1000));
             }

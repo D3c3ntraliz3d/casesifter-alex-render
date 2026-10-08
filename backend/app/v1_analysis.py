@@ -16,7 +16,7 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -455,11 +455,18 @@ def _persist_pipeline_result(
 
 
 @v1.get("/jobs/{job_id}")
-def get_ephemeral_job(job_id: str, _auth: dict = Depends(_require_analysis_auth)):
+def get_ephemeral_job(
+    job_id: str,
+    include_report: bool = Query(default=False),
+    _auth: dict = Depends(_require_analysis_auth),
+):
     progress = load_progress(job_id)
     if progress is None:
         raise HTTPException(404, "Unknown or expired job.")
+    # Status polls must stay small. Embedding the report froze the worker on
+    # large exhibits and the browser reported that stall as an outage.
     payload = progress.model_dump(mode="json")
+    payload["report"] = None
     payload["ephemeral"] = True
     persist_flag = job_dir(job_id) / "persist.flag"
     if persist_flag.exists():
@@ -469,11 +476,9 @@ def get_ephemeral_job(job_id: str, _auth: dict = Depends(_require_analysis_auth)
             payload["matter_id"] = persist_flag.read_text(encoding="utf-8").strip() or None
         except OSError:
             payload["matter_id"] = None
-    if progress.status == "complete":
+    if include_report and progress.status == "complete":
         report = load_report(job_id)
         payload["report"] = report.model_dump(mode="json") if report else None
-    else:
-        payload["report"] = None
     return payload
 
 
