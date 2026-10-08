@@ -457,9 +457,63 @@ export async function uploadCaseDocument(
   if (isHostedAnalysis()) {
     // Hosted path: scan via /v1/jobs with matter_id; facts persist, PDF deleted server-side.
     // Bulk callers pass waitForComplete:false so one slow/failed job cannot wipe the batch.
-    const { rememberScanFile, sha256OfFile } = await import("./localFiles.js");
+    // #region agent log
+    const _dbg = (message, data, hypothesisId) => {
+      fetch("http://127.0.0.1:7576/ingest/14fa87bc-56ce-47bf-bc32-89e0afe8ad7c", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "de3dd9" },
+        body: JSON.stringify({
+          sessionId: "de3dd9",
+          runId: "upload-localfiles",
+          hypothesisId,
+          location: "api.js:uploadCaseDocument",
+          message,
+          data,
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+    };
+    _dbg("hosted upload enter", { fileName: file?.name || "", hosted: true }, "D");
+    let localFilesMod;
+    try {
+      // Vite resolves this to the hashed /assets/localFiles-*.js URL at build time.
+      const chunkProbeUrl = new URL("./localFiles.js", import.meta.url).href;
+      let probe = { ok: false, status: 0, contentType: "", bodyStart: "" };
+      try {
+        const res = await fetch(chunkProbeUrl, { cache: "no-store" });
+        const text = await res.text();
+        probe = {
+          ok: res.ok,
+          status: res.status,
+          contentType: res.headers.get("content-type") || "",
+          bodyStart: text.slice(0, 80),
+          looksLikeHtml: /^\s*</.test(text),
+        };
+      } catch (probeErr) {
+        probe = { ok: false, status: -1, error: String(probeErr?.message || probeErr) };
+      }
+      _dbg("localFiles chunk probe before import", { chunkProbeUrl, probe }, "A");
+      localFilesMod = await import("./localFiles.js");
+      _dbg("localFiles dynamic import ok", { keys: Object.keys(localFilesMod || {}) }, "C");
+    } catch (importErr) {
+      _dbg(
+        "localFiles dynamic import FAILED",
+        {
+          name: importErr?.name || "",
+          message: String(importErr?.message || importErr),
+          href: typeof window !== "undefined" ? window.location.href : "",
+        },
+        "B"
+      );
+      throw importErr;
+    }
+    const { rememberScanFile, sha256OfFile } = localFilesMod;
+    // #endregion
     const sha = await sha256OfFile(file);
     await rememberScanFile(file, sha);
+    // #region agent log
+    _dbg("sha ready, calling createAnalysisJob", { shaPrefix: String(sha || "").slice(0, 12) }, "D");
+    // #endregion
     const labels = resolveHostedUploadLabels(file, {
       displayName: displayName || file.name,
       docKind,
