@@ -78,6 +78,21 @@ def firm_fernet(wrapped_key: str) -> Fernet:
     return Fernet(base64.urlsafe_b64encode(raw if len(raw) == 32 else hashlib.sha256(raw).digest()))
 
 
+def encrypt_bytes(fernet: Fernet, value: bytes | None) -> str | None:
+    if value is None:
+        return None
+    return fernet.encrypt(value).decode("ascii")
+
+
+def decrypt_bytes(fernet: Fernet, token: str | None) -> bytes | None:
+    if token is None:
+        return None
+    try:
+        return fernet.decrypt(token.encode("ascii"))
+    except InvalidToken as exc:
+        raise ValueError("failed to decrypt fact-memory field") from exc
+
+
 def encrypt_text(fernet: Fernet, value: str | None) -> str | None:
     if value is None:
         return None

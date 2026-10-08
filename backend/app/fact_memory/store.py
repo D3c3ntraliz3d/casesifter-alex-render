@@ -6,6 +6,7 @@ compare_to_case stays the cross-doc engine.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import threading
@@ -56,6 +57,7 @@ class FactMemoryStore:
         else:
             init_db()
             self._sf = session_factory or get_session_factory()
+        self.flag_missing_sources()
 
     def session(self) -> Session:
         return self._sf()
@@ -340,6 +342,10 @@ class FactMemoryStore:
             "status": "complete",
             "scan_job_id": doc.last_job_id,
             "has_report": bool(doc.report_enc),
+            "has_source": bool(doc.source_enc) and not doc.source_missing,
+            "source_missing": bool(doc.source_missing) or not doc.source_enc,
+            "mime_type": doc.mime_type,
+            "source_size": doc.source_size,
             "risk_level": risk_level,
             "risk_score": risk_score,
         }
@@ -458,8 +464,10 @@ class FactMemoryStore:
         user_id: str | None = None,
         force: bool = False,
         report: dict[str, Any] | None = None,
+        source_bytes: bytes | None = None,
+        mime_type: str | None = None,
     ) -> dict[str, Any]:
-        """Persist document/entities/facts/run/findings. No PDF bytes."""
+        """Persist document/entities/facts/run/findings and, when given, the source bytes."""
         with self.session() as s:
             firm = s.get(Firm, firm_id)
             if not firm:
@@ -486,6 +494,7 @@ class FactMemoryStore:
                 if report is not None:
                     existing.report_enc = enc.encrypt_json(fernet, report)
                     existing.last_job_id = job_id
+                _attach_source(existing, fernet, sha256, source_bytes, mime_type)
                 run = Run(
                     id=_new_id(),
                     matter_id=matter_id,
@@ -527,6 +536,7 @@ class FactMemoryStore:
             doc.last_job_id = job_id
             if report is not None:
                 doc.report_enc = enc.encrypt_json(fernet, report)
+            _attach_source(doc, fernet, sha256, source_bytes, mime_type)
 
             # Cap excerpt for vault-compat priors (encrypted). Prefer empty if firm opts out of snippets.
             excerpt = (text_excerpt or "")[:24000] if store_snippets else ""
@@ -793,6 +803,113 @@ class FactMemoryStore:
             "exported_at": _utcnow().isoformat(),
         }
 
+    def load_document_source(
+        self, firm_id: str, matter_id: str, document_id: str
+    ) -> dict[str, Any] | None:
+        """Decrypt source bytes and refuse them if the hash is not the scanned one."""
+        with self.session() as s:
+            doc = s.execute(
+                select(Document).where(
+                    Document.id == document_id,
+                    Document.firm_id == firm_id,
+                    Document.matter_id == matter_id,
+                )
+            ).scalar_one_or_none()
+            if doc is None or not doc.source_enc or doc.source_missing:
+                return None
+            fernet = self._fernet(s, firm_id)
+            data = enc.decrypt_bytes(fernet, doc.source_enc)
+            if not data:
+                return None
+            actual = hashlib.sha256(data).hexdigest()
+            if actual.lower() != doc.sha256.lower():
+                logger.error("Stored source sha256 does not match document %s", document_id)
+                return None
+            filename = enc.decrypt_text(fernet, doc.original_filename_enc) or "source"
+            return {
+                "bytes": data,
+                "mime_type": doc.mime_type or _mime_for_bytes(data, ""),
+                "filename": filename,
+                "sha256": doc.sha256,
+                "size": len(data),
+            }
+
+    def save_document_source(
+        self,
+        firm_id: str,
+        matter_id: str,
+        document_id: str,
+        source_bytes: bytes,
+        *,
+        mime_type: str | None = None,
+        filename: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Re-attach bytes only when they match the fingerprint already on the report."""
+        with self.session() as s:
+            doc = s.execute(
+                select(Document).where(
+                    Document.id == document_id,
+                    Document.firm_id == firm_id,
+                    Document.matter_id == matter_id,
+                )
+            ).scalar_one_or_none()
+            if doc is None:
+                return None
+            fernet = self._fernet(s, firm_id)
+            _attach_source(doc, fernet, doc.sha256, source_bytes, mime_type)
+            if doc.source_missing or not doc.source_enc:
+                s.rollback()
+                return None
+            if filename:
+                doc.original_filename_enc = enc.encrypt_text(fernet, filename)
+            self._audit(s, firm_id, user_id, "document.source_attach", document_id)
+            s.commit()
+            return {
+                "id": doc.id,
+                "sha256": doc.sha256,
+                "mime_type": doc.mime_type,
+                "source_size": doc.source_size,
+                "has_source": True,
+                "source_missing": False,
+            }
+
+    def flag_missing_sources(self) -> int:
+        """Mark reports whose original bytes were never stored."""
+        with self.session() as s:
+            rows = s.execute(select(Document).where(Document.source_enc.is_(None))).scalars().all()
+            changed = 0
+            for doc in rows:
+                if not doc.source_missing:
+                    doc.source_missing = True
+                    changed += 1
+            if changed:
+                s.commit()
+            return changed
+
+    def source_status_for_job(self, job_id: str) -> dict[str, Any]:
+        with self.session() as s:
+            doc = s.execute(
+                select(Document).where(Document.last_job_id == job_id)
+            ).scalar_one_or_none()
+            if doc is None:
+                return {"job_id": job_id, "status": "unknown"}
+            if doc.source_enc and not doc.source_missing:
+                return {
+                    "job_id": job_id,
+                    "document_id": doc.id,
+                    "status": "present",
+                    "sha256": doc.sha256,
+                }
+            doc.source_missing = True
+            s.commit()
+            return {
+                "job_id": job_id,
+                "document_id": doc.id,
+                "status": "source_missing",
+                "sha256": doc.sha256,
+            }
+
     def purge_firm(self, firm_id: str, *, user_id: str | None = None) -> bool:
         with self.session() as s:
             firm = s.get(Firm, firm_id)
@@ -802,6 +919,57 @@ class FactMemoryStore:
             s.delete(firm)
             s.commit()
             return True
+
+
+def _attach_source(
+    doc: Document,
+    fernet: Fernet,
+    sha256: str,
+    source_bytes: bytes | None,
+    mime_type: str | None,
+) -> None:
+    """Store bytes only when they hash to the fingerprint that was analyzed."""
+    if not source_bytes:
+        if not doc.source_enc:
+            doc.source_missing = True
+        return
+    actual = hashlib.sha256(source_bytes).hexdigest()
+    if actual.lower() != str(sha256 or "").lower():
+        logger.warning("Refusing source bytes whose sha256 does not match the scan")
+        if not doc.source_enc:
+            doc.source_missing = True
+        return
+    doc.source_enc = enc.encrypt_bytes(fernet, source_bytes)
+    doc.mime_type = mime_type or _mime_for_bytes(source_bytes, "")
+    doc.source_size = len(source_bytes)
+    doc.source_missing = False
+
+
+def _mime_for_bytes(data: bytes, file_type: str) -> str:
+    if data.startswith(b"%PDF-"):
+        return "application/pdf"
+    ft = (file_type or "").lower().lstrip(".")
+    return {
+        "pdf": "application/pdf",
+        "txt": "text/plain; charset=utf-8",
+        "text": "text/plain; charset=utf-8",
+        "png": "image/png",
+        "jpg": "image/jpeg",
+        "jpeg": "image/jpeg",
+        "gif": "image/gif",
+    }.get(ft, "application/octet-stream")
+
+
+def content_disposition_inline(filename: str, mime: str) -> str:
+    """ASCII fallback plus RFC 5987 filename* so § # ( ) survive."""
+    from urllib.parse import quote
+
+    raw = (filename or "source").replace("\\", " ").replace("/", " ").replace('"', "").strip()
+    if mime.split(";")[0].strip() == "application/pdf" and not raw.lower().endswith(".pdf"):
+        raw = f"{raw}.pdf"
+    ascii_name = "".join(ch if 32 <= ord(ch) < 127 else "_" for ch in raw) or "source.pdf"
+    encoded = quote(raw, safe="")
+    return f"inline; filename=\"{ascii_name}\"; filename*=UTF-8''{encoded}"
 
 
 def get_store() -> FactMemoryStore:

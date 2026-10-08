@@ -400,7 +400,7 @@ def _persist_pipeline_result(
     doc_kind: str | None,
     filed_date: str | None,
 ) -> None:
-    from app.fact_memory.store import get_store
+    from app.fact_memory.store import _mime_for_bytes, get_store
     from app.ingestion import sha256_file
 
     store = get_store()
@@ -421,6 +421,16 @@ def _persist_pipeline_result(
     page_count = len(report.page_dimensions or []) or None
     finding_dicts = [f.model_dump(mode="json") for f in (report.findings or [])]
     report_dict = report.model_dump(mode="json")
+    source_bytes = b""
+    if source.exists():
+        try:
+            source_bytes = source.read_bytes()
+        except OSError:
+            source_bytes = b""
+    file_type = ""
+    if report.audit and report.audit.file_type:
+        file_type = report.audit.file_type
+    mime = _mime_for_bytes(source_bytes, file_type) if source_bytes else None
     try:
         result = store.persist_scan(
             firm_id=firm_ctx["firm_id"],
@@ -442,6 +452,8 @@ def _persist_pipeline_result(
             extractor_version=settings.app_version,
             user_id=firm_ctx.get("user_id"),
             report=report_dict,
+            source_bytes=source_bytes or None,
+            mime_type=mime,
         )
         logger.info(
             "Persisted facts for matter=%s job=%s persisted=%s deduped=%s",

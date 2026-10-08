@@ -215,6 +215,28 @@ export function jobSourceUrl(jobId) {
   return apiUrl(`/api/jobs/${jobId}/source`);
 }
 
+/** Hosted original file. 404 means the bytes were never stored (or were not the scanned file). */
+export async function fetchMatterSource(caseId, documentId) {
+  const res = await analysisFetch(`/api/v1/matters/${caseId}/documents/${documentId}/file`);
+  if (res.status === 404) return { missing: true };
+  if (!res.ok) {
+    throw new Error((await safeDetail(res)) || "Could not open the source file.");
+  }
+  const type = String(res.headers.get("content-type") || "").split(";")[0].trim();
+  const blob = await res.blob();
+  return { missing: false, blob, type: type || blob.type || "" };
+}
+
+export async function attachMatterSource(caseId, documentId, file) {
+  const body = new FormData();
+  body.append("file", file);
+  const res = await analysisFetch(
+    `/api/v1/matters/${caseId}/documents/${documentId}/file`,
+    { method: "POST", body }
+  );
+  return readJson(res);
+}
+
 function vaultUnavailableError() {
   return new Error(
     "Case memory is unavailable. Sign in and ensure the analysis service is running."

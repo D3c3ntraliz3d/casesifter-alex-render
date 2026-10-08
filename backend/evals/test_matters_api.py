@@ -7,6 +7,19 @@ import io
 from fastapi.testclient import TestClient
 
 
+def test_content_disposition_keeps_section_sign():
+    from app.fact_memory.store import content_disposition_inline
+
+    header = content_disposition_inline(
+        "Exhibit 98 — C (Motion #4) CEMA §202.5(e)",
+        "application/pdf",
+    )
+    assert header.startswith("inline;")
+    assert "filename*=UTF-8''" in header
+    assert "%C2%A7" in header or "%A7" in header
+    assert header.endswith(".pdf") or ".pdf" in header.split("filename*=", 1)[-1]
+
+
 def test_resolve_upload_labels_exhibit_parens_s():
     """Hosted path must not leave EXHIBIT(S) packets as Unknown."""
     from app.v1_analysis import _resolve_upload_labels
@@ -149,6 +162,23 @@ def test_matters_crud_and_job_matter_id(tmp_path, monkeypatch):
     docs = refreshed.json()["documents"]
     assert len(docs) >= 1
     assert docs[0].get("filed_date") == "2024-01-15" or docs[0].get("sha256")
+
+    source = client.get(
+        f"/api/v1/matters/{matter_id}/documents/{docs[0]['id']}/file",
+        headers=headers,
+    )
+    assert source.status_code == 200, source.text
+    assert source.content == content
+    assert "text/plain" in source.headers["content-type"]
+    assert source.headers["content-disposition"].startswith("inline;")
+    assert source.headers["x-source-sha256"] == docs[0]["sha256"]
+
+    mismatch = client.post(
+        f"/api/v1/matters/{matter_id}/documents/{docs[0]['id']}/file",
+        headers=headers,
+        files={"file": ("other.txt", io.BytesIO(b"not the scanned file"), "text/plain")},
+    )
+    assert mismatch.status_code == 409
 
     # filed_date edit
     patched = client.patch(

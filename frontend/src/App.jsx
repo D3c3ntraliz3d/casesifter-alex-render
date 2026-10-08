@@ -3260,6 +3260,22 @@ function ProgressPanel({ job, filename }) {
   );
 }
 
+async function previewKind(blob, contentType, auditType) {
+  let magic = "";
+  try {
+    const head = new Uint8Array(await blob.slice(0, 5).arrayBuffer());
+    magic = String.fromCharCode(...head);
+  } catch {
+    magic = "";
+  }
+  if (magic.startsWith("%PDF-")) return "pdf";
+  const hint = `${contentType || ""} ${auditType || ""} ${blob?.type || ""}`.toLowerCase();
+  if (hint.includes("pdf")) return "pdf";
+  if (hint.includes("png") || hint.includes("jpeg") || hint.includes("gif") || hint.includes("image/")) return "image";
+  if (hint.includes("text/plain") || hint.includes("txt")) return "text";
+  return "";
+}
+
 function ReportViewer({
   job,
   report,
@@ -3289,23 +3305,56 @@ function ReportViewer({
   const hiddenCrossDoc = findings.length - visibleFindings.length;
   const [showDoc, setShowDoc] = useState(true);
   const [localFileUrl, setLocalFileUrl] = useState(null);
-  const vaultUrl = caseId && documentId ? documentFileUrl(caseId, documentId) : null;
-  const remoteUrl = vaultUrl || (job?.job_id ? jobSourceUrl(job.job_id) : null);
+  const [sourceKind, setSourceKind] = useState("");
+  const [sourceMissing, setSourceMissing] = useState(false);
+  const [sourceLoading, setSourceLoading] = useState(false);
+  const reattachRef = useRef(null);
+  const hosted = isHostedAnalysis();
+  const vaultUrl = !hosted && caseId && documentId ? documentFileUrl(caseId, documentId) : null;
+  const remoteUrl = hosted ? null : (vaultUrl || (job?.job_id ? jobSourceUrl(job.job_id) : null));
   const fileUrl = localFileUrl || remoteUrl;
-  const lowerName = (documentName || job.filename || "").toLowerCase();
-  const isPdf = lowerName.endsWith(".pdf");
-  const isImage = /\.(png|jpe?g|gif)$/i.test(lowerName);
-  const isText = lowerName.endsWith(".txt");
+  const lowerName = (documentName || job.filename || report?.audit?.filename || "").toLowerCase();
+  const auditType = String(report?.audit?.file_type || "").toLowerCase();
+  const isPdf = sourceKind === "pdf" || auditType === "pdf" || auditType.includes("pdf") || lowerName.endsWith(".pdf");
+  const isImage = sourceKind === "image" || /\.(png|jpe?g|gif)$/i.test(lowerName) || auditType === "png" || auditType === "jpg" || auditType === "jpeg" || auditType === "gif";
+  const isText = sourceKind === "text" || lowerName.endsWith(".txt") || auditType === "txt" || auditType === "text";
   const docSha =
     report?.audit?.sha256 ||
     documents.find((d) => d.id === documentId)?.sha256 ||
     null;
 
-  // Hosted: prefer local/session file so Open does not depend on analysis vault /file.
+  // Hosted bytes live with the report. Local/session file is only a same-browser shortcut.
   useEffect(() => {
     let revoked = null;
     let cancelled = false;
     (async () => {
+      if (hosted && caseId && documentId) {
+        setSourceLoading(true);
+        setSourceMissing(false);
+        setLocalFileUrl(null);
+        try {
+          const { fetchMatterSource } = await import("./api");
+          const result = await fetchMatterSource(caseId, documentId);
+          if (cancelled) return;
+          if (result.missing) {
+            setSourceMissing(true);
+            return;
+          }
+          const kind = await previewKind(result.blob, result.type, report?.audit?.file_type);
+          const typed = result.blob.type
+            ? result.blob
+            : new Blob([result.blob], { type: result.type || "application/octet-stream" });
+          const url = URL.createObjectURL(typed);
+          revoked = url;
+          setSourceKind(kind);
+          setLocalFileUrl(url);
+        } catch {
+          if (!cancelled) setSourceMissing(true);
+        } finally {
+          if (!cancelled) setSourceLoading(false);
+        }
+        return;
+      }
       if (!docSha) return;
       try {
         const { getSessionCachedFile, getFileHandle, sha256OfFile } = await import("./localFiles.js");
@@ -3328,8 +3377,10 @@ function ReportViewer({
           }
         }
         if (!file || cancelled) return;
+        const kind = await previewKind(file, file.type, report?.audit?.file_type);
         const url = URL.createObjectURL(file);
         revoked = url;
+        setSourceKind(kind);
         setLocalFileUrl(url);
       } catch {
         /* keep remote / none */
@@ -3339,7 +3390,38 @@ function ReportViewer({
       cancelled = true;
       if (revoked) URL.revokeObjectURL(revoked);
     };
-  }, [docSha]);
+  }, [hosted, caseId, documentId, docSha, report?.audit?.file_type]);
+
+  async function reattachSource(file) {
+    if (!file || !caseId || !documentId) return;
+    setSourceLoading(true);
+    try {
+      const { attachMatterSource, fetchMatterSource } = await import("./api");
+      await attachMatterSource(caseId, documentId, file);
+      const result = await fetchMatterSource(caseId, documentId);
+      if (result.missing) {
+        setSourceMissing(true);
+        onError?.("Original file is no longer available. Re-upload or re-fetch.");
+        return;
+      }
+      const kind = await previewKind(result.blob, result.type, report?.audit?.file_type);
+      const typed = result.blob.type
+        ? result.blob
+        : new Blob([result.blob], { type: result.type || "application/octet-stream" });
+      const url = URL.createObjectURL(typed);
+      setLocalFileUrl((prev) => {
+        if (prev && prev.startsWith("blob:")) URL.revokeObjectURL(prev);
+        return url;
+      });
+      setSourceKind(kind);
+      setSourceMissing(false);
+      onError?.("");
+    } catch (err) {
+      onError?.(err.message || "Could not re-attach that file.");
+    } finally {
+      setSourceLoading(false);
+    }
+  }
 
   return (
     <>
@@ -3380,7 +3462,11 @@ function ReportViewer({
             >
               {showDoc ? "Hide document" : "View document"}
             </button>
-            {fileUrl ? (
+            {sourceMissing ? (
+              <button className="btn secondary" type="button" disabled>
+                Open in new tab
+              </button>
+            ) : fileUrl ? (
               <a className="btn secondary" href={fileUrl} target="_blank" rel="noreferrer">
                 Open in new tab
               </a>
@@ -3408,6 +3494,15 @@ function ReportViewer({
                 Open local file
               </button>
             )}
+            {sourceMissing ? (
+              <button className="btn secondary" type="button" disabled>
+                Download
+              </button>
+            ) : fileUrl ? (
+              <a className="btn secondary" href={fileUrl} download={documentName || "source.pdf"}>
+                Download
+              </a>
+            ) : null}
             <a className="btn gold" href={exportUrl(job.job_id, "html")}>Export HTML</a>
             <a className="btn" href={exportUrl(job.job_id, "pdf")}>Export PDF</a>
             <a className="btn secondary" href={exportUrl(job.job_id, "json")}>Export JSON</a>
@@ -3440,13 +3535,43 @@ function ReportViewer({
           <div className="card doc-pane">
             <div className="row" style={{ justifyContent: "space-between", marginBottom: 10 }}>
               <p className="kicker" style={{ margin: 0 }}>Source document</p>
-              {fileUrl ? (
+              {sourceMissing ? (
+                <span className="footnote">Source unavailable</span>
+              ) : fileUrl ? (
                 <a className="footnote" href={fileUrl} target="_blank" rel="noreferrer">Fullscreen</a>
               ) : (
                 <span className="footnote">Link a local file to preview</span>
               )}
             </div>
-            {fileUrl ? (
+            {sourceLoading ? (
+              <p className="empty-copy">Loading source…</p>
+            ) : sourceMissing ? (
+              <div className="doc-fallback">
+                <p>Original file is no longer available. Re-upload or re-fetch.</p>
+                {hosted && (
+                  <>
+                    <button
+                      className="btn gold"
+                      type="button"
+                      onClick={() => reattachRef.current?.click()}
+                    >
+                      Re-attach source
+                    </button>
+                    <input
+                      ref={reattachRef}
+                      type="file"
+                      hidden
+                      accept=".pdf,.txt,.png,.jpg,.jpeg,.gif"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        e.target.value = "";
+                        if (file) reattachSource(file);
+                      }}
+                    />
+                  </>
+                )}
+              </div>
+            ) : fileUrl ? (
               <DocumentPreview url={fileUrl} isPdf={isPdf} isImage={isImage} isText={isText} name={lowerName} />
             ) : (
               <p className="empty-copy">

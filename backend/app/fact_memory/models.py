@@ -102,8 +102,13 @@ class Document(Base):
     extractor_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # Vault-compatible snapshot JSON (entities/facts/fingerprint) — encrypted blob.
     snapshot_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Full report JSON for reopen without job TTL (encrypted). No PDF bytes.
+    # Full report JSON for reopen without job TTL (encrypted).
     report_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Encrypted original bytes. Survives analysis restarts; job disk does not.
+    source_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    mime_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    source_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_missing: Mapped[bool] = mapped_column(Boolean, default=True)
     last_job_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     matter: Mapped["Matter"] = relationship(back_populates="documents")
@@ -254,6 +259,34 @@ def get_session_factory(url: str | None = None):
 def init_db(url: str | None = None) -> None:
     engine = get_engine(url)
     Base.metadata.create_all(engine)
+    ensure_source_columns(engine)
+
+
+def ensure_source_columns(engine) -> None:
+    """create_all does not add columns to an existing documents table."""
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+    if "documents" not in insp.get_table_names():
+        return
+    have = {col["name"] for col in insp.get_columns("documents")}
+    default_missing = "TRUE" if engine.dialect.name == "postgresql" else "1"
+    stmts: list[str] = []
+    if "source_enc" not in have:
+        stmts.append("ALTER TABLE documents ADD COLUMN source_enc TEXT")
+    if "mime_type" not in have:
+        stmts.append("ALTER TABLE documents ADD COLUMN mime_type VARCHAR(128)")
+    if "source_size" not in have:
+        stmts.append("ALTER TABLE documents ADD COLUMN source_size INTEGER")
+    if "source_missing" not in have:
+        stmts.append(
+            f"ALTER TABLE documents ADD COLUMN source_missing BOOLEAN DEFAULT {default_missing}"
+        )
+    if not stmts:
+        return
+    with engine.begin() as conn:
+        for sql in stmts:
+            conn.execute(text(sql))
 
 
 def reset_engine() -> None:
