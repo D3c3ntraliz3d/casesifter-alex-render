@@ -90,13 +90,21 @@ class Settings(BaseSettings):
     scan_max_seconds: int = 1080  # 18 minutes wall-clock once running
     scan_queue_idle_warn_seconds: int = 1080  # WARNING only when the whole queue is idle
     # Hard kill budget for the local Process (PDF/OCR). Parent terminates the child.
+    # Effective timeout = max(scan_job_timeout_s, base + per_page * pages).
     scan_job_timeout_s: int = 600
+    scan_job_timeout_base_s: int = 120
+    scan_job_timeout_per_page_s: int = 10
+    # Pause new local starts when web RSS (MB) is at/above this (512 MB instances).
+    scan_memory_guard_mb: int = 420
     # Concurrent local PDF/OCR processes. Keep at 1 on small Render plans.
     scan_max_concurrent: int = 1
     # Gemini stage (web process threads). Independent of local process slots.
-    gemini_max_concurrent: int = 4
+    # Keep low on 512 MB until the plan is upgraded to 2 GB.
+    gemini_max_concurrent: int = 2
     # Cap total base64/PDF payload bytes in flight across Gemini calls (MB).
-    gemini_max_inflight_mb: int = 150
+    gemini_max_inflight_mb: int = 60
+    # Prefer a dedicated Python Sentry project; fall back to sentry_dsn.
+    sentry_backend_dsn: str | None = None
     # Wait budget for Gemini stage; orphaned thread gets cancel flag (cannot kill threads).
     gemini_stage_timeout_s: int = 900
     # After Gemini stage timeout: delete source when thread exits or this grace, whichever first.

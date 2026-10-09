@@ -50,12 +50,19 @@ services:
       # Upgrade to Standard 2GB before beta firms.
       - key: SCAN_MAX_CONCURRENT
         value: "1"
+      # 512 MB starter: keep Gemini small until plan is upgraded to 2 GB.
       - key: GEMINI_MAX_CONCURRENT
-        value: "4"
+        value: "2"
       - key: GEMINI_MAX_INFLIGHT_MB
-        value: "150"
+        value: "60"
+      - key: SCAN_MEMORY_GUARD_MB
+        value: "420"
       - key: SCAN_JOB_TIMEOUT_S
         value: "600"
+      - key: SCAN_JOB_TIMEOUT_BASE_S
+        value: "120"
+      - key: SCAN_JOB_TIMEOUT_PER_PAGE_S
+        value: "10"
       - key: GEMINI_STAGE_TIMEOUT_S
         value: "900"
       - key: GEMINI_ORPHAN_SOURCE_GRACE_S
@@ -67,6 +74,9 @@ services:
         sync: false
       - key: CLAUDE_MODEL
         value: claude-sonnet-4-5-20250929
+      # Create a Python backend project in Sentry and put its DSN here (not the JS one).
+      - key: SENTRY_BACKEND_DSN
+        sync: false
       - key: SENTRY_DSN
         sync: false
       - key: SENTRY_ENVIRONMENT

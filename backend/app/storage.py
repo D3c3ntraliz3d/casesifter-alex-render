@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -30,6 +32,24 @@ def _progress_path(job_id: str) -> Path:
     return job_dir(job_id) / "progress.json"
 
 
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write via temp + fsync + os.replace so readers never see a partial JSON."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        with tmp.open("w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
 def save_progress(progress: JobProgress) -> None:
     progress.updated_at = utcnow()
     path = _progress_path(progress.job_id)
@@ -37,14 +57,30 @@ def save_progress(progress: JobProgress) -> None:
     # poll reread a multi-megabyte file and froze the UI after large exhibits.
     slim = progress.model_copy(update={"report": None})
     with _lock:
-        path.write_text(slim.model_dump_json(indent=2), encoding="utf-8")
+        _atomic_write_text(path, slim.model_dump_json(indent=2))
 
 
 def load_progress(job_id: str) -> JobProgress | None:
+    """Load progress.json. Partial-read / parse races return None after one retry."""
     path = _progress_path(job_id)
     if not path.exists():
         return None
-    return JobProgress.model_validate_json(path.read_text(encoding="utf-8"))
+    last_exc: Exception | None = None
+    for attempt in range(2):
+        try:
+            raw = path.read_text(encoding="utf-8")
+            return JobProgress.model_validate_json(raw)
+        except Exception as exc:
+            last_exc = exc
+            if attempt == 0:
+                time.sleep(0.05)
+                continue
+    logger.warning(
+        "load_progress not ready job=%s err=%s",
+        job_id[:12],
+        last_exc,
+    )
+    return None
 
 
 def create_job(job_id: str, filename: str) -> JobProgress:
@@ -77,7 +113,15 @@ def update_job(
         path = _progress_path(job_id)
         if not path.exists():
             raise FileNotFoundError(f"Unknown job {job_id}")
-        progress = JobProgress.model_validate_json(path.read_text(encoding="utf-8"))
+        try:
+            progress = JobProgress.model_validate_json(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            # One brief retry for mid-write readers racing a previous writer.
+            time.sleep(0.05)
+            try:
+                progress = JobProgress.model_validate_json(path.read_text(encoding="utf-8"))
+            except Exception:
+                raise FileNotFoundError(f"progress.json not ready for job {job_id}") from exc
         current = progress.status
         if current in TERMINAL_STATUSES and status is not None and status != current:
             logger.info(
@@ -88,8 +132,6 @@ def update_job(
             )
             return progress
         if current in TERMINAL_STATUSES and status is None:
-            # Allow message/percent cosmetics? Prefer refuse stage/error too when terminal.
-            # Still allow report attach on complete only.
             if report is None and (stage is not None or error is not None or percent is not None):
                 logger.debug(
                     "sticky status skip non-status mutation job=%s status=%s",
@@ -115,17 +157,24 @@ def update_job(
         if report is not None:
             progress.report = report
             report_path = job_dir(job_id) / "report.json"
-            report_path.write_text(report.model_dump_json(indent=2), encoding="utf-8")
+            _atomic_write_text(report_path, report.model_dump_json(indent=2))
         progress.updated_at = utcnow()
         slim = progress.model_copy(update={"report": None})
-        path.write_text(slim.model_dump_json(indent=2), encoding="utf-8")
+        _atomic_write_text(path, slim.model_dump_json(indent=2))
         return progress
 
 
 def load_report(job_id: str) -> Report | None:
     path = job_dir(job_id) / "report.json"
     if path.exists():
-        return Report.model_validate_json(path.read_text(encoding="utf-8"))
+        try:
+            return Report.model_validate_json(path.read_text(encoding="utf-8"))
+        except Exception:
+            time.sleep(0.05)
+            try:
+                return Report.model_validate_json(path.read_text(encoding="utf-8"))
+            except Exception:
+                return None
     progress = load_progress(job_id)
     return progress.report if progress else None
 
@@ -135,4 +184,4 @@ def artifact_dir(job_id: str) -> Path:
 
 
 def save_json(path: Path, data: dict) -> None:
-    path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+    _atomic_write_text(path, json.dumps(data, indent=2, default=str))

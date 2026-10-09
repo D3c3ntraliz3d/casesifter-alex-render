@@ -1311,22 +1311,52 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
     };
   }, [docs, caseData.id, uploadNote]);
 
-  // Hosted: auto-resubmit queue-age / stall / timeout / interrupted jobs from IndexedDB.
+  // Hosted: auto-resubmit stall/timeout/interrupted jobs from IndexedDB once per matter session.
+  // Server enforces attempts per matter+sha; sessionStorage prevents reload loops.
   useEffect(() => {
     if (!isHostedAnalysis() || caseData.archived_at) return;
     const key = String(caseData.id || "");
-    if (!key || autoRetryKeyRef.current === key) return;
+    if (!key) return;
+    const sessionKey = `cs_auto_retry_${key}`;
+    try {
+      if (sessionStorage.getItem(sessionKey) === "1") return;
+    } catch {
+      /* private mode */
+    }
+    if (autoRetryKeyRef.current === key) return;
     autoRetryKeyRef.current = key;
     let cancelled = false;
     (async () => {
       try {
-        const { jobs } = await listRetryableJobs(caseData.id);
-        if (cancelled || !jobs?.length) return;
+        const { jobs, exhausted } = await listRetryableJobs(caseData.id);
+        if (cancelled) return;
+        try {
+          sessionStorage.setItem(sessionKey, "1");
+        } catch {
+          /* private mode */
+        }
         const misses = [];
-        let kicked = 0;
+        let created = 0;
+        let skippedActive = 0;
+        let skippedExhausted = 0;
+        const exhaustedShas = new Set(
+          (exhausted || []).map((r) => String(r.sha256 || "").toLowerCase()).filter(Boolean)
+        );
+        if (!(jobs || []).length) {
+          if ((exhausted || []).length) {
+            setUploadNote(
+              `${exhausted.length} file${exhausted.length === 1 ? "" : "s"} need re-upload (failed 3 times).`
+            );
+          }
+          return;
+        }
         for (const row of jobs) {
           const sha = String(row.sha256 || "").toLowerCase();
           if (!sha) continue;
+          if (exhaustedShas.has(sha) || Number(row.attempts || 0) >= 3) {
+            skippedExhausted += 1;
+            continue;
+          }
           const blob = await localCacheAdapter.getFile(null, sha);
           if (!blob) {
             misses.push(sha.slice(0, 12));
@@ -1335,28 +1365,36 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
           const name = `retry-${sha.slice(0, 12)}.pdf`;
           const file = new File([blob], name, { type: blob.type || "application/pdf" });
           try {
-            await createAnalysisJob(file, {
+            const result = await createAnalysisJob(file, {
               matterId: caseData.id,
               submittedBy: "web-app-auto-retry",
             });
-            kicked += 1;
-          } catch {
-            /* server dedupe or auth — skip */
+            if (result?.skipped === "already_active") skippedActive += 1;
+            else created += 1;
+          } catch (err) {
+            const msg = String(err?.message || err || "");
+            if (/failed 3 times|Needs re-upload/i.test(msg)) skippedExhausted += 1;
+            else if (/already queued|already running|already_active/i.test(msg)) skippedActive += 1;
           }
         }
-        if (kicked) {
-          setUploadNote(
-            `Auto-retried ${kicked} failed job${kicked === 1 ? "" : "s"} from this device’s cache.`
+        const parts = [];
+        if (created) parts.push(`created ${created}`);
+        if (skippedActive) parts.push(`skipped ${skippedActive} (already active)`);
+        if (skippedExhausted || (exhausted || []).length) {
+          parts.push(
+            `skipped ${(skippedExhausted || 0) + (exhausted?.length || 0)} (exhausted / needs re-upload)`
           );
-          try {
-            await onRefresh();
-          } catch {
-            /* ignore */
+        }
+        if (misses.length) parts.push(`${misses.length} not in cache`);
+        if (parts.length) {
+          setUploadNote(`Auto-retry: ${parts.join(" · ")}.`);
+          if (created) {
+            try {
+              await onRefresh();
+            } catch {
+              /* ignore */
+            }
           }
-        } else if (misses.length) {
-          setUploadNote(
-            `${misses.length} failed job${misses.length === 1 ? "" : "s"} need Locate / re-upload (not in cache).`
-          );
         }
       } catch {
         /* ignore */
@@ -2054,10 +2092,11 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
               </strong>
               {cacheCoverage.missing.length ? (
                 <p className="footnote" style={{ margin: "4px 0 0" }}>
-                  Need Locate / re-upload:{" "}
-                  {cacheCoverage.missing.slice(0, 8).join(", ")}
-                  {cacheCoverage.missing.length > 8
-                    ? ` +${cacheCoverage.missing.length - 8} more`
+                  {cacheCoverage.missing.length} of {cacheCoverage.total} not on this
+                  computer (showing first {Math.min(12, cacheCoverage.missing.length)}):{" "}
+                  {cacheCoverage.missing.slice(0, 12).join(", ")}
+                  {cacheCoverage.missing.length > 12
+                    ? ` +${cacheCoverage.missing.length - 12} more`
                     : ""}
                 </p>
               ) : (

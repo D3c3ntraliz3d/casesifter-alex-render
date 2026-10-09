@@ -221,6 +221,7 @@ def _upsert_durable_job(
     message: str | None = None,
     error: str | None = None,
     document_id: str | None = None,
+    attempts: int | None = None,
 ) -> None:
     if not firm_ctx or not firm_ctx.get("firm_id"):
         return
@@ -236,6 +237,7 @@ def _upsert_durable_job(
             status=status,
             message=message,
             error=error,
+            attempts=attempts,
         )
     except Exception:
         logger.exception("Durable job upsert failed for %s", job_id)
@@ -367,12 +369,14 @@ async def create_ephemeral_job(
     # Hash off the event loop — large PDFs must not stall /health.
     digest = await asyncio.to_thread(sha256_file, dest)
 
-    # Server dedupe: do not create a second job if one is already active for matter+sha.
+    # Server dedupe + attempt budget per matter+sha256 (client count resets on reload).
+    next_attempts = 1
     if resolved_matter and firm_ctx and digest:
         try:
             from app.fact_memory.store import get_store
 
-            active = get_store().find_active_analysis_job(
+            store = get_store()
+            active = store.find_active_analysis_job(
                 firm_id=firm_ctx["firm_id"],
                 matter_id=resolved_matter,
                 sha256=digest,
@@ -380,18 +384,45 @@ async def create_ephemeral_job(
             if active:
                 delete_job_files(job_id)
                 logger.info(
-                    "dedupe active job matter=%s sha=%s existing=%s",
+                    "dedupe active job matter=%s sha=%s existing=%s status=%s",
                     resolved_matter,
                     digest[:12],
                     (active.get("job_id") or "")[:8],
+                    active.get("status"),
                 )
-                return UploadResponse(
-                    job_id=active["job_id"],
-                    filename=safe_name,
-                    status=active.get("status") or "queued",
+                return JSONResponse(
+                    status_code=200,
+                    content={
+                        "job_id": active["job_id"],
+                        "filename": safe_name,
+                        "status": active.get("status") or "queued",
+                        "skipped": "already_active",
+                        "attempts": active.get("attempts"),
+                        "message": "A job for this file is already queued or running.",
+                    },
                 )
+            prior_attempts = store.max_attempts_for_sha(
+                firm_id=firm_ctx["firm_id"],
+                matter_id=resolved_matter,
+                sha256=digest,
+            )
+            if prior_attempts >= 3:
+                latest = store.latest_job_for_sha(
+                    firm_id=firm_ctx["firm_id"],
+                    matter_id=resolved_matter,
+                    sha256=digest,
+                )
+                delete_job_files(job_id)
+                detail = (
+                    "Needs re-upload / failed 3 times. "
+                    + str((latest or {}).get("error") or (latest or {}).get("message") or "")
+                ).strip()
+                raise HTTPException(status_code=409, detail=detail)
+            next_attempts = prior_attempts + 1 if prior_attempts > 0 else 1
+        except HTTPException:
+            raise
         except Exception:
-            logger.exception("active-job dedupe check failed")
+            logger.exception("active-job dedupe / attempts check failed")
 
     queue_msg = "Queued for analysis." + (
         " Matter fact memory enabled." if persist else ""
@@ -405,6 +436,7 @@ async def create_ephemeral_job(
         sha256=digest,
         status="queued",
         message=queue_msg,
+        attempts=next_attempts,
     )
     if persist:
         # Marker so sweeper retains report (facts live in DB; PDF still deleted).

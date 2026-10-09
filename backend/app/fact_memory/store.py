@@ -557,19 +557,19 @@ class FactMemoryStore:
                             fact_blob_enc=enc.encrypt_json(fernet, fact),
                         )
                     )
-                # Stale pairwise fact_conflict rows — board prefers aggregates.
-                findings = s.execute(
-                    select(FindingRow).where(
-                        FindingRow.firm_id == firm_id,
-                        FindingRow.matter_id == matter_id,
-                        FindingRow.document_id == doc.id,
-                        FindingRow.status == "open",
-                    )
-                ).scalars().all()
-                for finding in findings:
-                    if str(finding.finding_type or "") == "fact_conflict":
-                        finding.status = "stale"
                 updated += 1
+            # FindingRow has no document_id column — stale open fact_conflict rows
+            # for the whole matter; the board rebuilds from aggregates.
+            findings = s.execute(
+                select(FindingRow).where(
+                    FindingRow.firm_id == firm_id,
+                    FindingRow.matter_id == matter_id,
+                    FindingRow.status == "open",
+                )
+            ).scalars().all()
+            for finding in findings:
+                if str(finding.finding_type or "") == "fact_conflict":
+                    finding.status = "stale"
             self._audit(s, firm_id, user_id, "matter.recompute_facts", matter_id)
             s.commit()
 
@@ -1149,14 +1149,64 @@ class FactMemoryStore:
             )
             return self._analysis_job_dict(row) if row else None
 
-    def list_retryable_failed_jobs(
+    def max_attempts_for_sha(
+        self,
+        *,
+        firm_id: str,
+        matter_id: str,
+        sha256: str,
+    ) -> int:
+        """Highest attempts count across all durable jobs for matter+sha256."""
+        digest = (sha256 or "").lower().strip()
+        if not digest or not matter_id:
+            return 0
+        with self.session() as s:
+            rows = (
+                s.execute(
+                    select(AnalysisJob)
+                    .where(AnalysisJob.firm_id == firm_id)
+                    .where(AnalysisJob.matter_id == matter_id)
+                    .where(AnalysisJob.sha256 == digest)
+                )
+                .scalars()
+                .all()
+            )
+            if not rows:
+                return 0
+            return max(int(r.attempts or 0) for r in rows)
+
+    def latest_job_for_sha(
+        self,
+        *,
+        firm_id: str,
+        matter_id: str,
+        sha256: str,
+    ) -> dict[str, Any] | None:
+        digest = (sha256 or "").lower().strip()
+        if not digest or not matter_id:
+            return None
+        with self.session() as s:
+            row = (
+                s.execute(
+                    select(AnalysisJob)
+                    .where(AnalysisJob.firm_id == firm_id)
+                    .where(AnalysisJob.matter_id == matter_id)
+                    .where(AnalysisJob.sha256 == digest)
+                    .order_by(AnalysisJob.updated_at.desc())
+                )
+                .scalars()
+                .first()
+            )
+            return self._analysis_job_dict(row) if row else None
+
+    def list_exhausted_jobs(
         self,
         *,
         firm_id: str,
         matter_id: str,
         max_attempts: int = 3,
     ) -> list[dict[str, Any]]:
-        """Failed/interrupted jobs eligible for auto-retry (queue-age/stall/timeout/interrupted)."""
+        """Failed/interrupted jobs that have used up auto-retry attempts."""
         with self.session() as s:
             rows = (
                 s.execute(
@@ -1172,26 +1222,78 @@ class FactMemoryStore:
             out: list[dict[str, Any]] = []
             seen_sha: set[str] = set()
             for row in rows:
-                if int(row.attempts or 0) >= max_attempts:
-                    continue
                 sha = (row.sha256 or "").lower()
                 if not sha or sha in seen_sha:
                     continue
+                if int(row.attempts or 0) < max_attempts:
+                    continue
+                seen_sha.add(sha)
+                out.append(self._analysis_job_dict(row))
+            return out
+
+    def list_retryable_failed_jobs(
+        self,
+        *,
+        firm_id: str,
+        matter_id: str,
+        max_attempts: int = 3,
+    ) -> list[dict[str, Any]]:
+        """Failed/interrupted jobs eligible for auto-retry (stall/timeout/interrupted).
+
+        Attempts are enforced per matter+sha256 on the server. Backpressure waits
+        never fail a job, so they are not retry-eligible.
+        """
+        active_statuses = ("queued", "running", "local_done")
+        with self.session() as s:
+            all_rows = (
+                s.execute(
+                    select(AnalysisJob)
+                    .where(AnalysisJob.firm_id == firm_id)
+                    .where(AnalysisJob.matter_id == matter_id)
+                    .order_by(AnalysisJob.updated_at.desc())
+                )
+                .scalars()
+                .all()
+            )
+            max_by_sha: dict[str, int] = {}
+            active_shas: set[str] = set()
+            for row in all_rows:
+                sha = (row.sha256 or "").lower()
+                if not sha:
+                    continue
+                max_by_sha[sha] = max(max_by_sha.get(sha, 0), int(row.attempts or 0))
+                if row.status in active_statuses:
+                    active_shas.add(sha)
+            out: list[dict[str, Any]] = []
+            seen_sha: set[str] = set()
+            for row in all_rows:
+                if row.status not in ("failed", "interrupted"):
+                    continue
+                sha = (row.sha256 or "").lower()
+                if not sha or sha in seen_sha or sha in active_shas:
+                    continue
+                attempts = max_by_sha.get(sha, int(row.attempts or 0))
+                if attempts >= max_attempts:
+                    continue
                 err = f"{row.error or ''} {row.message or ''}".lower()
+                if "backpressure" in err:
+                    continue
                 eligible = (
                     row.status == "interrupted"
-                    or "queued for more than" in err
-                    or "scan slots were likely wedged" in err
                     or "no progress for more than" in err
                     or "timed out" in err
                     or "stall" in err
                     or "timeout" in err
                     or "interrupted" in err
+                    or "local_timeout" in err
+                    or "gemini_timeout" in err
                 )
                 if not eligible:
                     continue
                 seen_sha.add(sha)
-                out.append(self._analysis_job_dict(row))
+                payload = self._analysis_job_dict(row)
+                payload["attempts"] = attempts
+                out.append(payload)
             return out
 
     def get_analysis_job(self, job_id: str) -> dict[str, Any] | None:

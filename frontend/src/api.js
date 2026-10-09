@@ -269,14 +269,18 @@ function isRetryableAnalysisFailure(err, status = 0) {
 }
 
 async function analysisFetch(path, options = {}) {
-  const maxAttempts = 4;
+  const method = String(options.method || "GET").toUpperCase();
+  // Only idempotent reads retry on transport/503. POSTs like recompute-facts
+  // must surface the real error (and must not hammer a crashing instance).
+  const retrySafe = method === "GET" || method === "HEAD";
+  const maxAttempts = retrySafe ? 4 : 1;
   let lastErr = null;
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     try {
       const res = await apiFetch(path, options);
       if (res.status === 503 || res.status === 502 || res.status === 504) {
         lastErr = analysisUnreachableError(new Error(String(res.status)));
-        if (attempt < maxAttempts - 1) {
+        if (retrySafe && attempt < maxAttempts - 1) {
           await sleep(400 * 2 ** attempt);
           continue;
         }
@@ -285,7 +289,7 @@ async function analysisFetch(path, options = {}) {
       return res;
     } catch (err) {
       lastErr = analysisUnreachableError(err);
-      if (attempt < maxAttempts - 1 && isRetryableAnalysisFailure(err)) {
+      if (retrySafe && attempt < maxAttempts - 1 && isRetryableAnalysisFailure(err)) {
         await sleep(400 * 2 ** attempt);
         continue;
       }

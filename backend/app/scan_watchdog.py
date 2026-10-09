@@ -146,22 +146,9 @@ def _maybe_reap_job(job_id: str, now: datetime) -> bool:
     started = _aware(progress.started_at) or _aware(progress.created_at)
     stage = progress.stage or "unknown"
 
-    # local_done waits for Gemini slots — silence is expected; wall-clock only.
+    # local_done waits for Gemini slots — never fail for waiting (same as queued).
+    # Gemini stage timeout in gemini_executor fails only once Gemini is actually running.
     if progress.status == "local_done":
-        if started is not None:
-            wall = (now - started).total_seconds()
-            gemini_cap = max(max_s, int(getattr(settings, "gemini_stage_timeout_s", 900) or 900) * 2)
-            if wall >= gemini_cap:
-                return _fail_job(
-                    job_id,
-                    stage=stage,
-                    minutes_since_update=(now - updated).total_seconds() / 60.0 if updated else wall / 60.0,
-                    message="Scan timed out waiting for Gemini. Re-scan this file.",
-                    error=(
-                        f"Job stayed in local_done longer than {gemini_cap // 60} minutes "
-                        f"(last stage: {stage}). Re-scan this file."
-                    ),
-                )
         return False
 
     # Running: no-progress heartbeat (stall)

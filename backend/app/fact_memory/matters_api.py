@@ -187,7 +187,10 @@ def list_retryable_jobs(matter_id: str, auth: dict = Depends(_require_analysis_a
     rows = store.list_retryable_failed_jobs(
         firm_id=ctx["firm_id"], matter_id=matter_id, max_attempts=3
     )
-    return {"jobs": rows}
+    exhausted = store.list_exhausted_jobs(
+        firm_id=ctx["firm_id"], matter_id=matter_id, max_attempts=3
+    )
+    return {"jobs": rows, "exhausted": exhausted}
 
 
 @matters_router.post("/{matter_id}/recompute-facts")
@@ -201,6 +204,10 @@ def recompute_matter_facts(matter_id: str, auth: dict = Depends(_require_analysi
         )
     except KeyError as exc:
         raise HTTPException(404, "Matter not found.") from exc
+    except Exception as exc:
+        raise HTTPException(
+            500, f"Could not recompute case facts: {exc.__class__.__name__}: {exc}"
+        ) from exc
     return result
 
 

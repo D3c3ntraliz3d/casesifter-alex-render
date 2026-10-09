@@ -28,7 +28,11 @@ _SENSITIVE_KEYS = {
 
 
 def init_sentry(*, service: str) -> None:
-    dsn = (settings.sentry_dsn or "").strip()
+    # Prefer a dedicated Python/backend DSN so events are not mixed into javascript-react.
+    dsn = (
+        (getattr(settings, "sentry_backend_dsn", None) or "").strip()
+        or (settings.sentry_dsn or "").strip()
+    )
     if not dsn:
         return
     try:
