@@ -200,6 +200,11 @@ def compare_to_case(
         if this_crfns and not (this_crfns & complaint_crfns):
             facts = [f for f in facts if f.get("kind") != "money"]
 
+    # Affidavit-scoped attributes (execution_venue) need a stable document id so
+    # cross-doc compare does not treat independent jurats as one fact.
+    if new_document_id:
+        facts = [{**f, "document_id": f.get("document_id") or new_document_id} for f in facts]
+
     findings.extend(_internal_fact_conflicts(new_display_name, facts))
     findings.extend(
         _discharged_mortgage_findings(
@@ -227,6 +232,10 @@ def compare_to_case(
             prior_own_crfns = _crfns_in(prior.get("text_excerpt") or "")
             if prior_own_crfns and not (prior_own_crfns & complaint_crfns):
                 prior_facts = [f for f in prior_facts if f.get("kind") != "money"]
+        if prior_id:
+            prior_facts = [
+                {**f, "document_id": f.get("document_id") or prior_id} for f in prior_facts
+            ]
 
         shared_orgs = sorted(new_orgs & prior_orgs)
         same_fingerprint = bool(
@@ -626,8 +635,9 @@ def _score_pair(left: dict[str, Any], right: dict[str, Any], key: str) -> dict[s
                 "they diverge this far — credibility interrupt on the financial story."
             )
         if key == "stated_principal":
-            roles = {left.get("principal_role"), right.get("principal_role")}
-            if roles == {"note", "judgment"} and float(left["value"]) != float(right["value"]):
+            roles = {str(left.get("principal_role") or "note"), str(right.get("principal_role") or "note")}
+            note_like = roles & {"note", "assignment"}
+            if "judgment" in roles and note_like and float(left["value"]) != float(right["value"]):
                 materiality = (
                     "Judgment principal that is materially lower than the note/assignment "
                     "principal while the packet asserts arrears / missed payments (no payment "
@@ -636,6 +646,10 @@ def _score_pair(left: dict[str, Any], right: dict[str, Any], key: str) -> dict[s
                 over = True
                 borderline = False
                 discrepancy = f"${delta:,.2f} principal decline ({pct:.1%})"
+            elif len(roles) > 1:
+                # Different instruments / CEMA components are not the same principal fact.
+                over = False
+                borderline = False
         row = _row(left, right, key, label, discrepancy, materiality, over, borderline, confidence=82 if over else 55)
         if key == "annual_income":
             row["documentary"] = True
@@ -803,8 +817,9 @@ def _score_pair(left: dict[str, Any], right: dict[str, Any], key: str) -> dict[s
             return _row(left, right, key, label, "same venue", "Venues match.", False, False, confidence=40)
         discrepancy = f"{left.get('display')} vs {right.get('display')}"
         materiality = (
-            "Same process server executing affidavits for the same case on the same day "
-            "cannot swear both Suffolk and Kings venue — credibility interrupt."
+            "The same affidavit cannot state two incompatible execution venues — "
+            "credibility interrupt on that instrument. Venues across different "
+            "affidavits are independent and are not the same fact."
         )
         row = _row(left, right, key, label, discrepancy, materiality, True, False, confidence=86)
         row["documentary"] = True
@@ -1218,13 +1233,17 @@ def aggregate_fact_conflicts(snapshots: list[dict[str, Any]]) -> list[dict[str, 
     for snap in snapshots:
         snap_crfns = _crfns_in(snap.get("text_excerpt") or "") if complaint_crfns else set()
         excluded_money = bool(complaint_crfns and snap_crfns and not (snap_crfns & complaint_crfns))
+        doc_id = snap.get("document_id")
         for fact in snap.get("facts") or []:
             key = str(fact.get("key") or "")
             if key not in GOTCHA_KEYS and not fact.get("graph"):
                 continue
             if excluded_money and fact.get("kind") == "money":
                 continue
-            by_key.setdefault(cluster_key(fact), []).append((snap, fact))
+            stamped = dict(fact)
+            if doc_id and not stamped.get("document_id"):
+                stamped["document_id"] = doc_id
+            by_key.setdefault(cluster_key(stamped), []).append((snap, stamped))
 
     cluster_ids = list(by_key.keys())
     merged: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = {}

@@ -627,25 +627,52 @@
       "notes": "2026-09-24 #10 — continuous residence vs utility service address."
     },
     {
-      "id": "p0_execution_venue_conflict",
-      "label": "tp",
-      "shape": "execution_venue_same_day",
+      "id": "p0_execution_venue_cross_affidavit_quiet",
+      "label": "fp",
+      "shape": "execution_venue_cross_affidavit",
       "mode": "aggregate",
-      "must_ship": true,
-      "impact_bucket": "credibility",
+      "must_suppress": true,
       "documents": [
         {
           "id": "aos1",
-          "name": "AOS Suffolk",
-          "text": "AFFIDAVIT OF SERVICE\nI, Timothy Brailsford, being duly sworn\nState of New York, County of Suffolk\nSworn on April 9, 2007\n"
+          "name": "AOS New York",
+          "text": "AFFIDAVIT OF SERVICE\nI, Timothy Brailsford, being duly sworn\nState of New York, County of New York\nSworn on April 9, 2007\n"
         },
         {
           "id": "aos2",
-          "name": "AOS Kings",
-          "text": "AFFIDAVIT OF SERVICE\nI, Timothy Brailsford, being duly sworn\nState of New York, County of Kings\nSworn on April 9, 2007\n"
+          "name": "AOS Bronx",
+          "text": "AFFIDAVIT OF SERVICE\nI, Timothy Brailsford, being duly sworn\nState of New York, County of Bronx\nSworn on April 9, 2007\n"
         }
       ],
-      "notes": "2026-09-24 #16 — same server/day conflicting execution venue."
+      "notes": "Venues across different affidavits (NY vs Bronx) are independent — not a gotcha."
+    },
+    {
+      "id": "p0_execution_venue_same_affidavit_conflict",
+      "label": "tp",
+      "shape": "execution_venue_same_affidavit",
+      "mode": "internal_binder",
+      "must_ship": true,
+      "impact_bucket": "credibility",
+      "text": "AFFIDAVIT OF SERVICE\nI, Timothy Brailsford, being duly sworn\nState of New York, County of Suffolk\nSworn on April 9, 2007\nAlso executed in Kings County on April 9, 2007\n",
+      "notes": "Same affidavit stating two venues for the same execution is a credibility interrupt."
+    },
+    {
+      "id": "fp_cema_component_principals_quiet",
+      "label": "fp",
+      "shape": "stated_principal_cema_components",
+      "mode": "internal_binder",
+      "must_suppress": true,
+      "text": "CEMA. Prior mortgage principal amount $320,000.00.\nGap mortgage principal amount $85,000.00.\nConsolidated principal amount $405,000.00.\n",
+      "notes": "CEMA prior/gap/consolidated principals are different instruments — not the same principal fact."
+    },
+    {
+      "id": "fp_assignment_chain_dates_quiet",
+      "label": "fp",
+      "shape": "assignment_chain_dates",
+      "mode": "internal_binder",
+      "must_suppress": true,
+      "text": "Mortgage dated January 15, 2008.\nAssignment of Mortgage dated March 1, 2015 to First National Bank.\nAssignment of Mortgage dated June 12, 2019 to Servicer Holdings LLC.\n",
+      "notes": "Each assignment has its own date; do not conflict with mortgage origination or other assignments."
     },
     {
       "id": "calib_marcus_age_vs_janet_wire_quiet",
