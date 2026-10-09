@@ -81,6 +81,12 @@ def _startup() -> None:
         logger.warning("Fact memory store init failed: %s", exc)
     ensure_sweeper()
     ensure_watchdog()
+    try:
+        from app.scan_executor import ensure_scan_executor
+
+        ensure_scan_executor()
+    except Exception as exc:
+        logger.warning("Scan process pool init failed: %s", exc)
     if not settings.gemini_api_key:
         logger.warning(
             "GEMINI_API_KEY is not set — exhibit multimodal / historical fraud review is OFF. "
@@ -99,10 +105,21 @@ def _startup() -> None:
             _mode,
         )
     logger.info(
-        "Fact memory: PERSIST_FACTS=%s SOURCE_FILE_RETENTION=%s",
+        "Fact memory: PERSIST_FACTS=%s SOURCE_FILE_RETENTION=%s SCAN_MAX_CONCURRENT=%s",
         settings.persist_facts,
         settings.source_file_retention,
+        max(1, int(settings.scan_max_concurrent or 1)),
     )
+
+
+@app.on_event("shutdown")
+def _shutdown() -> None:
+    try:
+        from app.scan_executor import shutdown_scan_executor
+
+        shutdown_scan_executor()
+    except Exception:
+        pass
 
 
 @app.get("/")

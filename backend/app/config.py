@@ -87,6 +87,8 @@ class Settings(BaseSettings):
     # Scan watchdog: fail + release slot when a running job goes silent or runs too long.
     scan_stall_seconds: int = 420  # 7 minutes with no progress update
     scan_max_seconds: int = 1080  # 18 minutes wall-clock once running
+    # Concurrent pipeline processes. Keep at 1 on 512 MB Render; raise via env later.
+    scan_max_concurrent: int = 1
 
     # Gotcha logic verifier (Track B). Historical impossibilities stay on Gemini (Track C).
     # auto = Claude if ANTHROPIC_API_KEY set, else Gemini.

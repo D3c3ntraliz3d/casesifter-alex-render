@@ -7,9 +7,9 @@ PDF is deleted immediately. Report TTL is skipped for persist firms.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-import threading
 import time
 import urllib.error
 import urllib.request
@@ -24,19 +24,13 @@ from app.case_chat import ask_case_from_packet
 from app.config import settings
 from app.entitlement import require_scan_allowed
 from app.ephemeral import (
-    delete_ephemeral_source,
     delete_job_files,
     ensure_sweeper,
-    maybe_delete_after_terminal,
     sweep_stale_jobs,
 )
 from app.models import UploadResponse
-from app.pipeline import run_pipeline
-from app.product_events import emit_chat_asked, emit_scan_failed
-from app.resource import rss_mb
-from app.scan_slots import acquire as acquire_scan_slot
-from app.scan_slots import active_count as scan_slot_active_count
-from app.scan_slots import release as release_scan_slot
+from app.product_events import emit_chat_asked
+from app.scan_executor import ensure_scan_executor, submit_ephemeral_job
 from app.scan_watchdog import ensure_watchdog
 from app.storage import create_job, job_dir, load_progress, load_report, update_job
 
@@ -330,17 +324,24 @@ async def create_ephemeral_job(
     persist = False
     if resolved_matter:
         persist = _should_persist(_auth, firm_ctx)
-        from app.fact_memory.store import get_store
 
-        store = get_store()
-        matter = store.get_matter(firm_ctx["firm_id"], resolved_matter)
+        def _load_matter_priors():
+            from app.fact_memory.store import get_store
+
+            store = get_store()
+            matter = store.get_matter(firm_ctx["firm_id"], resolved_matter)
+            if not matter:
+                return None, []
+            if not persist:
+                return matter, []
+            return matter, store.list_prior_snapshots(firm_ctx["firm_id"], resolved_matter)
+
+        matter, priors = await asyncio.to_thread(_load_matter_priors)
         if not matter:
             raise HTTPException(404, "Matter not found for this account.")
-        if persist:
-            priors = store.list_prior_snapshots(firm_ctx["firm_id"], resolved_matter)
-            # Prefer matter priors over client peer_snapshots when both present.
-            if priors:
-                peers = priors
+        # Prefer matter priors over client peer_snapshots when both present.
+        if priors:
+            peers = priors
 
     job_id = uuid.uuid4().hex
     dest_dir = job_dir(job_id)
@@ -363,7 +364,8 @@ async def create_ephemeral_job(
 
     from app.ingestion import sha256_file
 
-    digest = sha256_file(dest)
+    # Hash off the event loop — large PDFs must not stall /health.
+    digest = await asyncio.to_thread(sha256_file, dest)
     queue_msg = "Queued for analysis." + (
         " Matter fact memory enabled." if persist else ""
     )
@@ -381,154 +383,23 @@ async def create_ephemeral_job(
         # Marker so sweeper retains report (facts live in DB; PDF still deleted).
         (dest_dir / "persist.flag").write_text(resolved_matter or "", encoding="utf-8")
 
-    thread = threading.Thread(
-        target=_run_ephemeral,
-        args=(
-            job_id,
-            dest,
-            submitted_by,
-            display_name,
-            doc_kind,
-            peers,
-            resolved_matter,
-            firm_ctx,
-            filed_date,
-            persist,
-        ),
-        daemon=True,
-        name=f"ephemeral-{job_id[:8]}",
+    # Child process — not a thread in the web worker (GIL / CPU was killing /health).
+    ensure_scan_executor()
+    submit_ephemeral_job(
+        {
+            "job_id": job_id,
+            "dest": str(dest),
+            "submitted_by": submitted_by,
+            "display_name": display_name,
+            "doc_kind": doc_kind,
+            "prior_snapshots": peers,
+            "matter_id": resolved_matter,
+            "firm_ctx": firm_ctx,
+            "filed_date": filed_date,
+            "persist": persist,
+        }
     )
-    thread.start()
     return UploadResponse(job_id=job_id, filename=safe_name, status="queued")
-
-
-def _run_ephemeral(
-    job_id: str,
-    dest: Path,
-    submitted_by: str,
-    display_name: str | None,
-    doc_kind: str | None,
-    prior_snapshots: list[dict] | None = None,
-    matter_id: str | None = None,
-    firm_ctx: dict | None = None,
-    filed_date: str | None = None,
-    persist: bool = False,
-) -> None:
-    logger.info(
-        "ephemeral start job=%s rss_mb=%s active_slots=%s",
-        job_id[:8],
-        rss_mb(),
-        scan_slot_active_count(),
-    )
-    terminal_status = "failed"
-    terminal_message = None
-    terminal_error = None
-    document_id = None
-    try:
-        if not acquire_scan_slot(job_id, timeout=600):
-            emit_scan_failed(
-                job_id=job_id,
-                stage="queue",
-                error_class="timeout",
-                error_message="Scan queue timed out.",
-            )
-            update_job(
-                job_id,
-                status="failed",
-                stage="failed",
-                percent=100,
-                message="Scan queue timed out.",
-                error="Another scan held the queue for too long.",
-            )
-            terminal_status = "failed"
-            terminal_message = "Scan queue timed out."
-            terminal_error = "Another scan held the queue for too long."
-            maybe_delete_after_terminal(job_id, retain_report=persist)
-            return
-        _update_durable_job(job_id, status="running", message="Scan slot acquired.")
-        try:
-            sample = ""
-            if not (doc_kind or "").strip():
-                suffix = dest.suffix.lower()
-                if suffix == ".pdf":
-                    try:
-                        from app.scan_profile import peek_pdf_text
-
-                        sample = peek_pdf_text(dest)[:4000]
-                    except Exception:
-                        sample = ""
-                elif suffix in {".txt", ".text"}:
-                    try:
-                        sample = dest.read_text(encoding="utf-8", errors="ignore")[:4000]
-                    except OSError:
-                        sample = ""
-            resolved_name, resolved_kind = _resolve_upload_labels(
-                dest.name, display_name, doc_kind, sample
-            )
-            report = run_pipeline(
-                job_id,
-                dest,
-                submitted_by=submitted_by,
-                display_name=resolved_name,
-                doc_kind=resolved_kind,
-                prior_snapshots=prior_snapshots or None,
-            )
-            if persist and matter_id and firm_ctx and report is not None:
-                document_id = _persist_pipeline_result(
-                    job_id=job_id,
-                    source=dest,
-                    report=report,
-                    matter_id=matter_id,
-                    firm_ctx=firm_ctx,
-                    display_name=resolved_name,
-                    doc_kind=resolved_kind,
-                    filed_date=filed_date,
-                )
-            progress = load_progress(job_id)
-            if progress and progress.status == "complete":
-                terminal_status = "complete"
-                terminal_message = progress.message or "Analysis complete."
-                terminal_error = None
-            elif progress and progress.status == "failed":
-                terminal_status = "failed"
-                terminal_message = progress.message or "Analysis failed."
-                terminal_error = progress.error
-            else:
-                terminal_status = "complete"
-                terminal_message = "Analysis complete."
-        except Exception as exc:
-            emit_scan_failed(job_id=job_id, stage="failed", error_message=str(exc))
-            update_job(
-                job_id,
-                status="failed",
-                stage="failed",
-                percent=100,
-                message="Analysis failed.",
-                error=str(exc),
-            )
-            terminal_status = "failed"
-            terminal_message = "Analysis failed."
-            terminal_error = str(exc)
-        finally:
-            release_scan_slot(job_id)
-            maybe_delete_after_terminal(job_id, retain_report=persist)
-    finally:
-        _update_durable_job(
-            job_id,
-            status=terminal_status,
-            message=terminal_message,
-            error=terminal_error,
-            document_id=document_id,
-        )
-        logger.info(
-            "ephemeral end job=%s status=%s rss_mb=%s active_slots=%s",
-            job_id[:8],
-            terminal_status,
-            rss_mb(),
-            scan_slot_active_count(),
-        )
-        # Success, failure, timeout, and cancel: the upload must not remain on disk.
-        delete_ephemeral_source(job_id)
 
 
 def _persist_pipeline_result(

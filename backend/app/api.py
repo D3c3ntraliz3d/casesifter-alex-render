@@ -62,8 +62,8 @@ SAFE_ID = re.compile(r"^[a-f0-9]{16,64}$")
 
 
 def _health_payload() -> dict:
-    ensure_watchdog()
-    # RENDER_GIT_COMMIT is injected by Render at deploy — this is the real live SHA.
+    # Instant only — no DB, no files, no watchdog. Render kills the instance if this
+    # takes longer than 5s while analysis is running.
     git_commit = (os.environ.get("RENDER_GIT_COMMIT") or "").strip() or None
     mode = settings.resolve_app_mode()
     payload = {
@@ -71,9 +71,9 @@ def _health_payload() -> dict:
         "name": settings.app_name,
         "version": settings.app_version,
         "app_mode": mode,
-        # Bumped when blank-kind forensic + PORT CMD restore ships — proves live SHA without dashboard.
-        "build": "analysis-lockdown-v2",
+        "build": "analysis-lockdown-v3",
         "git_commit_source": "RENDER_GIT_COMMIT",
+        "scan_max_concurrent": max(1, int(settings.scan_max_concurrent or 1)),
     }
     if git_commit:
         payload["git_commit"] = git_commit
@@ -86,7 +86,7 @@ def _health_payload() -> dict:
 
 @public_router.get("/health")
 @router.get("/health")
-def health():
+async def health():
     return _health_payload()
 
 
