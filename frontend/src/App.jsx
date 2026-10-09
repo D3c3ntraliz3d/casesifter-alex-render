@@ -1344,9 +1344,24 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
         );
         if (!(jobs || []).length) {
           if ((exhausted || []).length) {
-            setUploadNote(
-              `${exhausted.length} file${exhausted.length === 1 ? "" : "s"} need re-upload (failed 3 times).`
-            );
+            const quarantined = (exhausted || []).filter(
+              (r) =>
+                String(r.error || "") === "restart_quarantine" ||
+                Number(r.restart_interruptions || 0) >= 2
+            ).length;
+            const other = exhausted.length - quarantined;
+            const parts = [];
+            if (quarantined) {
+              parts.push(
+                `${quarantined} need review (may be crashing the server)`
+              );
+            }
+            if (other) {
+              parts.push(
+                `${other} need re-upload (failed 3 times)`
+              );
+            }
+            setUploadNote(parts.join(" · ") + ".");
           }
           return;
         }
@@ -2102,6 +2117,20 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
                       onProgress: (row) => {
                         if (!row) return;
                         if (row.status === "complete" || row.status === "failed") return;
+                        const ahead = row.scans_ahead;
+                        if (
+                          row.status === "queued" &&
+                          typeof ahead === "number"
+                        ) {
+                          setUploadNote(
+                            ahead > 0
+                              ? `Refresh facts queued behind ${ahead} scan${
+                                  ahead === 1 ? "" : "s"
+                                }`
+                              : row.message || "Refresh facts queued behind scan slot"
+                          );
+                          return;
+                        }
                         const pct =
                           typeof row.percent === "number" ? ` ${row.percent}%` : "";
                         setUploadNote(

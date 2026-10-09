@@ -85,26 +85,72 @@ def recover_local_done_jobs() -> dict[str, int]:
             continue
 
         try:
-            store.update_analysis_job(
-                job_id,
-                status="interrupted",
-                message="local_done artifacts/source missing after restart; re-submit required.",
-                error="local_done_missing_artifacts",
-            )
-            try:
-                update_job(
+            # Count as a running-at-restart hit (local_done was in-flight work).
+            prior = int((row.get("restart_interruptions") or 0))
+            matter_id = row.get("matter_id") or ""
+            sha = (row.get("sha256") or "").lower()
+            hist = 0
+            if matter_id and sha:
+                hist = store.max_restart_interruptions_for_sha(
+                    firm_id=row["firm_id"], matter_id=matter_id, sha256=sha
+                )
+            new_count = max(prior, hist) + 1
+            store.set_restart_interruptions(job_id, new_count)
+            if new_count >= 2:
+                msg = (
+                    "Needs review — may be crashing the server "
+                    f"(running at {new_count} instance restarts)."
+                )
+                store.update_analysis_job(
+                    job_id,
+                    status="failed",
+                    message=msg,
+                    error="restart_quarantine",
+                )
+                logger.error(
+                    "quarantine sha=%s after %s restart interruptions (local_done) job=%s",
+                    sha[:12],
+                    new_count,
+                    job_id[:8],
+                )
+                try:
+                    update_job(
+                        job_id,
+                        status="failed",
+                        stage="failed",
+                        percent=100,
+                        message=msg,
+                        error="restart_quarantine",
+                    )
+                except Exception:
+                    pass
+            else:
+                store.update_analysis_job(
                     job_id,
                     status="interrupted",
-                    stage="interrupted",
-                    percent=0,
-                    message="Restarted with missing artifacts; re-submit required.",
+                    message="local_done artifacts/source missing after restart; re-submit required.",
                     error="local_done_missing_artifacts",
                 )
-            except Exception:
-                pass
+                logger.warning(
+                    "restart while local_done job=%s matter=%s sha=%s restart_interruptions=%s",
+                    job_id[:8],
+                    matter_id[:8],
+                    sha[:12],
+                    new_count,
+                )
+                try:
+                    update_job(
+                        job_id,
+                        status="interrupted",
+                        stage="interrupted",
+                        percent=0,
+                        message="Restarted with missing artifacts; re-submit required.",
+                        error="local_done_missing_artifacts",
+                    )
+                except Exception:
+                    pass
             delete_ephemeral_source(job_id)
             failed += 1
-            logger.warning("boot local_done stuck→interrupted job=%s", job_id[:8])
         except Exception:
             logger.exception("boot interrupt failed job=%s", job_id[:8])
             failed += 1

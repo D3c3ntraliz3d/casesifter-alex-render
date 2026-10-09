@@ -101,9 +101,10 @@ services:
     envVars:
       - key: CONTROL_DATA_DIR
         value: /var/data
-      # Generated once by Render; survives deploys so signed sessions stay valid.
+      # Fixed signing secret (Dashboard / MCP). Do NOT use generateValue — it rotates
+      # on blueprint sync and logs everyone out. Also pinned to disk at /var/data.
       - key: SESSION_SECRET
-        generateValue: true
+        sync: false
       - key: SESSION_TTL_DAYS
         value: "30"
       # John sets these in Render Dashboard (or Blueprint sync:false secrets).

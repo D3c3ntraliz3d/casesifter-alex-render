@@ -230,6 +230,8 @@ class AnalysisJob(Base):
     sha256: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    # Times this matter+sha was status=running when the instance restarted (OOM/health).
+    restart_interruptions: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     message: Mapped[str | None] = mapped_column(Text, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
@@ -300,6 +302,7 @@ def init_db(url: str | None = None) -> None:
     engine = get_engine(url)
     Base.metadata.create_all(engine)
     ensure_source_columns(engine)
+    ensure_analysis_job_columns(engine)
     clear_source_enc_once(engine)
 
 
@@ -367,6 +370,25 @@ def ensure_source_columns(engine) -> None:
     with engine.begin() as conn:
         for sql in stmts:
             conn.execute(text(sql))
+
+
+def ensure_analysis_job_columns(engine) -> None:
+    """Add restart_interruptions to existing analysis_jobs tables."""
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+    if "analysis_jobs" not in insp.get_table_names():
+        return
+    have = {col["name"] for col in insp.get_columns("analysis_jobs")}
+    if "restart_interruptions" in have:
+        return
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "ALTER TABLE analysis_jobs ADD COLUMN restart_interruptions "
+                "INTEGER NOT NULL DEFAULT 0"
+            )
+        )
 
 
 def reset_engine() -> None:

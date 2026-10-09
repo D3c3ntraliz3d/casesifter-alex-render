@@ -209,19 +209,71 @@ def start_recompute_job(
         "progress_path": str(progress_path),
     }
 
+    def _scans_ahead() -> int:
+        try:
+            from app.fact_memory.store import get_store
+
+            rows = get_store().list_analysis_jobs_by_status(
+                ["queued", "running", "local_done"]
+            )
+            return len(rows)
+        except Exception:
+            return 0
+
     def _coordinator() -> None:
+        from app.resource import rss_mb
         from app.scan_executor import (
             bind_local_process,
-            claim_local_slot,
             release_local_slot,
-            wait_memory_budget,
+            try_claim_local_slot,
+            _memory_guard_mb,
         )
+        from app.gemini_inflight import stats as inflight_stats
 
-        _patch(job_id, status="queued", message="Waiting for memory / scan slot")
+        _patch(
+            job_id,
+            status="queued",
+            message="Refresh facts queued behind scans",
+            scans_ahead=_scans_ahead(),
+        )
         try:
-            # Do not overlap Gemini-heavy web RSS or an active local scan.
-            wait_memory_budget(job_id, reserve_gemini_ahead=False)
-            claim_local_slot(job_id, kind="recompute")
+            # Wait for memory + exclusive local slot without blocking the parent on GIL work.
+            while True:
+                ahead = _scans_ahead()
+                web = rss_mb()
+                st = inflight_stats()
+                inflight_mb = float(st.get("inflight_mb") or 0)
+                max_mb = float(st.get("max_mb") or 60)
+                guard = _memory_guard_mb()
+                over_mem = (web is not None and web >= guard) or inflight_mb > max_mb
+                if over_mem:
+                    _patch(
+                        job_id,
+                        status="queued",
+                        scans_ahead=ahead,
+                        message=(
+                            f"Refresh facts queued behind {ahead} scan"
+                            f"{'' if ahead == 1 else 's'} (waiting for memory)"
+                            if ahead
+                            else "Refresh facts waiting for memory"
+                        ),
+                    )
+                    time.sleep(1.0)
+                    continue
+                if try_claim_local_slot(job_id, kind="recompute"):
+                    break
+                _patch(
+                    job_id,
+                    status="queued",
+                    scans_ahead=ahead,
+                    message=(
+                        f"Refresh facts queued behind {ahead} scan"
+                        f"{'' if ahead == 1 else 's'}"
+                        if ahead
+                        else "Refresh facts queued behind scan slot"
+                    ),
+                )
+                time.sleep(0.5)
         except Exception:
             logger.exception("recompute slot wait failed job=%s", job_id[:8])
             _patch(
@@ -272,42 +324,23 @@ def start_recompute_job(
                         _JOBS[job_id]["updated_at"] = _utcnow()
                 proc.join(timeout=0.5)
             proc.join(timeout=5)
+            # Give the child a moment to flush the final progress file.
+            for _ in range(20):
+                final = get_recompute_job(job_id) or {}
+                if str(final.get("status") or "") in {"complete", "failed"}:
+                    break
+                time.sleep(0.05)
             final = get_recompute_job(job_id) or {}
             status = str(final.get("status") or "")
             if status not in {"complete", "failed"}:
-                if proc.exitcode not in (0, None):
-                    _patch(
-                        job_id,
-                        status="failed",
-                        percent=100,
-                        message=f"Recompute process exited ({proc.exitcode})",
-                        error="process_exit",
-                        finished_at=_utcnow(),
-                    )
-                else:
-                    # Child wrote complete/failed to disk; sync into memory.
-                    with _LOCK:
-                        if job_id in _JOBS:
-                            _JOBS[job_id].update(
-                                {
-                                    k: final[k]
-                                    for k in final
-                                    if k in _JOBS[job_id] or k
-                                    in {
-                                        "before",
-                                        "after",
-                                        "status",
-                                        "percent",
-                                        "message",
-                                        "error",
-                                        "updated",
-                                        "total",
-                                        "skipped_no_excerpt",
-                                        "finished_at",
-                                    }
-                                }
-                            )
-                            _JOBS[job_id]["updated_at"] = _utcnow()
+                _patch(
+                    job_id,
+                    status="failed",
+                    percent=100,
+                    message=f"Recompute process exited ({proc.exitcode}) without result",
+                    error="process_exit",
+                    finished_at=_utcnow(),
+                )
             else:
                 with _LOCK:
                     if job_id in _JOBS:

@@ -412,6 +412,20 @@ async def create_ephemeral_job(
                 sha256=digest,
             )
             prior_error = str((latest or {}).get("error") or "")
+            restart_hits = store.max_restart_interruptions_for_sha(
+                firm_id=firm_ctx["firm_id"],
+                matter_id=resolved_matter,
+                sha256=digest,
+            )
+            if restart_hits >= 2 or prior_error == "restart_quarantine":
+                delete_job_files(job_id)
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Needs review — may be crashing the server "
+                        f"(running at {max(restart_hits, 2)} instance restarts)."
+                    ),
+                )
             restart_resume = prior_error in {
                 "interrupted_by_restart",
                 "local_done_missing_artifacts",

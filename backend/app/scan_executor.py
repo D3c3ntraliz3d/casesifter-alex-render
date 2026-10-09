@@ -31,21 +31,30 @@ def local_slot_busy() -> bool:
         return _ACTIVE_PROC is not None and _ACTIVE_PROC.is_alive()
 
 
+def try_claim_local_slot(owner_id: str, *, kind: str = "scan") -> bool:
+    """Non-blocking claim of the exclusive local slot. True if claimed."""
+    global _ACTIVE_PROC, _ACTIVE_JOB, _ACTIVE_KIND
+    with _LOCK:
+        proc_busy = _ACTIVE_PROC is not None and _ACTIVE_PROC.is_alive()
+        claimed = _ACTIVE_JOB is not None and _ACTIVE_JOB != owner_id
+        if proc_busy or claimed:
+            return False
+        _ACTIVE_JOB = owner_id
+        _ACTIVE_KIND = kind
+        if _ACTIVE_PROC is not None and not _ACTIVE_PROC.is_alive():
+            _ACTIVE_PROC = None
+        return True
+
+
 def claim_local_slot(owner_id: str, *, kind: str = "scan") -> None:
     """Wait until the exclusive local slot is free, then claim it (no Process yet)."""
-    global _ACTIVE_PROC, _ACTIVE_JOB, _ACTIVE_KIND
-    while True:
-        with _LOCK:
-            proc_busy = _ACTIVE_PROC is not None and _ACTIVE_PROC.is_alive()
-            claimed = _ACTIVE_JOB is not None and _ACTIVE_JOB != owner_id
-            if not proc_busy and not claimed:
-                _ACTIVE_JOB = owner_id
-                _ACTIVE_KIND = kind
-                # Keep any stale dead process reference cleared.
-                if _ACTIVE_PROC is not None and not _ACTIVE_PROC.is_alive():
-                    _ACTIVE_PROC = None
-                return
+    while not try_claim_local_slot(owner_id, kind=kind):
         time.sleep(0.2)
+
+
+def active_local_kind() -> str | None:
+    with _LOCK:
+        return _ACTIVE_KIND
 
 
 def bind_local_process(owner_id: str, proc: mp.Process) -> None:

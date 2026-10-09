@@ -34,9 +34,35 @@ INVITE_CODES = {
     for part in os.environ.get("CASESIFTER_INVITE_CODES", "").split(",")
     if part.strip()
 }
-# Fixed signing secret so control deploys do not invalidate browser sessions.
-SESSION_SECRET = (os.environ.get("SESSION_SECRET") or "").strip()
 SESSION_TTL_S = int(float(os.environ.get("SESSION_TTL_DAYS", "30") or 30) * 86400)
+_SESSION_SECRET_PATH = DATA / "session_secret"
+
+
+def _resolve_session_secret() -> str:
+    """Stable HMAC secret: disk pin wins over env so blueprint generateValue cannot rotate it."""
+    env = (os.environ.get("SESSION_SECRET") or "").strip()
+    disk = ""
+    if _SESSION_SECRET_PATH.is_file():
+        try:
+            disk = _SESSION_SECRET_PATH.read_text(encoding="utf-8").strip()
+        except OSError:
+            disk = ""
+    if disk:
+        return disk
+    secret = env or secrets.token_urlsafe(48)
+    try:
+        _SESSION_SECRET_PATH.write_text(secret, encoding="utf-8")
+        try:
+            os.chmod(_SESSION_SECRET_PATH, 0o600)
+        except OSError:
+            pass
+    except OSError:
+        pass
+    return secret
+
+
+# Fixed signing secret so control deploys do not invalidate browser sessions.
+SESSION_SECRET = _resolve_session_secret()
 
 # Free consumer mail — trial limit is per email address, not per domain.
 FREE_EMAIL_DOMAINS = {

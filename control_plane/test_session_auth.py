@@ -89,6 +89,7 @@ def test_signed_session_survives_sessions_wipe(tmp_path, monkeypatch):
     store = tmp_path / "accounts.json"
     monkeypatch.setattr(mod, "STORE", store)
     monkeypatch.setattr(mod, "DATA", tmp_path)
+    monkeypatch.setattr(mod, "_SESSION_SECRET_PATH", tmp_path / "session_secret")
     monkeypatch.setattr(mod, "SESSION_SECRET", "unit-test-session-secret")
     monkeypatch.setattr(mod, "STRIPE_SECRET", "")
     monkeypatch.setattr(mod, "STRIPE_PRICE_ID", "")
@@ -122,6 +123,18 @@ def test_signed_session_survives_sessions_wipe(tmp_path, monkeypatch):
     )
     assert res.status_code == 200, res.text
     assert res.json().get("email") == "signed@example.com"
+
+
+def test_disk_pinned_secret_survives_env_rotation(tmp_path, monkeypatch):
+    """Disk session_secret wins when env SESSION_SECRET is rotated (blueprint churn)."""
+    monkeypatch.setattr(mod, "DATA", tmp_path)
+    monkeypatch.setattr(mod, "STORE", tmp_path / "accounts.json")
+    secret_path = tmp_path / "session_secret"
+    monkeypatch.setattr(mod, "_SESSION_SECRET_PATH", secret_path)
+    secret_path.write_text("pinned-disk-secret-value", encoding="utf-8")
+    monkeypatch.setenv("SESSION_SECRET", "rotated-env-secret-should-be-ignored")
+    resolved = mod._resolve_session_secret()
+    assert resolved == "pinned-disk-secret-value"
 
 
 def test_checkout_disables_managed_payments(tmp_path, monkeypatch):

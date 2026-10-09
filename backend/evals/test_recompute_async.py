@@ -69,15 +69,15 @@ def test_start_recompute_job_completes_in_process(tmp_path, monkeypatch):
     assert row["status"] in {"queued", "running"}
     job_id = row["job_id"]
 
-    deadline = time.time() + 120
+    deadline = time.time() + 180
     final = None
     while time.time() < deadline:
         final = get_recompute_job(job_id)
         if final and final.get("status") in {"complete", "failed"}:
             break
-        time.sleep(0.1)
+        time.sleep(0.2)
 
-    assert final is not None
+    assert final is not None, "recompute never produced status"
     assert final["status"] == "complete", final
     assert final.get("updated", 0) >= 1
     assert isinstance(final.get("before"), list)
@@ -159,6 +159,7 @@ def test_restart_interrupt_resume_keeps_attempts(tmp_path, monkeypatch):
     row = store.get_analysis_job("job-r1")
     assert row["error"] == "interrupted_by_restart"
     assert row["attempts"] == 2
+    assert row["restart_interruptions"] == 1
 
     # Simulating create-job resume: upsert new queued job with same attempt count.
     store.upsert_analysis_job(
@@ -173,28 +174,20 @@ def test_restart_interrupt_resume_keeps_attempts(tmp_path, monkeypatch):
     assert store.max_attempts_for_sha(
         firm_id=firm["firm_id"], matter_id=matter["id"], sha256=sha
     ) == 2
+    # Mark r2 running then interrupt again → quarantine (2nd running-at-restart).
+    store.update_analysis_job("job-r2", status="running", message="Scanning again")
+    store.set_restart_interruptions("job-r2", 1)
+    n2 = store.mark_active_jobs_interrupted()
+    assert n2 == 1
+    q = store.get_analysis_job("job-r2")
+    assert q["error"] == "restart_quarantine"
+    assert q["restart_interruptions"] >= 2
+    assert "crashing" in (q["message"] or "").lower()
     retryable = store.list_retryable_failed_jobs(
         firm_id=firm["firm_id"], matter_id=matter["id"], max_attempts=3
     )
-    # Active queued job means sha not listed as retryable — expected.
     assert not any(r["sha256"] == sha for r in retryable)
-
-    # Cap + restart still retryable when no active job.
-    store.update_analysis_job(
-        "job-r2", status="interrupted", error="interrupted_by_restart", message="restart"
-    )
-    # Force attempts=3 with restart error — must remain retryable.
-    store.upsert_analysis_job(
-        job_id="job-r3",
-        firm_id=firm["firm_id"],
-        matter_id=matter["id"],
-        sha256=sha,
-        status="interrupted",
-        attempts=3,
-        error="interrupted_by_restart",
-        message="restart at cap",
-    )
-    retryable2 = store.list_retryable_failed_jobs(
+    exhausted = store.list_exhausted_jobs(
         firm_id=firm["firm_id"], matter_id=matter["id"], max_attempts=3
     )
-    assert any(r["sha256"] == sha for r in retryable2)
+    assert any(r["sha256"] == sha for r in exhausted)

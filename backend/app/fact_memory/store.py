@@ -1333,7 +1333,11 @@ class FactMemoryStore:
                 sha = (row.sha256 or "").lower()
                 if not sha or sha in seen_sha:
                     continue
-                if int(row.attempts or 0) < max_attempts:
+                quarantined = (
+                    str(row.error or "") == "restart_quarantine"
+                    or int(getattr(row, "restart_interruptions", 0) or 0) >= 2
+                )
+                if int(row.attempts or 0) < max_attempts and not quarantined:
                     continue
                 seen_sha.add(sha)
                 out.append(self._analysis_job_dict(row))
@@ -1364,12 +1368,17 @@ class FactMemoryStore:
                 .all()
             )
             max_by_sha: dict[str, int] = {}
+            max_restarts_by_sha: dict[str, int] = {}
             active_shas: set[str] = set()
             for row in all_rows:
                 sha = (row.sha256 or "").lower()
                 if not sha:
                     continue
                 max_by_sha[sha] = max(max_by_sha.get(sha, 0), int(row.attempts or 0))
+                max_restarts_by_sha[sha] = max(
+                    max_restarts_by_sha.get(sha, 0),
+                    int(getattr(row, "restart_interruptions", 0) or 0),
+                )
                 if row.status in active_statuses:
                     active_shas.add(sha)
             out: list[dict[str, Any]] = []
@@ -1381,6 +1390,15 @@ class FactMemoryStore:
                 if not sha or sha in seen_sha or sha in active_shas:
                     continue
                 attempts = max_by_sha.get(sha, int(row.attempts or 0))
+                restart_count = max_restarts_by_sha.get(
+                    sha, int(getattr(row, "restart_interruptions", 0) or 0)
+                )
+                # Crash-loop guard: same file running at 2+ restarts → no auto-retry.
+                if (
+                    restart_count >= 2
+                    or str(row.error or "") == "restart_quarantine"
+                ):
+                    continue
                 restart_err = str(row.error or "") in {
                     "interrupted_by_restart",
                     "local_done_missing_artifacts",
@@ -1418,6 +1436,31 @@ class FactMemoryStore:
                 return None
             return self._analysis_job_dict(row)
 
+    def max_restart_interruptions_for_sha(
+        self,
+        *,
+        firm_id: str,
+        matter_id: str,
+        sha256: str,
+    ) -> int:
+        digest = (sha256 or "").lower().strip()
+        if not digest or not matter_id:
+            return 0
+        with self.session() as s:
+            rows = (
+                s.execute(
+                    select(AnalysisJob)
+                    .where(AnalysisJob.firm_id == firm_id)
+                    .where(AnalysisJob.matter_id == matter_id)
+                    .where(AnalysisJob.sha256 == digest)
+                )
+                .scalars()
+                .all()
+            )
+            if not rows:
+                return 0
+            return max(int(getattr(r, "restart_interruptions", 0) or 0) for r in rows)
+
     def mark_active_jobs_interrupted(
         self,
         *,
@@ -1426,6 +1469,8 @@ class FactMemoryStore:
         """Mark queued/running durable jobs interrupted after a process boot.
 
         Leaves local_done alone — boot recovery resumes or requeues those.
+        Jobs that were *running* bump restart_interruptions per matter+sha; at 2
+        they are quarantined (no auto-retry — likely crashing the instance).
         """
         now = _utcnow()
         with self.session() as s:
@@ -1436,10 +1481,75 @@ class FactMemoryStore:
                 .scalars()
                 .all()
             )
+            # Max restart count per matter+sha before this interrupt wave.
+            max_by_key: dict[tuple[str, str, str], int] = {}
             for row in rows:
-                row.status = "interrupted"
-                row.message = message
-                row.error = "interrupted_by_restart"
+                sha = (row.sha256 or "").lower()
+                key = (row.firm_id, row.matter_id or "", sha)
+                cur = int(getattr(row, "restart_interruptions", 0) or 0)
+                max_by_key[key] = max(max_by_key.get(key, 0), cur)
+            # Also consider historical jobs for the same sha (not only active).
+            for row in rows:
+                sha = (row.sha256 or "").lower()
+                if not sha or not row.matter_id:
+                    continue
+                hist = (
+                    s.execute(
+                        select(AnalysisJob)
+                        .where(AnalysisJob.firm_id == row.firm_id)
+                        .where(AnalysisJob.matter_id == row.matter_id)
+                        .where(AnalysisJob.sha256 == sha)
+                    )
+                    .scalars()
+                    .all()
+                )
+                key = (row.firm_id, row.matter_id, sha)
+                for h in hist:
+                    max_by_key[key] = max(
+                        max_by_key.get(key, 0),
+                        int(getattr(h, "restart_interruptions", 0) or 0),
+                    )
+
+            for row in rows:
+                was_running = row.status == "running"
+                sha = (row.sha256 or "").lower()
+                key = (row.firm_id, row.matter_id or "", sha)
+                if was_running:
+                    logger.warning(
+                        "restart while running job=%s matter=%s sha=%s attempts=%s "
+                        "prior_restart_interruptions=%s",
+                        (row.job_id or "")[:8],
+                        (row.matter_id or "")[:8],
+                        sha[:12],
+                        row.attempts,
+                        max_by_key.get(key, 0),
+                    )
+                    new_count = max_by_key.get(key, 0) + 1
+                    max_by_key[key] = new_count
+                    row.restart_interruptions = new_count
+                    if new_count >= 2:
+                        row.status = "failed"
+                        row.error = "restart_quarantine"
+                        row.message = (
+                            "Needs review — may be crashing the server "
+                            f"(running at {new_count} instance restarts)."
+                        )
+                        logger.error(
+                            "quarantine sha=%s matter=%s after %s restart interruptions "
+                            "job=%s",
+                            sha[:12],
+                            (row.matter_id or "")[:8],
+                            new_count,
+                            (row.job_id or "")[:8],
+                        )
+                    else:
+                        row.status = "interrupted"
+                        row.error = "interrupted_by_restart"
+                        row.message = message
+                else:
+                    row.status = "interrupted"
+                    row.error = "interrupted_by_restart"
+                    row.message = message
                 row.updated_at = now
             s.commit()
             return len(rows)
@@ -1458,6 +1568,16 @@ class FactMemoryStore:
                 .all()
             )
             return [self._analysis_job_dict(row) for row in rows]
+
+    def set_restart_interruptions(self, job_id: str, count: int) -> dict[str, Any] | None:
+        with self.session() as s:
+            row = s.get(AnalysisJob, job_id)
+            if row is None:
+                return None
+            row.restart_interruptions = max(0, int(count))
+            row.updated_at = _utcnow()
+            s.commit()
+            return self._analysis_job_dict(row)
 
     def bump_analysis_job_attempts(self, job_id: str, *, status: str, message: str | None = None) -> dict[str, Any] | None:
         with self.session() as s:
@@ -1482,6 +1602,7 @@ class FactMemoryStore:
             "sha256": row.sha256 or "",
             "status": row.status,
             "attempts": int(row.attempts or 0),
+            "restart_interruptions": int(getattr(row, "restart_interruptions", 0) or 0),
             "message": row.message,
             "error": row.error,
             "created_at": row.created_at.isoformat() if row.created_at else None,
