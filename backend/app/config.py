@@ -96,6 +96,9 @@ class Settings(BaseSettings):
     scan_job_timeout_per_page_s: int = 10
     # Pause new local starts when web RSS (MB) is at/above this (512 MB instances).
     scan_memory_guard_mb: int = 420
+    # Recompute child process: batch size + RSS cap (leave headroom for web/Gemini).
+    recompute_batch_size: int = 4
+    recompute_memory_guard_mb: int = 350
     # Concurrent local PDF/OCR processes. Keep at 1 on small Render plans.
     scan_max_concurrent: int = 1
     # Gemini stage (web process threads). Independent of local process slots.

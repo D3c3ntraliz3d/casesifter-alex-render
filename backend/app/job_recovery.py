@@ -54,10 +54,12 @@ def recover_local_done_jobs() -> dict[str, int]:
         # path recorded; otherwise mark interrupted so the client can re-submit.
         if payload and dest and Path(dest).is_file():
             try:
-                store.bump_analysis_job_attempts(
+                # Restart recovery must not burn an attempt.
+                store.update_analysis_job(
                     job_id,
                     status="queued",
                     message="Requeued from local after missing stage artifacts.",
+                    error=None,
                 )
                 update_job(
                     job_id,
@@ -76,7 +78,7 @@ def recover_local_done_jobs() -> dict[str, int]:
                             pass
                 submit_ephemeral_job(payload)
                 requeued += 1
-                logger.info("boot requeue local job=%s attempts bumped", job_id[:8])
+                logger.info("boot requeue local job=%s (no attempt bump)", job_id[:8])
             except Exception:
                 logger.exception("boot local requeue failed job=%s", job_id[:8])
                 failed += 1

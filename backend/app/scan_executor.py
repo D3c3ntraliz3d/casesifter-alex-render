@@ -19,7 +19,92 @@ logger = logging.getLogger("uvicorn.error")
 _LOCK = threading.Lock()
 _ACTIVE_PROC: mp.Process | None = None
 _ACTIVE_JOB: str | None = None
+_ACTIVE_KIND: str | None = None  # "scan" | "recompute"
 _RESULT_QUEUE: Any = None
+
+
+def local_slot_busy() -> bool:
+    """True when a scan or recompute holds the exclusive local slot."""
+    with _LOCK:
+        if _ACTIVE_JOB is not None:
+            return True
+        return _ACTIVE_PROC is not None and _ACTIVE_PROC.is_alive()
+
+
+def claim_local_slot(owner_id: str, *, kind: str = "scan") -> None:
+    """Wait until the exclusive local slot is free, then claim it (no Process yet)."""
+    global _ACTIVE_PROC, _ACTIVE_JOB, _ACTIVE_KIND
+    while True:
+        with _LOCK:
+            proc_busy = _ACTIVE_PROC is not None and _ACTIVE_PROC.is_alive()
+            claimed = _ACTIVE_JOB is not None and _ACTIVE_JOB != owner_id
+            if not proc_busy and not claimed:
+                _ACTIVE_JOB = owner_id
+                _ACTIVE_KIND = kind
+                # Keep any stale dead process reference cleared.
+                if _ACTIVE_PROC is not None and not _ACTIVE_PROC.is_alive():
+                    _ACTIVE_PROC = None
+                return
+        time.sleep(0.2)
+
+
+def bind_local_process(owner_id: str, proc: mp.Process) -> None:
+    global _ACTIVE_PROC
+    with _LOCK:
+        if _ACTIVE_JOB == owner_id:
+            _ACTIVE_PROC = proc
+
+
+def release_local_slot(owner_id: str) -> None:
+    global _ACTIVE_PROC, _ACTIVE_JOB, _ACTIVE_KIND
+    with _LOCK:
+        if _ACTIVE_JOB == owner_id:
+            _ACTIVE_PROC = None
+            _ACTIVE_JOB = None
+            _ACTIVE_KIND = None
+
+
+def wait_memory_budget(job_id: str, *, reserve_gemini_ahead: bool = True) -> None:
+    """Wait forever for memory budget (+ optional Gemini ahead). Never fail the job."""
+    from app.gemini_executor import ahead_count, reserve_ahead
+    from app.gemini_inflight import stats as inflight_stats
+    from app.resource import rss_mb
+
+    guard = _memory_guard_mb()
+    while True:
+        web = rss_mb()
+        st = inflight_stats()
+        inflight_mb = float(st.get("inflight_mb") or 0)
+        max_mb = float(st.get("max_mb") or 60)
+        over_inflight = inflight_mb > max_mb
+        over_rss = web is not None and web >= guard
+        if not over_inflight and not over_rss:
+            break
+        logger.warning(
+            "memory guard pause local start job=%s web_rss_mb=%s guard_mb=%s "
+            "inflight_mb=%s/%s (waiting — not failing)",
+            job_id[:8],
+            web,
+            guard,
+            inflight_mb,
+            max_mb,
+        )
+        time.sleep(2.0)
+
+    if not reserve_gemini_ahead:
+        return
+
+    while not reserve_ahead(job_id, timeout=30.0):
+        web = rss_mb()
+        st = inflight_stats()
+        logger.warning(
+            "local backpressure wait job=%s ahead=%s inflight_mb=%s web_rss_mb=%s "
+            "(waiting — not failing)",
+            job_id[:8],
+            ahead_count(),
+            st.get("inflight_mb"),
+            web,
+        )
 
 
 def _pdf_page_count(dest: str | Path | None) -> int:
@@ -56,51 +141,15 @@ def _memory_guard_mb() -> float:
 
 def _wait_for_local_start(job_id: str) -> None:
     """Wait forever for memory budget + Gemini ahead slots. Never fail the job."""
-    from app.gemini_executor import ahead_count, reserve_ahead
     from app.gemini_inflight import stats as inflight_stats
     from app.resource import rss_mb
 
-    guard = _memory_guard_mb()
-    while True:
-        web = rss_mb()
-        st = inflight_stats()
-        inflight_mb = float(st.get("inflight_mb") or 0)
-        max_mb = float(st.get("max_mb") or 60)
-        # Do not start local while Gemini holds more than the in-flight byte cap.
-        over_inflight = inflight_mb > max_mb
-        over_rss = web is not None and web >= guard
-        if not over_inflight and not over_rss:
-            break
-        logger.warning(
-            "memory guard pause local start job=%s web_rss_mb=%s guard_mb=%s "
-            "inflight_mb=%s/%s (waiting — not failing)",
-            job_id[:8],
-            web,
-            guard,
-            inflight_mb,
-            max_mb,
-        )
-        time.sleep(2.0)
-
-    # Reserve a Gemini ahead slot without a fail timeout (backpressure = wait).
-    while not reserve_ahead(job_id, timeout=30.0):
-        web = rss_mb()
-        st = inflight_stats()
-        logger.warning(
-            "local backpressure wait job=%s ahead=%s inflight_mb=%s web_rss_mb=%s "
-            "(waiting — not failing)",
-            job_id[:8],
-            ahead_count(),
-            st.get("inflight_mb"),
-            web,
-        )
-
+    wait_memory_budget(job_id, reserve_gemini_ahead=True)
     logger.info(
-        "local start cleared job=%s web_rss_mb=%s inflight_mb=%s ahead=%s",
+        "local start cleared job=%s web_rss_mb=%s inflight_mb=%s",
         job_id[:8],
         rss_mb(),
         inflight_stats().get("inflight_mb"),
-        ahead_count(),
     )
 
 
@@ -121,11 +170,12 @@ def ensure_scan_executor() -> None:
 
 
 def shutdown_scan_executor() -> None:
-    global _ACTIVE_PROC, _ACTIVE_JOB
+    global _ACTIVE_PROC, _ACTIVE_JOB, _ACTIVE_KIND
     with _LOCK:
         proc = _ACTIVE_PROC
         _ACTIVE_PROC = None
         _ACTIVE_JOB = None
+        _ACTIVE_KIND = None
     if proc is not None and proc.is_alive():
         try:
             proc.terminate()
@@ -283,115 +333,107 @@ def submit_ephemeral_job(payload: dict[str, Any]) -> Future:
             name=f"local-{job_id[:8]}",
             daemon=True,
         )
-        with _LOCK:
-            while _ACTIVE_PROC is not None and _ACTIVE_PROC.is_alive():
-                time.sleep(0.2)
-            _ACTIVE_PROC = proc
-            _ACTIVE_JOB = job_id
-        note_queue_progress()
-        proc.start()
-        proc.join(timeout=timeout)
+        # Exclusive local slot shared with recompute (512 MB: never overlap).
+        claim_local_slot(job_id, kind="scan")
         result = None
-        if proc.is_alive():
-            logger.error(
-                "local stage timeout job=%s after %.0fs pages=%s — terminating process pid=%s",
-                job_id[:8],
-                timeout,
-                pages,
-                proc.pid,
-            )
-            try:
-                proc.terminate()
-                proc.join(timeout=5)
-                if proc.is_alive():
-                    proc.kill()
-                    proc.join(timeout=2)
-            except Exception:
-                logger.exception("terminate failed job=%s", job_id[:8])
-            try:
-                while not result_q.empty():
-                    result_q.get_nowait()
-            except Exception:
-                pass
-            clear_ahead(job_id)
-            _mark_local_timeout(job_id, "local", timeout_s=timeout)
-            _maybe_retry_local(payload, job_id)
-            with _LOCK:
-                if _ACTIVE_JOB == job_id:
-                    _ACTIVE_PROC = None
-                    _ACTIVE_JOB = None
-            if not out.done():
-                out.set_result({"job_id": job_id, "status": "failed", "timed_out": True})
-            return
-
-        with _LOCK:
-            if _ACTIVE_JOB == job_id:
-                _ACTIVE_PROC = None
-                _ACTIVE_JOB = None
-
         try:
-            kind, payload_or_err = result_q.get(timeout=5)
-            if kind == "ok":
-                result = payload_or_err
-            else:
-                raise RuntimeError(str(payload_or_err))
-        except Exception as exc:
-            clear_ahead(job_id)
-            logger.exception("scan child crashed job=%s", job_id[:8] if job_id else "?")
+            bind_local_process(job_id, proc)
+            note_queue_progress()
+            proc.start()
+            proc.join(timeout=timeout)
+            if proc.is_alive():
+                logger.error(
+                    "local stage timeout job=%s after %.0fs pages=%s — terminating process pid=%s",
+                    job_id[:8],
+                    timeout,
+                    pages,
+                    proc.pid,
+                )
+                try:
+                    proc.terminate()
+                    proc.join(timeout=5)
+                    if proc.is_alive():
+                        proc.kill()
+                        proc.join(timeout=2)
+                except Exception:
+                    logger.exception("terminate failed job=%s", job_id[:8])
+                try:
+                    while not result_q.empty():
+                        result_q.get_nowait()
+                except Exception:
+                    pass
+                clear_ahead(job_id)
+                _mark_local_timeout(job_id, "local", timeout_s=timeout)
+                _maybe_retry_local(payload, job_id)
+                if not out.done():
+                    out.set_result({"job_id": job_id, "status": "failed", "timed_out": True})
+                return
+
             try:
-                from app.ephemeral import delete_ephemeral_source
-                from app.storage import update_job
-                from app.v1_analysis import _update_durable_job
+                kind, payload_or_err = result_q.get(timeout=5)
+                if kind == "ok":
+                    result = payload_or_err
+                else:
+                    raise RuntimeError(str(payload_or_err))
+            except Exception as exc:
+                clear_ahead(job_id)
+                logger.exception("scan child crashed job=%s", job_id[:8] if job_id else "?")
+                try:
+                    from app.ephemeral import delete_ephemeral_source
+                    from app.storage import update_job
+                    from app.v1_analysis import _update_durable_job
 
-                update_job(
-                    job_id,
-                    status="failed",
-                    stage="failed",
-                    percent=100,
-                    message="Analysis worker crashed.",
-                    error=str(exc),
-                )
-                _update_durable_job(
-                    job_id,
-                    status="failed",
-                    message="Analysis worker crashed.",
-                    error=str(exc),
-                )
-                delete_ephemeral_source(job_id)
+                    update_job(
+                        job_id,
+                        status="failed",
+                        stage="failed",
+                        percent=100,
+                        message="Analysis worker crashed.",
+                        error=str(exc),
+                    )
+                    _update_durable_job(
+                        job_id,
+                        status="failed",
+                        message="Analysis worker crashed.",
+                        error=str(exc),
+                    )
+                    delete_ephemeral_source(job_id)
+                except Exception:
+                    logger.exception("could not mark crashed job %s failed", job_id[:8])
+                if not out.done():
+                    out.set_exception(exc)
+                return
+
+            status = (result or {}).get("status")
+            if status != "local_done":
+                clear_ahead(job_id)
+                if not out.done():
+                    out.set_result(result)
+                return
+
+            gemini_payload = dict(payload)
+            try:
+                from app.gemini_executor import gemini_payload_path
+                import json
+
+                path = gemini_payload_path(job_id)
+                if path.is_file():
+                    gemini_payload.update(json.loads(path.read_text(encoding="utf-8")))
             except Exception:
-                logger.exception("could not mark crashed job %s failed", job_id[:8])
-            if not out.done():
-                out.set_exception(exc)
-            return
-
-        status = (result or {}).get("status")
-        if status != "local_done":
-            clear_ahead(job_id)
+                logger.debug("gemini payload enrich failed job=%s", job_id[:8], exc_info=True)
+            if result.get("peak_rss_mb") is not None:
+                gemini_payload["peak_rss_mb"] = result["peak_rss_mb"]
+            logger.info(
+                "local done → gemini job=%s peak_rss_mb=%s web_rss_mb=%s",
+                job_id[:8],
+                result.get("peak_rss_mb"),
+                rss_mb(),
+            )
+            submit_gemini_stage(gemini_payload)
             if not out.done():
                 out.set_result(result)
-            return
-
-        gemini_payload = dict(payload)
-        try:
-            from app.gemini_executor import gemini_payload_path
-            import json
-
-            path = gemini_payload_path(job_id)
-            if path.is_file():
-                gemini_payload.update(json.loads(path.read_text(encoding="utf-8")))
-        except Exception:
-            logger.debug("gemini payload enrich failed job=%s", job_id[:8], exc_info=True)
-        if result.get("peak_rss_mb") is not None:
-            gemini_payload["peak_rss_mb"] = result["peak_rss_mb"]
-        logger.info(
-            "local done → gemini job=%s peak_rss_mb=%s web_rss_mb=%s",
-            job_id[:8],
-            result.get("peak_rss_mb"),
-            rss_mb(),
-        )
-        submit_gemini_stage(gemini_payload)
-        if not out.done():
-            out.set_result(result)
+        finally:
+            release_local_slot(job_id)
 
     threading.Thread(target=_run, daemon=True, name=f"local-wait-{job_id[:8]}").start()
     return out

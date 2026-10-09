@@ -406,19 +406,28 @@ async def create_ephemeral_job(
                 matter_id=resolved_matter,
                 sha256=digest,
             )
-            if prior_attempts >= 3:
-                latest = store.latest_job_for_sha(
-                    firm_id=firm_ctx["firm_id"],
-                    matter_id=resolved_matter,
-                    sha256=digest,
-                )
+            latest = store.latest_job_for_sha(
+                firm_id=firm_ctx["firm_id"],
+                matter_id=resolved_matter,
+                sha256=digest,
+            )
+            prior_error = str((latest or {}).get("error") or "")
+            restart_resume = prior_error in {
+                "interrupted_by_restart",
+                "local_done_missing_artifacts",
+            }
+            if prior_attempts >= 3 and not restart_resume:
                 delete_job_files(job_id)
                 detail = (
                     "Needs re-upload / failed 3 times. "
                     + str((latest or {}).get("error") or (latest or {}).get("message") or "")
                 ).strip()
                 raise HTTPException(status_code=409, detail=detail)
-            next_attempts = prior_attempts + 1 if prior_attempts > 0 else 1
+            # Restart interruptions do not consume an attempt on resume.
+            if restart_resume and prior_attempts > 0:
+                next_attempts = prior_attempts
+            else:
+                next_attempts = prior_attempts + 1 if prior_attempts > 0 else 1
         except HTTPException:
             raise
         except Exception:

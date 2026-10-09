@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 import uuid
 from datetime import date, datetime, timezone
 from typing import Any, Callable
@@ -476,15 +477,24 @@ class FactMemoryStore:
         *,
         user_id: str | None = None,
         progress: Callable[..., None] | None = None,
+        batch_size: int | None = None,
     ) -> dict[str, Any]:
         """Re-extract facts from stored text_excerpt (no PDFs) and refresh snapshots.
 
-        Case-impact cards are derived from snapshots at read time; rewriting facts
-        with current B-rules clears stale principal/rate/venue interrupts without
-        a full re-scan.
+        Processes documents in small committed batches so RSS stays bounded on
+        512 MB instances. Intended to run in a child Process (not the web worker).
         """
+        import gc
+
         from app.case_consistency import aggregate_fact_conflicts
+        from app.config import settings
         from app.fact_extract import extract_facts
+        from app.resource import rss_mb
+
+        batch = max(1, int(batch_size or getattr(settings, "recompute_batch_size", 4) or 4))
+        mem_guard = float(
+            max(200, int(getattr(settings, "recompute_memory_guard_mb", 350) or 350))
+        )
 
         before_snaps = self.list_prior_snapshots(firm_id, matter_id)
         before = [
@@ -497,34 +507,113 @@ class FactMemoryStore:
             for c in aggregate_fact_conflicts(before_snaps)
             if str(c.get("severity") or "") in {"high", "medium", "critical"}
         ]
+        # Drop large snap list before the per-doc loop.
+        before_snaps = []
+        gc.collect()
 
-        updated = 0
-        skipped = 0
         with self.session() as s:
             if not s.execute(
                 select(Matter).where(Matter.id == matter_id, Matter.firm_id == firm_id)
             ).scalar_one_or_none():
                 raise KeyError("matter not found")
-            fernet = self._fernet(s, firm_id)
-            store_snippets = True
             firm = s.get(Firm, firm_id)
-            if firm is not None:
-                store_snippets = bool(firm.store_snippets)
-            docs = s.execute(
-                select(Document).where(
-                    Document.firm_id == firm_id, Document.matter_id == matter_id
+            store_snippets = bool(firm.store_snippets) if firm is not None else True
+            doc_ids = list(
+                s.execute(
+                    select(Document.id).where(
+                        Document.firm_id == firm_id, Document.matter_id == matter_id
+                    )
                 )
-            ).scalars().all()
-            total = len(docs)
-            if progress is not None:
-                progress(
-                    done=0, total=total, updated=0, skipped=0, phase="docs"
+                .scalars()
+                .all()
+            )
+
+        total = len(doc_ids)
+        updated = 0
+        skipped = 0
+        if progress is not None:
+            progress(done=0, total=total, updated=0, skipped=0, phase="docs")
+
+        for batch_start in range(0, total, batch):
+            chunk_ids = doc_ids[batch_start : batch_start + batch]
+            with self.session() as s:
+                fernet = self._fernet(s, firm_id)
+                docs = (
+                    s.execute(select(Document).where(Document.id.in_(chunk_ids)))
+                    .scalars()
+                    .all()
                 )
-            for idx, doc in enumerate(docs, start=1):
-                snap = enc.decrypt_json(fernet, doc.snapshot_enc) or {}
-                text = str(snap.get("text_excerpt") or "").strip()
-                if not text:
-                    skipped += 1
+                by_id = {d.id: d for d in docs}
+                for offset, doc_id in enumerate(chunk_ids):
+                    idx = batch_start + offset + 1
+                    doc = by_id.get(doc_id)
+                    if doc is None:
+                        skipped += 1
+                        if progress is not None:
+                            progress(
+                                done=idx,
+                                total=total,
+                                updated=updated,
+                                skipped=skipped,
+                                phase="docs",
+                            )
+                        continue
+                    snap = enc.decrypt_json(fernet, doc.snapshot_enc) or {}
+                    text = str(snap.get("text_excerpt") or "").strip()
+                    if not text:
+                        skipped += 1
+                        if progress is not None:
+                            progress(
+                                done=idx,
+                                total=total,
+                                updated=updated,
+                                skipped=skipped,
+                                phase="docs",
+                            )
+                        continue
+                    facts = extract_facts(text)
+                    for fact in facts:
+                        if isinstance(fact, dict) and not fact.get("document_id"):
+                            fact["document_id"] = doc.id
+                    snap["facts"] = facts
+                    snap.setdefault("document_id", doc.id)
+                    doc.snapshot_enc = enc.encrypt_json(fernet, snap)
+                    for old in list(doc.facts):
+                        s.delete(old)
+                    s.flush()
+                    for fact in facts:
+                        if not isinstance(fact, dict):
+                            continue
+                        attr = str(fact.get("key") or fact.get("attribute") or "unknown")
+                        value = fact.get("display") or fact.get("value")
+                        value_norm = fact.get("value")
+                        snippet = None
+                        if store_snippets:
+                            raw_snip = fact.get("quote") or fact.get("snippet") or ""
+                            snippet = str(raw_snip)[:300] if raw_snip else None
+                        s.add(
+                            Fact(
+                                id=_new_id(),
+                                matter_id=matter_id,
+                                firm_id=firm_id,
+                                document_id=doc.id,
+                                entity_id=None,
+                                attribute=attr,
+                                value_enc=enc.encrypt_text(
+                                    fernet, None if value is None else str(value)
+                                ),
+                                value_normalized_enc=enc.encrypt_text(
+                                    fernet,
+                                    None if value_norm is None else str(value_norm),
+                                ),
+                                page=fact.get("page"),
+                                snippet_enc=enc.encrypt_text(fernet, snippet),
+                                confidence=float(fact.get("confidence") or 0) or None,
+                                created_at=_utcnow(),
+                                fact_blob_enc=enc.encrypt_json(fernet, fact),
+                            )
+                        )
+                    updated += 1
                     if progress is not None:
                         progress(
                             done=idx,
@@ -533,67 +622,34 @@ class FactMemoryStore:
                             skipped=skipped,
                             phase="docs",
                         )
-                    continue
-                facts = extract_facts(text)
-                for fact in facts:
-                    if isinstance(fact, dict) and not fact.get("document_id"):
-                        fact["document_id"] = doc.id
-                snap["facts"] = facts
-                snap.setdefault("document_id", doc.id)
-                doc.snapshot_enc = enc.encrypt_json(fernet, snap)
-                for old in list(doc.facts):
-                    s.delete(old)
-                s.flush()
-                for fact in facts:
-                    if not isinstance(fact, dict):
-                        continue
-                    attr = str(fact.get("key") or fact.get("attribute") or "unknown")
-                    value = fact.get("display") or fact.get("value")
-                    value_norm = fact.get("value")
-                    snippet = None
-                    if store_snippets:
-                        raw_snip = fact.get("quote") or fact.get("snippet") or ""
-                        snippet = str(raw_snip)[:300] if raw_snip else None
-                    s.add(
-                        Fact(
-                            id=_new_id(),
-                            matter_id=matter_id,
-                            firm_id=firm_id,
-                            document_id=doc.id,
-                            entity_id=None,
-                            attribute=attr,
-                            value_enc=enc.encrypt_text(
-                                fernet, None if value is None else str(value)
-                            ),
-                            value_normalized_enc=enc.encrypt_text(
-                                fernet, None if value_norm is None else str(value_norm)
-                            ),
-                            page=fact.get("page"),
-                            snippet_enc=enc.encrypt_text(fernet, snippet),
-                            confidence=float(fact.get("confidence") or 0) or None,
-                            created_at=_utcnow(),
-                            fact_blob_enc=enc.encrypt_json(fernet, fact),
-                        )
-                    )
-                updated += 1
-                if progress is not None:
-                    progress(
-                        done=idx,
-                        total=total,
-                        updated=updated,
-                        skipped=skipped,
-                        phase="docs",
-                    )
-            # FindingRow has no document_id column — stale open fact_conflict rows
-            # for the whole matter; the board rebuilds from aggregates.
-            if progress is not None:
-                progress(
-                    done=total,
-                    total=total,
-                    updated=updated,
-                    skipped=skipped,
-                    phase="aggregate",
+                s.commit()
+
+            gc.collect()
+            rss = rss_mb()
+            if rss is not None and rss >= mem_guard:
+                logger.warning(
+                    "recompute memory pause matter=%s rss_mb=%s guard=%s — gc wait",
+                    matter_id[:8],
+                    rss,
+                    mem_guard,
                 )
+                time.sleep(0.5)
+                gc.collect()
+                rss2 = rss_mb()
+                if rss2 is not None and rss2 >= mem_guard:
+                    # Soft wait — do not fail the job; let RSS settle.
+                    time.sleep(2.0)
+                    gc.collect()
+
+        if progress is not None:
+            progress(
+                done=total,
+                total=total,
+                updated=updated,
+                skipped=skipped,
+                phase="aggregate",
+            )
+        with self.session() as s:
             findings = s.execute(
                 select(FindingRow).where(
                     FindingRow.firm_id == firm_id,
@@ -1104,15 +1160,24 @@ class FactMemoryStore:
                     row.document_id = document_id or None
                 if sha256:
                     row.sha256 = sha256.lower()
-                row.status = status or row.status
+                prev_status = row.status
+                prev_error = str(row.error or "")
                 if attempts is not None:
                     row.attempts = int(attempts)
-                elif status == "queued" and row.status in {"interrupted", "failed"}:
-                    row.attempts = int(row.attempts or 0) + 1
+                elif status == "queued" and prev_status in {"interrupted", "failed"}:
+                    # Instance restarts must not burn an attempt when the job resumes.
+                    if prev_error not in {
+                        "interrupted_by_restart",
+                        "local_done_missing_artifacts",
+                    }:
+                        row.attempts = int(row.attempts or 0) + 1
                 if message is not None:
                     row.message = message
                 if error is not None:
                     row.error = error
+                elif status == "queued":
+                    row.error = None
+                row.status = status or row.status
                 row.updated_at = now
             s.commit()
             return self._analysis_job_dict(row)
@@ -1133,10 +1198,19 @@ class FactMemoryStore:
             row = s.get(AnalysisJob, job_id)
             if row is None:
                 return None
+            # Allow recovery from restart interrupt (resume / mark complete).
+            restart_resume = (
+                row.status == "interrupted"
+                and str(row.error or "")
+                in {"interrupted_by_restart", "local_done_missing_artifacts"}
+                and status
+                in {"queued", "running", "local_done", "complete"}
+            )
             if (
                 status is not None
                 and row.status in terminal
                 and status != row.status
+                and not restart_resume
             ):
                 # Sticky terminal — refuse overwrite (A3).
                 return self._analysis_job_dict(row)
@@ -1307,13 +1381,20 @@ class FactMemoryStore:
                 if not sha or sha in seen_sha or sha in active_shas:
                     continue
                 attempts = max_by_sha.get(sha, int(row.attempts or 0))
-                if attempts >= max_attempts:
+                restart_err = str(row.error or "") in {
+                    "interrupted_by_restart",
+                    "local_done_missing_artifacts",
+                }
+                # Restart interruptions remain retryable even at the attempt cap —
+                # resuming must not burn a slot (see create job next_attempts).
+                if attempts >= max_attempts and not restart_err:
                     continue
                 err = f"{row.error or ''} {row.message or ''}".lower()
                 if "backpressure" in err:
                     continue
                 eligible = (
-                    row.status == "interrupted"
+                    restart_err
+                    or row.status == "interrupted"
                     or "no progress for more than" in err
                     or "timed out" in err
                     or "stall" in err
