@@ -84,6 +84,34 @@ function keyOf(sha256) {
   return String(sha256 || "").toLowerCase();
 }
 
+const persistQueue = [];
+let persistBusy = false;
+
+function enqueuePersist(record) {
+  persistQueue.push(record);
+  void drainPersistQueue();
+}
+
+async function drainPersistQueue() {
+  if (persistBusy) return;
+  persistBusy = true;
+  try {
+    while (persistQueue.length) {
+      const record = persistQueue.shift();
+      try {
+        await idbPut(record);
+      } catch {
+        /* quota / private mode: memory cache still works for this tab */
+      }
+      // Let the upload loop paint and send the next multipart.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  } finally {
+    persistBusy = false;
+    if (persistQueue.length) void drainPersistQueue();
+  }
+}
+
 async function requestPersistentStorage() {
   if (persistAsked) return;
   persistAsked = true;
@@ -128,20 +156,18 @@ export const localCacheAdapter = {
   async saveFile(exhibitId, sha256, blob) {
     const key = keyOf(sha256);
     if (!key || !blob) return;
+    // Same-tab preview must work immediately. IndexedDB writes are large and
+    // must not block the upload queue (a 92-file batch was hanging here).
     memory.set(key, blob);
-    await requestPersistentStorage();
-    try {
-      await idbPut({
-        sha256: key,
-        exhibitId: exhibitId || null,
-        blob,
-        byteLength: blob.size || 0,
-        mimeType: blob.type || "",
-        cachedAt: Date.now(),
-      });
-    } catch {
-      /* private window or blocked storage: same-tab memory still works */
-    }
+    void requestPersistentStorage();
+    enqueuePersist({
+      sha256: key,
+      exhibitId: exhibitId || null,
+      blob,
+      byteLength: blob.size || 0,
+      mimeType: blob.type || "",
+      cachedAt: Date.now(),
+    });
   },
 
   async hasFile(exhibitId, sha256) {

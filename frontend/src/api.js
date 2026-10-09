@@ -441,7 +441,7 @@ function resolveHostedUploadLabels(file, { displayName, docKind } = {}) {
 export async function uploadCaseDocument(
   caseId,
   file,
-  { displayName, autoScan = true, docKind, filedDate, waitForComplete = true } = {}
+  { displayName, autoScan = true, docKind, filedDate, waitForComplete = true, onProgress } = {}
 ) {
   const cs = desktop();
   if (cs) {
@@ -489,11 +489,14 @@ export async function uploadCaseDocument(
       "D"
     );
     // #endregion
+    onProgress?.("hashing");
     const sha = await sha256OfFile(file);
+    onProgress?.("caching");
     await rememberScanFile(file, sha);
     // #region agent log
     _dbg("sha ready, calling createAnalysisJob", { shaPrefix: String(sha || "").slice(0, 12) }, "D");
     // #endregion
+    onProgress?.("uploading");
     const labels = resolveHostedUploadLabels(file, {
       displayName: displayName || file.name,
       docKind,

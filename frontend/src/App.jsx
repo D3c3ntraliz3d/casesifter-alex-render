@@ -1536,17 +1536,28 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
         const pending = [];
         const queueFailed = [];
         for (let i = 0; i < valid.length; i += 1) {
-          setUploadNote(`Registering ${i + 1} of ${valid.length}: ${valid[i].name}`);
+          const name = valid[i].name;
+          setUploadNote(`Registering ${i + 1} of ${valid.length}: ${name}`);
+          // Yield so the note paints before a long hash/upload.
+          await new Promise((r) => setTimeout(r, 0));
           try {
             const result = await uploadCaseDocument(caseData.id, valid[i], {
               autoScan: true,
               waitForComplete: false,
+              onProgress: (phase) => {
+                const label = phase === "hashing"
+                  ? "Hashing"
+                  : phase === "caching"
+                    ? "Caching"
+                    : "Uploading";
+                setUploadNote(`${label} ${i + 1} of ${valid.length}: ${name}`);
+              },
             });
             pending.push({
               file: valid[i],
               jobId: result.job_id,
               sha256: result.sha256,
-              name: valid[i].name,
+              name,
             });
           } catch (err) {
             queueFailed.push({ file: valid[i], error: err.message || "upload failed" });
