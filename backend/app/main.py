@@ -73,7 +73,10 @@ def _startup() -> None:
         )
     cases_db.ensure_schema()
     try:
-        get_store()  # init SQLite/Postgres fact memory schema
+        store = get_store()  # init SQLite/Postgres fact memory schema
+        n = store.mark_active_jobs_interrupted()
+        if n:
+            logger.warning("Marked %s queued/running analysis job(s) interrupted after restart", n)
     except Exception as exc:
         logger.warning("Fact memory store init failed: %s", exc)
     ensure_sweeper()

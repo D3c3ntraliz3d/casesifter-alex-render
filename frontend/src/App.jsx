@@ -5,6 +5,7 @@ import {
   askCaseChat,
   ANALYSIS_OFFLINE_MESSAGE,
   checkAnalysisHealth,
+  createAnalysisJob,
   createCase,
   deleteCase,
   deleteDocument,
@@ -14,6 +15,7 @@ import {
   getJob,
   isAnalysisUnreachableError,
   isHostedAnalysis,
+  isInterruptedOrExpiredJob,
   listCaseChat,
   listCaseGotchas,
   listCases,
@@ -37,6 +39,7 @@ import {
   unarchiveCase,
   uploadCaseDocument,
 } from "./api";
+import { sha256OfFile } from "./localFiles.js";
 
 const STAGES = [
   ["queued", "Queued"],
@@ -1535,12 +1538,25 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
         }
         const pending = [];
         const queueFailed = [];
+        const seenSha = new Set(
+          (caseData.documents || [])
+            .map((d) => String(d.sha256 || "").toLowerCase())
+            .filter(Boolean)
+        );
+        let skippedDupes = 0;
         for (let i = 0; i < valid.length; i += 1) {
           const name = valid[i].name;
           setUploadNote(`Registering ${i + 1} of ${valid.length}: ${name}`);
           // Yield so the note paints before a long hash/upload.
           await new Promise((r) => setTimeout(r, 0));
           try {
+            setUploadNote(`Hashing ${i + 1} of ${valid.length}: ${name}`);
+            const sha = String(await sha256OfFile(valid[i])).toLowerCase();
+            if (sha && seenSha.has(sha)) {
+              skippedDupes += 1;
+              continue;
+            }
+            if (sha) seenSha.add(sha);
             const result = await uploadCaseDocument(caseData.id, valid[i], {
               autoScan: true,
               waitForComplete: false,
@@ -1556,7 +1572,7 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
             pending.push({
               file: valid[i],
               jobId: result.job_id,
-              sha256: result.sha256,
+              sha256: result.sha256 || sha,
               name,
             });
           } catch (err) {
@@ -1566,6 +1582,7 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
         let done = 0;
         let ok = 0;
         const analysisFailed = [];
+        const resubmittedSha = new Set();
         for (const item of pending) {
           setUploadNote(`Analyzing ${done + 1} of ${pending.length}: ${item.name}`);
           let progress = null;
@@ -1576,10 +1593,37 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
                 progress = await getJob(item.jobId, { includeReport: false });
                 blips = 0;
               } catch (err) {
+                if (isInterruptedOrExpiredJob(err)) {
+                  const sha = String(item.sha256 || "").toLowerCase();
+                  if (sha && resubmittedSha.has(sha)) {
+                    throw err;
+                  }
+                  if (sha) resubmittedSha.add(sha);
+                  const again = await createAnalysisJob(item.file, {
+                    matterId: caseData.id,
+                    submittedBy: "web-app",
+                  });
+                  item.jobId = again.job_id;
+                  blips = 0;
+                  continue;
+                }
                 // A scan can stall the status call. One dropped poll is not an outage.
                 if (!isAnalysisUnreachableError(err) || blips >= 5) throw err;
                 blips += 1;
                 await new Promise((r) => setTimeout(r, 2000));
+                continue;
+              }
+              if (progress.status === "interrupted" || progress.interrupted) {
+                const sha = String(item.sha256 || "").toLowerCase();
+                if (sha && resubmittedSha.has(sha)) {
+                  break;
+                }
+                if (sha) resubmittedSha.add(sha);
+                const again = await createAnalysisJob(item.file, {
+                  matterId: caseData.id,
+                  submittedBy: "web-app",
+                });
+                item.jobId = again.job_id;
                 continue;
               }
               if (progress.status === "complete" || progress.status === "failed") break;
@@ -1607,6 +1651,9 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
         } catch {
           /* ignore */
         }
+        const dupeNote = skippedDupes
+          ? ` Skipped ${skippedDupes} duplicate file${skippedDupes === 1 ? "" : "s"}.`
+          : "";
         if (allFailed.length) {
           onError(
             ok
@@ -1618,12 +1665,12 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
                   .join(" · ")}`
           );
           setUploadNote(
-            `${ok} of ${valid.length} complete. Use Retry failed for the rest.`
+            `${ok} of ${valid.length} complete. Use Retry failed for the rest.${dupeNote}`
           );
         } else {
           onError("");
           setUploadNote(
-            `Added and analyzed ${ok} file${ok === 1 ? "" : "s"}.`
+            `Added and analyzed ${ok} file${ok === 1 ? "" : "s"}.${dupeNote}`
           );
         }
       } finally {

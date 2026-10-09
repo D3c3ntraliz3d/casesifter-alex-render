@@ -206,6 +206,36 @@ class AuditLog(Base):
     at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
+class AnalysisJob(Base):
+    """Durable ephemeral-job ledger — survives Render disk wipes / restarts."""
+
+    __tablename__ = "analysis_jobs"
+    __table_args__ = (
+        Index("ix_analysis_jobs_firm", "firm_id"),
+        Index("ix_analysis_jobs_matter", "matter_id"),
+        Index("ix_analysis_jobs_status", "status"),
+        Index("ix_analysis_jobs_sha", "sha256"),
+    )
+
+    job_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    firm_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("firms.id", ondelete="CASCADE"), nullable=False
+    )
+    matter_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("matters.id", ondelete="SET NULL"), nullable=True
+    )
+    document_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("documents.id", ondelete="SET NULL"), nullable=True
+    )
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
 _engine = None
 _SessionLocal = None
 

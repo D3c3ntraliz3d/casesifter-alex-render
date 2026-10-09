@@ -33,7 +33,9 @@ from app.ephemeral import (
 from app.models import UploadResponse
 from app.pipeline import run_pipeline
 from app.product_events import emit_chat_asked, emit_scan_failed
+from app.resource import rss_mb
 from app.scan_slots import acquire as acquire_scan_slot
+from app.scan_slots import active_count as scan_slot_active_count
 from app.scan_slots import release as release_scan_slot
 from app.scan_watchdog import ensure_watchdog
 from app.storage import create_job, job_dir, load_progress, load_report, update_job
@@ -215,6 +217,84 @@ def _should_persist(auth: dict, firm_ctx: dict | None) -> bool:
     return bool(firm_ctx.get("persist_facts", True))
 
 
+def _upsert_durable_job(
+    *,
+    job_id: str,
+    firm_ctx: dict | None,
+    matter_id: str | None,
+    sha256: str = "",
+    status: str = "queued",
+    message: str | None = None,
+    error: str | None = None,
+    document_id: str | None = None,
+) -> None:
+    if not firm_ctx or not firm_ctx.get("firm_id"):
+        return
+    try:
+        from app.fact_memory.store import get_store
+
+        get_store().upsert_analysis_job(
+            job_id=job_id,
+            firm_id=firm_ctx["firm_id"],
+            matter_id=matter_id,
+            document_id=document_id,
+            sha256=sha256,
+            status=status,
+            message=message,
+            error=error,
+        )
+    except Exception:
+        logger.exception("Durable job upsert failed for %s", job_id)
+
+
+def _update_durable_job(
+    job_id: str,
+    *,
+    status: str | None = None,
+    message: str | None = None,
+    error: str | None = None,
+    document_id: str | None = None,
+    sha256: str | None = None,
+) -> None:
+    try:
+        from app.fact_memory.store import get_store
+
+        get_store().update_analysis_job(
+            job_id,
+            status=status,
+            message=message,
+            error=error,
+            document_id=document_id,
+            sha256=sha256,
+        )
+    except Exception:
+        logger.exception("Durable job update failed for %s", job_id)
+
+
+def _durable_interrupted_payload(row: dict) -> dict:
+    """Shape a progress-like response when progress.json is gone after a restart."""
+    return {
+        "job_id": row["job_id"],
+        "status": "interrupted",
+        "stage": "interrupted",
+        "percent": 0,
+        "message": row.get("message")
+        or "Instance restarted; job was interrupted. Re-submit to continue.",
+        "filename": "",
+        "error": row.get("error") or "interrupted_by_restart",
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+        "started_at": None,
+        "report": None,
+        "ephemeral": True,
+        "interrupted": True,
+        "sha256": row.get("sha256") or "",
+        "matter_id": row.get("matter_id"),
+        "document_id": row.get("document_id"),
+        "attempts": row.get("attempts"),
+    }
+
+
 @v1.post("/jobs", response_model=UploadResponse)
 async def create_ephemeral_job(
     file: UploadFile = File(...),
@@ -246,10 +326,9 @@ async def create_ephemeral_job(
         peers = [row for row in raw[:80] if isinstance(row, dict)]
 
     resolved_matter = (matter_id or case_id or "").strip() or None
-    firm_ctx = None
+    firm_ctx = resolve_firm_context(_auth)
     persist = False
     if resolved_matter:
-        firm_ctx = resolve_firm_context(_auth)
         persist = _should_persist(_auth, firm_ctx)
         from app.fact_memory.store import get_store
 
@@ -282,11 +361,21 @@ async def create_ephemeral_job(
                 raise HTTPException(400, f"File exceeds {settings.max_file_mb} MB limit.")
             handle.write(chunk)
 
+    from app.ingestion import sha256_file
+
+    digest = sha256_file(dest)
+    queue_msg = "Queued for analysis." + (
+        " Matter fact memory enabled." if persist else ""
+    )
     create_job(job_id, safe_name)
-    update_job(
-        job_id,
-        message="Queued for analysis."
-        + (" Matter fact memory enabled." if persist else ""),
+    update_job(job_id, message=queue_msg)
+    _upsert_durable_job(
+        job_id=job_id,
+        firm_ctx=firm_ctx,
+        matter_id=resolved_matter,
+        sha256=digest,
+        status="queued",
+        message=queue_msg,
     )
     if persist:
         # Marker so sweeper retains report (facts live in DB; PDF still deleted).
@@ -325,6 +414,16 @@ def _run_ephemeral(
     filed_date: str | None = None,
     persist: bool = False,
 ) -> None:
+    logger.info(
+        "ephemeral start job=%s rss_mb=%s active_slots=%s",
+        job_id[:8],
+        rss_mb(),
+        scan_slot_active_count(),
+    )
+    terminal_status = "failed"
+    terminal_message = None
+    terminal_error = None
+    document_id = None
     try:
         if not acquire_scan_slot(job_id, timeout=600):
             emit_scan_failed(
@@ -341,8 +440,12 @@ def _run_ephemeral(
                 message="Scan queue timed out.",
                 error="Another scan held the queue for too long.",
             )
+            terminal_status = "failed"
+            terminal_message = "Scan queue timed out."
+            terminal_error = "Another scan held the queue for too long."
             maybe_delete_after_terminal(job_id, retain_report=persist)
             return
+        _update_durable_job(job_id, status="running", message="Scan slot acquired.")
         try:
             sample = ""
             if not (doc_kind or "").strip():
@@ -371,7 +474,7 @@ def _run_ephemeral(
                 prior_snapshots=prior_snapshots or None,
             )
             if persist and matter_id and firm_ctx and report is not None:
-                _persist_pipeline_result(
+                document_id = _persist_pipeline_result(
                     job_id=job_id,
                     source=dest,
                     report=report,
@@ -381,6 +484,18 @@ def _run_ephemeral(
                     doc_kind=resolved_kind,
                     filed_date=filed_date,
                 )
+            progress = load_progress(job_id)
+            if progress and progress.status == "complete":
+                terminal_status = "complete"
+                terminal_message = progress.message or "Analysis complete."
+                terminal_error = None
+            elif progress and progress.status == "failed":
+                terminal_status = "failed"
+                terminal_message = progress.message or "Analysis failed."
+                terminal_error = progress.error
+            else:
+                terminal_status = "complete"
+                terminal_message = "Analysis complete."
         except Exception as exc:
             emit_scan_failed(job_id=job_id, stage="failed", error_message=str(exc))
             update_job(
@@ -391,10 +506,27 @@ def _run_ephemeral(
                 message="Analysis failed.",
                 error=str(exc),
             )
+            terminal_status = "failed"
+            terminal_message = "Analysis failed."
+            terminal_error = str(exc)
         finally:
             release_scan_slot(job_id)
             maybe_delete_after_terminal(job_id, retain_report=persist)
     finally:
+        _update_durable_job(
+            job_id,
+            status=terminal_status,
+            message=terminal_message,
+            error=terminal_error,
+            document_id=document_id,
+        )
+        logger.info(
+            "ephemeral end job=%s status=%s rss_mb=%s active_slots=%s",
+            job_id[:8],
+            terminal_status,
+            rss_mb(),
+            scan_slot_active_count(),
+        )
         # Success, failure, timeout, and cancel: the upload must not remain on disk.
         delete_ephemeral_source(job_id)
 
@@ -409,7 +541,7 @@ def _persist_pipeline_result(
     display_name: str | None,
     doc_kind: str | None,
     filed_date: str | None,
-) -> None:
+) -> str | None:
     from app.fact_memory.store import get_store
     from app.ingestion import sha256_file
 
@@ -469,8 +601,10 @@ def _persist_pipeline_result(
             result.get("persisted"),
             result.get("deduped"),
         )
+        return result.get("document_id")
     except Exception:
         logger.exception("Failed to persist fact memory for job %s", job_id)
+        return None
 
 
 @v1.get("/jobs/{job_id}")
@@ -481,6 +615,14 @@ def get_ephemeral_job(
 ):
     progress = load_progress(job_id)
     if progress is None:
+        try:
+            from app.fact_memory.store import get_store
+
+            row = get_store().get_analysis_job(job_id)
+        except Exception:
+            row = None
+        if row and row.get("status") == "interrupted":
+            return _durable_interrupted_payload(row)
         raise HTTPException(404, "Unknown or expired job.")
     # Status polls must stay small. Embedding the report froze the worker on
     # large exhibits and the browser reported that stall as an outage.

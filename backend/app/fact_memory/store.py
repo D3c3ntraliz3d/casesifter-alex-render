@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from app.fact_memory import encryption as enc
 from app.fact_memory.models import (
+    AnalysisJob,
     AuditLog,
     Document,
     Entity,
@@ -882,6 +883,132 @@ class FactMemoryStore:
             s.delete(firm)
             s.commit()
             return True
+
+    # ── Durable analysis jobs (survive ephemeral disk wipe) ───────────────
+
+    def upsert_analysis_job(
+        self,
+        *,
+        job_id: str,
+        firm_id: str,
+        matter_id: str | None = None,
+        document_id: str | None = None,
+        sha256: str = "",
+        status: str = "queued",
+        message: str | None = None,
+        error: str | None = None,
+        attempts: int | None = None,
+    ) -> dict[str, Any]:
+        now = _utcnow()
+        with self.session() as s:
+            row = s.get(AnalysisJob, job_id)
+            if row is None:
+                row = AnalysisJob(
+                    job_id=job_id,
+                    firm_id=firm_id,
+                    matter_id=matter_id or None,
+                    document_id=document_id or None,
+                    sha256=(sha256 or "").lower(),
+                    status=status or "queued",
+                    attempts=int(attempts) if attempts is not None else 1,
+                    message=message,
+                    error=error,
+                    created_at=now,
+                    updated_at=now,
+                )
+                s.add(row)
+            else:
+                if matter_id is not None:
+                    row.matter_id = matter_id or None
+                if document_id is not None:
+                    row.document_id = document_id or None
+                if sha256:
+                    row.sha256 = sha256.lower()
+                row.status = status or row.status
+                if attempts is not None:
+                    row.attempts = int(attempts)
+                elif status == "queued" and row.status in {"interrupted", "failed"}:
+                    row.attempts = int(row.attempts or 0) + 1
+                if message is not None:
+                    row.message = message
+                if error is not None:
+                    row.error = error
+                row.updated_at = now
+            s.commit()
+            return self._analysis_job_dict(row)
+
+    def update_analysis_job(
+        self,
+        job_id: str,
+        *,
+        status: str | None = None,
+        document_id: str | None = None,
+        message: str | None = None,
+        error: str | None = None,
+        sha256: str | None = None,
+    ) -> dict[str, Any] | None:
+        with self.session() as s:
+            row = s.get(AnalysisJob, job_id)
+            if row is None:
+                return None
+            if status is not None:
+                row.status = status
+            if document_id is not None:
+                row.document_id = document_id or None
+            if message is not None:
+                row.message = message
+            if error is not None:
+                row.error = error
+            if sha256:
+                row.sha256 = sha256.lower()
+            row.updated_at = _utcnow()
+            s.commit()
+            return self._analysis_job_dict(row)
+
+    def get_analysis_job(self, job_id: str) -> dict[str, Any] | None:
+        with self.session() as s:
+            row = s.get(AnalysisJob, job_id)
+            if row is None:
+                return None
+            return self._analysis_job_dict(row)
+
+    def mark_active_jobs_interrupted(
+        self,
+        *,
+        message: str = "Instance restarted; job was interrupted. Re-submit to continue.",
+    ) -> int:
+        """Mark queued/running durable jobs interrupted after a process boot."""
+        now = _utcnow()
+        with self.session() as s:
+            rows = (
+                s.execute(
+                    select(AnalysisJob).where(AnalysisJob.status.in_(("queued", "running")))
+                )
+                .scalars()
+                .all()
+            )
+            for row in rows:
+                row.status = "interrupted"
+                row.message = message
+                row.error = "interrupted_by_restart"
+                row.updated_at = now
+            s.commit()
+            return len(rows)
+
+    def _analysis_job_dict(self, row: AnalysisJob) -> dict[str, Any]:
+        return {
+            "job_id": row.job_id,
+            "firm_id": row.firm_id,
+            "matter_id": row.matter_id,
+            "document_id": row.document_id,
+            "sha256": row.sha256 or "",
+            "status": row.status,
+            "attempts": int(row.attempts or 0),
+            "message": row.message,
+            "error": row.error,
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+            "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        }
 
 
 def _attach_source(

@@ -36,3 +36,12 @@ def force_release(job_id: str) -> bool:
 def active_job_ids() -> list[str]:
     with _LOCK:
         return list(_HOLDERS.keys())
+
+
+def active_count() -> int:
+    with _LOCK:
+        return len(_HOLDERS)
+
+
+def max_slots() -> int:
+    return _MAX

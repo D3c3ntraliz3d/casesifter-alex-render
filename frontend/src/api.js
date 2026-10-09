@@ -255,14 +255,59 @@ function analysisUnreachableError(cause) {
   return cause instanceof Error ? cause : new Error(raw || "Analysis request failed.");
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** True for transport blips / cold starts worth retrying with backoff. */
+function isRetryableAnalysisFailure(err, status = 0) {
+  if (status === 503 || status === 502 || status === 504) return true;
+  const msg = String(err?.message || err || "");
+  return /failed to fetch|networkerror|load failed|503|502|504|service suspended|analysis (service )?unreachable|analysis is temporarily unavailable/i.test(
+    msg
+  );
+}
+
 async function analysisFetch(path, options = {}) {
-  try {
-    const res = await apiFetch(path, options);
-    if (res.status === 503) throw analysisUnreachableError(new Error("503"));
-    return res;
-  } catch (err) {
-    throw analysisUnreachableError(err);
+  const maxAttempts = 4;
+  let lastErr = null;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    try {
+      const res = await apiFetch(path, options);
+      if (res.status === 503 || res.status === 502 || res.status === 504) {
+        lastErr = analysisUnreachableError(new Error(String(res.status)));
+        if (attempt < maxAttempts - 1) {
+          await sleep(400 * 2 ** attempt);
+          continue;
+        }
+        throw lastErr;
+      }
+      return res;
+    } catch (err) {
+      lastErr = analysisUnreachableError(err);
+      if (attempt < maxAttempts - 1 && isRetryableAnalysisFailure(err)) {
+        await sleep(400 * 2 ** attempt);
+        continue;
+      }
+      throw lastErr;
+    }
   }
+  throw lastErr || analysisUnreachableError(new Error("Analysis request failed."));
+}
+
+/** Job was wiped by a restart, or the durable ledger reports interrupted. */
+export function isInterruptedOrExpiredJob(progressOrErr) {
+  if (!progressOrErr) return false;
+  if (typeof progressOrErr === "object" && !(progressOrErr instanceof Error)) {
+    const status = String(progressOrErr.status || "").toLowerCase();
+    if (status === "interrupted" || progressOrErr.interrupted) return true;
+  }
+  const msg = String(progressOrErr?.message || progressOrErr || "").toLowerCase();
+  return (
+    /unknown or expired job|interrupted_by_restart|job was interrupted|instance restarted/.test(
+      msg
+    ) || String(progressOrErr?.status || "").toLowerCase() === "interrupted"
+  );
 }
 
 export async function listCases() {
@@ -521,10 +566,43 @@ export async function uploadCaseDocument(
     }
     // Poll until complete so the matter document row exists.
     let progress = null;
+    let jobId = job.job_id;
+    let resubmitted = false;
     for (let i = 0; i < 120; i += 1) {
-      progress = await getJob(job.job_id, { includeReport: true });
+      try {
+        progress = await getJob(jobId, { includeReport: true });
+      } catch (err) {
+        if (!resubmitted && isInterruptedOrExpiredJob(err)) {
+          resubmitted = true;
+          const again = await createAnalysisJob(file, {
+            displayName: labels.displayName || file.name,
+            docKind: labels.docKind || undefined,
+            matterId: caseId,
+            filedDate: filedDate || undefined,
+            submittedBy: "web-app",
+          });
+          jobId = again.job_id;
+          continue;
+        }
+        throw err;
+      }
+      if (progress.status === "interrupted" || progress.interrupted) {
+        if (!resubmitted) {
+          resubmitted = true;
+          const again = await createAnalysisJob(file, {
+            displayName: labels.displayName || file.name,
+            docKind: labels.docKind || undefined,
+            matterId: caseId,
+            filedDate: filedDate || undefined,
+            submittedBy: "web-app",
+          });
+          jobId = again.job_id;
+          continue;
+        }
+        break;
+      }
       if (progress.status === "complete" || progress.status === "failed") break;
-      await new Promise((r) => setTimeout(r, 1000));
+      await sleep(1000);
     }
     const matter = await getCase(caseId);
     const docs = matter.documents || [];
@@ -534,7 +612,7 @@ export async function uploadCaseDocument(
       null;
     return {
       document: match,
-      job_id: job.job_id,
+      job_id: jobId,
       job: progress,
       matter,
       sha256: sha,
