@@ -54,6 +54,12 @@ services:
         value: "4"
       - key: GEMINI_MAX_INFLIGHT_MB
         value: "150"
+      - key: SCAN_JOB_TIMEOUT_S
+        value: "600"
+      - key: GEMINI_STAGE_TIMEOUT_S
+        value: "900"
+      - key: GEMINI_ORPHAN_SOURCE_GRACE_S
+        value: "60"
       # Gotcha verifier: auto picks Claude when ANTHROPIC_API_KEY is set; Gemini stays multimodal.
       - key: GOTCHA_VERIFY_PROVIDER
         value: auto

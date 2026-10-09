@@ -19,6 +19,7 @@ import {
   listCaseChat,
   listCaseGotchas,
   listCases,
+  listRetryableJobs,
   absorbSessionHandoff,
   loginCloud,
   logoutCloud,
@@ -40,6 +41,7 @@ import {
   uploadCaseDocument,
 } from "./api";
 import { sha256OfFile } from "./localFiles.js";
+import { localCacheAdapter } from "./storage/localCache.js";
 
 const STAGES = [
   ["queued", "Queued"],
@@ -1281,11 +1283,68 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
   const inputRef = useRef(null);
   const backfillKeyRef = useRef("");
   const scanningRef = useRef(false);
+  const autoRetryKeyRef = useRef("");
   // New array every render would retrigger effects that list this as a dependency.
   const docs = useMemo(
     () => dedupeDocumentList(caseData.documents || []),
     [caseData.documents]
   );
+
+  // Hosted: auto-resubmit queue-age / stall / timeout / interrupted jobs from IndexedDB.
+  useEffect(() => {
+    if (!isHostedAnalysis() || caseData.archived_at) return;
+    const key = String(caseData.id || "");
+    if (!key || autoRetryKeyRef.current === key) return;
+    autoRetryKeyRef.current = key;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { jobs } = await listRetryableJobs(caseData.id);
+        if (cancelled || !jobs?.length) return;
+        const misses = [];
+        let kicked = 0;
+        for (const row of jobs) {
+          const sha = String(row.sha256 || "").toLowerCase();
+          if (!sha) continue;
+          const blob = await localCacheAdapter.getFile(null, sha);
+          if (!blob) {
+            misses.push(sha.slice(0, 12));
+            continue;
+          }
+          const name = `retry-${sha.slice(0, 12)}.pdf`;
+          const file = new File([blob], name, { type: blob.type || "application/pdf" });
+          try {
+            await createAnalysisJob(file, {
+              matterId: caseData.id,
+              submittedBy: "web-app-auto-retry",
+            });
+            kicked += 1;
+          } catch {
+            /* server dedupe or auth — skip */
+          }
+        }
+        if (kicked) {
+          setUploadNote(
+            `Auto-retried ${kicked} failed job${kicked === 1 ? "" : "s"} from this device’s cache.`
+          );
+          try {
+            await onRefresh();
+          } catch {
+            /* ignore */
+          }
+        } else if (misses.length) {
+          setUploadNote(
+            `${misses.length} failed job${misses.length === 1 ? "" : "s"} need Locate / re-upload (not in cache).`
+          );
+        }
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [caseData.id, caseData.archived_at, onRefresh]);
   const docIdKey = docs.map((d) => d.id).join("\n");
   const waitingDocs = docs.filter((d) => d.status === "uploaded" || d.status === "failed");
   const visibleDocs = docs.filter((doc) =>
@@ -1580,12 +1639,20 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
             queueFailed.push({ file: valid[i], error: err.message || "upload failed" });
           }
         }
+        try {
+          await retitleCaseDocuments(caseData.id);
+          await onRefresh();
+        } catch {
+          /* kinds still fixable via toolbar */
+        }
         let done = 0;
         let ok = 0;
         const analysisFailed = [];
         const resubmittedSha = new Set();
         for (const item of pending) {
-          setUploadNote(`Analyzing ${done + 1} of ${pending.length}: ${item.name}`);
+          setUploadNote(
+            `${ok} complete · ${pending.length - done} remaining · Analyzing ${done + 1} of ${pending.length}: ${item.name}`
+          );
           let progress = null;
           let blips = 0;
           try {
@@ -1643,7 +1710,8 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
                   ? "waiting for Gemini"
                   : progress.message || progress.stage || "analyzing";
               setUploadNote(
-                `Analyzing ${done + 1} of ${pending.length}: ${item.name}${queueLabel}${etaLabel} — ${stage}`
+                `${ok} complete · ${done} done · ${pending.length - done} left · ` +
+                  `${item.name}${queueLabel}${etaLabel} — ${stage}`
               );
               await new Promise((r) => setTimeout(r, 1000));
             }
@@ -3835,6 +3903,19 @@ function ReportViewer({
                       ))}
                     </tbody>
                   </table>
+                </>
+              )}
+              {(report.comparison?.score_drivers || []).length > 0 && (
+                <>
+                  <h3 className="serif" style={{ marginTop: 20 }}>Score drivers</h3>
+                  <ul>
+                    {report.comparison.score_drivers.map((driver, idx) => (
+                      <li key={`${driver.type}-${idx}`}>
+                        {driver.reason || driver.explanation}
+                        {driver.floor != null ? ` (floor: ${driver.floor})` : ""}
+                      </li>
+                    ))}
+                  </ul>
                 </>
               )}
               <h3 className="serif" style={{ marginTop: 20 }}>Page dimensions</h3>

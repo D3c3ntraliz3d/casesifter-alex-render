@@ -1051,14 +1051,22 @@ def _encode_source_file(source_file: Path | None) -> tuple[str | None, str | Non
 
 
 def _post_gemini(payload: dict[str, Any], timeout: int | None = None) -> dict[str, Any]:
+    from app.gemini_cancel import CancelledError, is_cancelled
     from app.gemini_timing import GeminiTimer
+
+    if is_cancelled():
+        raise CancelledError("Gemini stage cancelled.")
 
     url = GEMINI_ENDPOINT.format(model=settings.gemini_model)
     body_bytes = json.dumps(payload).encode("utf-8")
     max_attempts = 5
     last_err: Exception | None = None
+    # Prefer document timeout when caller omits; never hang unbounded.
+    http_timeout = timeout if timeout is not None else settings.gemini_timeout_s
     with GeminiTimer():
         for attempt in range(max_attempts):
+            if is_cancelled():
+                raise CancelledError("Gemini stage cancelled.")
             request = urllib.request.Request(
                 url,
                 data=body_bytes,
@@ -1069,9 +1077,7 @@ def _post_gemini(payload: dict[str, Any], timeout: int | None = None) -> dict[st
                 },
             )
             try:
-                with urllib.request.urlopen(
-                    request, timeout=timeout or settings.gemini_timeout_s
-                ) as response:
+                with urllib.request.urlopen(request, timeout=http_timeout) as response:
                     return json.loads(response.read().decode("utf-8"))
             except urllib.error.HTTPError as exc:
                 detail = exc.read().decode("utf-8", errors="replace")[:300]

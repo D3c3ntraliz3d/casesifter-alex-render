@@ -1,58 +1,172 @@
-"""Process pool for local PDF/OCR — keeps the FastAPI / uvicorn process free.
+"""Local PDF/OCR via a terminable multiprocessing.Process (SCAN_MAX_CONCURRENT=1).
 
-CPU-heavy local work runs in a child process so /api/health can answer within
-Render's 5s window. Gemini stage is scheduled in the web process thread pool
-after local_done (see gemini_executor).
+ProcessPoolExecutor.shutdown does not stop a running task. We run each local
+stage in a Process we can terminate on SCAN_JOB_TIMEOUT_S, then start clean.
 """
 
 from __future__ import annotations
 
 import logging
 import multiprocessing as mp
-from concurrent.futures import Future, ProcessPoolExecutor
+import threading
+import time
+from concurrent.futures import Future
 from typing import Any
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("uvicorn.error")
 
-_executor: ProcessPoolExecutor | None = None
+_LOCK = threading.Lock()
+_ACTIVE_PROC: mp.Process | None = None
+_ACTIVE_JOB: str | None = None
+_RESULT_QUEUE: Any = None
 
 
-def _max_workers() -> int:
+def _job_timeout_s() -> float:
     from app.config import settings
 
-    return max(1, int(settings.scan_max_concurrent or 1))
+    return float(max(60, int(settings.scan_job_timeout_s or 600)))
 
 
-def ensure_scan_executor() -> ProcessPoolExecutor:
-    global _executor
-    if _executor is not None:
-        return _executor
-    workers = _max_workers()
-    ctx = mp.get_context("spawn")
-    # max_tasks_per_child=1 recycles the child after each job so RSS does not climb.
-    _executor = ProcessPoolExecutor(
-        max_workers=workers,
-        max_tasks_per_child=1,
-        mp_context=ctx,
+def _local_worker(payload: dict[str, Any], result_q: Any) -> None:
+    """Child entry: run local stage and put result on queue. No writes after kill."""
+    try:
+        from app.scan_job_runner import execute_ephemeral_job
+
+        result = execute_ephemeral_job(payload)
+        result_q.put(("ok", result))
+    except Exception as exc:
+        result_q.put(("err", str(exc)))
+
+
+def ensure_scan_executor() -> None:
+    """Compatibility no-op — local work uses per-job Processes."""
+    return None
+
+
+def shutdown_scan_executor() -> None:
+    global _ACTIVE_PROC, _ACTIVE_JOB
+    with _LOCK:
+        proc = _ACTIVE_PROC
+        _ACTIVE_PROC = None
+        _ACTIVE_JOB = None
+    if proc is not None and proc.is_alive():
+        try:
+            proc.terminate()
+            proc.join(timeout=5)
+            if proc.is_alive():
+                proc.kill()
+                proc.join(timeout=2)
+        except Exception:
+            logger.exception("failed to terminate active local process")
+    try:
+        from app.gemini_executor import shutdown_gemini_executor
+
+        shutdown_gemini_executor()
+    except Exception:
+        pass
+
+
+def _mark_local_timeout(job_id: str, stage: str | None) -> None:
+    from app.ephemeral import delete_ephemeral_source
+    from app.storage import load_progress, update_job
+    from app.v1_analysis import _update_durable_job
+
+    progress = load_progress(job_id)
+    stopped = (progress.stage if progress else None) or stage or "local"
+    msg = f"Local stage timed out after {_job_timeout_s():.0f}s (last stage: {stopped})."
+    err = f"local_timeout:{stopped}"
+    update_job(
+        job_id,
+        status="failed",
+        stage="failed",
+        percent=100,
+        message=msg,
+        error=err,
     )
-    logger.info("scan process pool started max_workers=%s context=spawn", workers)
-    return _executor
+    _update_durable_job(job_id, status="failed", message=msg, error=err)
+    # Source may still be needed for one server-side retry; leave PDF until retry
+    # path decides. If attempts exhausted, delete.
+    try:
+        from app.fact_memory.store import get_store
+
+        row = get_store().get_analysis_job(job_id)
+        attempts = int((row or {}).get("attempts") or 1)
+        if attempts >= 3:
+            delete_ephemeral_source(job_id)
+    except Exception:
+        delete_ephemeral_source(job_id)
+
+
+def _maybe_retry_local(payload: dict[str, Any], job_id: str) -> bool:
+    """Bump attempts and re-submit local once if under max and source present."""
+    from pathlib import Path
+
+    from app.fact_memory.store import get_store
+    from app.gemini_executor import source_present
+    from app.storage import update_job
+    from app.v1_analysis import _update_durable_job
+
+    dest = payload.get("dest")
+    if not source_present(job_id, dest) and not (dest and Path(str(dest)).is_file()):
+        update_job(
+            job_id,
+            status="interrupted",
+            stage="interrupted",
+            percent=0,
+            message="Local timeout; source gone — re-submit from device cache.",
+            error="interrupted_source_missing",
+        )
+        _update_durable_job(
+            job_id,
+            status="interrupted",
+            message="Local timeout; source gone — re-submit from device cache.",
+            error="interrupted_source_missing",
+        )
+        return False
+    try:
+        store = get_store()
+        row = store.get_analysis_job(job_id) or {}
+        attempts = int(row.get("attempts") or 1)
+        if attempts >= 3:
+            return False
+        store.bump_analysis_job_attempts(
+            job_id,
+            status="queued",
+            message=f"Auto-retry local after timeout (attempt {attempts + 1}).",
+        )
+        update_job(
+            job_id,
+            status="queued",
+            stage="queued",
+            percent=0,
+            message=f"Auto-retry local after timeout (attempt {attempts + 1}).",
+        )
+        # Schedule retry off this thread.
+        threading.Thread(
+            target=lambda: submit_ephemeral_job(payload),
+            daemon=True,
+            name=f"retry-local-{job_id[:8]}",
+        ).start()
+        return True
+    except Exception:
+        logger.exception("local retry schedule failed job=%s", job_id[:8])
+        return False
 
 
 def submit_ephemeral_job(payload: dict[str, Any]) -> Future:
-    """Queue local stage in a child process; on local_done schedule Gemini in-web."""
+    """Run local stage in a terminable Process; on local_done schedule Gemini."""
     from app.gemini_executor import (
         clear_ahead,
         ensure_gemini_executor,
         reserve_ahead,
         submit_gemini_stage,
     )
-    from app.scan_job_runner import execute_ephemeral_job
+    from app.scan_watchdog import note_queue_progress
 
     ensure_gemini_executor()
     job_id = str(payload.get("job_id") or "")
+    out: Future = Future()
 
-    # Backpressure: reserve an ahead slot from local submit through Gemini terminal.
     if not reserve_ahead(job_id, timeout=900):
         logger.error("local backpressure timeout job=%s — failing", job_id[:8])
         try:
@@ -77,21 +191,78 @@ def submit_ephemeral_job(payload: dict[str, Any]) -> Future:
             delete_ephemeral_source(job_id)
         except Exception:
             logger.exception("backpressure fail path error job=%s", job_id[:8])
-        fut: Future = Future()
-        fut.set_result({"job_id": job_id, "status": "failed"})
-        return fut
+        out.set_result({"job_id": job_id, "status": "failed"})
+        return out
 
-    pool = ensure_scan_executor()
-    future = pool.submit(execute_ephemeral_job, payload)
+    def _run() -> None:
+        global _ACTIVE_PROC, _ACTIVE_JOB
+        ctx = mp.get_context("spawn")
+        result_q = ctx.Queue()
+        proc = ctx.Process(
+            target=_local_worker,
+            args=(payload, result_q),
+            name=f"local-{job_id[:8]}",
+            daemon=True,
+        )
+        with _LOCK:
+            # Serialize local (max concurrent 1): wait for prior process.
+            while _ACTIVE_PROC is not None and _ACTIVE_PROC.is_alive():
+                time.sleep(0.2)
+            _ACTIVE_PROC = proc
+            _ACTIVE_JOB = job_id
+        note_queue_progress()
+        proc.start()
+        timeout = _job_timeout_s()
+        proc.join(timeout=timeout)
+        result = None
+        timed_out = False
+        if proc.is_alive():
+            timed_out = True
+            logger.error(
+                "local stage timeout job=%s after %.0fs — terminating process pid=%s",
+                job_id[:8],
+                timeout,
+                proc.pid,
+            )
+            try:
+                proc.terminate()
+                proc.join(timeout=5)
+                if proc.is_alive():
+                    proc.kill()
+                    proc.join(timeout=2)
+            except Exception:
+                logger.exception("terminate failed job=%s", job_id[:8])
+            # Confirm no further queue writes from dead child.
+            try:
+                while not result_q.empty():
+                    result_q.get_nowait()
+            except Exception:
+                pass
+            clear_ahead(job_id)
+            _mark_local_timeout(job_id, "local")
+            _maybe_retry_local(payload, job_id)
+            with _LOCK:
+                if _ACTIVE_JOB == job_id:
+                    _ACTIVE_PROC = None
+                    _ACTIVE_JOB = None
+            if not out.done():
+                out.set_result({"job_id": job_id, "status": "failed", "timed_out": True})
+            return
 
-    def _after_local(fut: Future) -> None:
+        with _LOCK:
+            if _ACTIVE_JOB == job_id:
+                _ACTIVE_PROC = None
+                _ACTIVE_JOB = None
+
         try:
-            result = fut.result()
+            kind, payload_or_err = result_q.get(timeout=5)
+            if kind == "ok":
+                result = payload_or_err
+            else:
+                raise RuntimeError(str(payload_or_err))
         except Exception as exc:
             clear_ahead(job_id)
             logger.exception("scan child crashed job=%s", job_id[:8] if job_id else "?")
-            if not job_id:
-                return
             try:
                 from app.ephemeral import delete_ephemeral_source
                 from app.storage import update_job
@@ -114,13 +285,17 @@ def submit_ephemeral_job(payload: dict[str, Any]) -> Future:
                 delete_ephemeral_source(job_id)
             except Exception:
                 logger.exception("could not mark crashed job %s failed", job_id[:8])
+            if not out.done():
+                out.set_exception(exc)
             return
 
         status = (result or {}).get("status")
         if status != "local_done":
             clear_ahead(job_id)
+            if not out.done():
+                out.set_result(result)
             return
-        # Resume payload may have been enriched in the child (labels, peak rss).
+
         gemini_payload = dict(payload)
         try:
             from app.gemini_executor import gemini_payload_path
@@ -134,21 +309,8 @@ def submit_ephemeral_job(payload: dict[str, Any]) -> Future:
         if result.get("peak_rss_mb") is not None:
             gemini_payload["peak_rss_mb"] = result["peak_rss_mb"]
         submit_gemini_stage(gemini_payload)
+        if not out.done():
+            out.set_result(result)
 
-    future.add_done_callback(_after_local)
-    return future
-
-
-def shutdown_scan_executor() -> None:
-    global _executor
-    if _executor is None:
-        return
-    _executor.shutdown(wait=False, cancel_futures=False)
-    _executor = None
-    logger.info("scan process pool shut down")
-    try:
-        from app.gemini_executor import shutdown_gemini_executor
-
-        shutdown_gemini_executor()
-    except Exception:
-        pass
+    threading.Thread(target=_run, daemon=True, name=f"local-wait-{job_id[:8]}").start()
+    return out

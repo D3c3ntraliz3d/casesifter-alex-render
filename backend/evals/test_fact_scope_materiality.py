@@ -138,3 +138,95 @@ def test_execution_venue_same_affidavit_conflicts():
     assert not facts_compatible(venues[0], venues[1])
     hits = _internal_fact_conflicts("AOS", facts)
     assert hits
+
+
+def test_cema_components_sum_is_confirmation_not_conflict():
+    text = (
+        "Prior mortgage principal amount $300,000.00.\n"
+        "Gap mortgage principal amount $75,000.00.\n"
+        "Second mortgage principal amount $25,000.00.\n"
+        "Consolidated principal amount $400,000.00.\n"
+    )
+    assert not _internal_fact_conflicts("CEMA", extract_facts(text))
+
+
+def test_principal_cap_language_is_not_conflict():
+    text = (
+        "The principal amount of the Note is $400,000.00.\n"
+        "The mortgage secures the principal amount of the Note or up to $500,000.00.\n"
+    )
+    facts = extract_facts(text)
+    assert any(
+        fact.get("key") == "stated_principal"
+        and fact.get("principal_role") == "cap"
+        for fact in facts
+    )
+    assert not _internal_fact_conflicts("Mortgage and Note", facts)
+
+
+def test_cross_instrument_rates_are_quiet():
+    facts = [
+        {
+            "key": "stated_interest_rate",
+            "value": 4.0,
+            "display": "4%",
+            "quote": "first mortgage interest rate of 4%",
+            "graph": True,
+            "documentary": True,
+            "instrument_scope": "prior",
+            "rate_purpose": "note",
+        },
+        {
+            "key": "stated_interest_rate",
+            "value": 8.0,
+            "display": "8%",
+            "quote": "second mortgage interest rate of 8%",
+            "graph": True,
+            "documentary": True,
+            "instrument_scope": "second",
+            "rate_purpose": "note",
+        },
+    ]
+    assert not same_nameable_fact(facts[0], facts[1])
+    assert facts_compatible(facts[0], facts[1])
+    assert not _internal_fact_conflicts("Two mortgages", facts)
+
+
+def _timeline_snapshot(text: str) -> list[dict]:
+    return [
+        {
+            "document_id": "timeline",
+            "display_name": "Timeline",
+            "facts": extract_facts(text),
+            "text_excerpt": text,
+        }
+    ]
+
+
+def test_assignment_before_commencement_is_timeline_only():
+    text = (
+        "Assignment of Mortgage effective as of January 1, 2020.\n"
+        "Assignment of Mortgage executed on February 1, 2020.\n"
+        "The foreclosure action commenced on March 1, 2020.\n"
+    )
+    facts = extract_facts(text)
+    roles = {fact.get("date_role") for fact in facts}
+    assert {"assignment_effective", "assignment_execution", "commencement"} <= roles
+    assert any(fact.get("timeline_context") for fact in facts)
+    assert not any(
+        row.get("field") == "standing"
+        for row in aggregate_fact_conflicts(_timeline_snapshot(text))
+    )
+
+
+def test_assignment_after_commencement_is_flagged():
+    text = (
+        "The foreclosure action commenced on March 1, 2020.\n"
+        "Assignment of Mortgage executed on April 1, 2020.\n"
+    )
+    conflicts = aggregate_fact_conflicts(_timeline_snapshot(text))
+    assert any(
+        row.get("field") == "standing"
+        and row.get("severity") == "high"
+        for row in conflicts
+    )

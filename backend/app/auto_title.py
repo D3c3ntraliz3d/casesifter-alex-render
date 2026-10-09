@@ -124,10 +124,13 @@ def propose_document_title(
             "calendar": "Calendar",
         }.get(kind, kind.title())
         # "AFFIRMATION AFFIDAVIT" / "AFFIRMATION AFFIDAVIT OF SERVICE" → Affidavit / Affidavit of Service
+        # Keep distinguishing residue from the filename (e.g. "– Pete Harley").
         if kind == "proof_of_service" and re.search(
             r"(?i)\b(affidavit|affirmation)\b.{0,40}\bof\s+service\b", cleaned
         ):
-            return _truncate(_with_file_number("Affidavit of Service", stem)), kind
+            residue = _service_name_residue(cleaned)
+            base = "Affidavit of Service" + (f" – {residue}" if residue else "")
+            return _truncate(_with_file_number(base, stem)), kind
         if kind in {"affidavit", "affirmation"} and re.search(
             r"(?i)^\s*(affirmation\s+)?affidavit(\s+or\s+affirmation)?\s*$", cleaned
         ):
@@ -280,6 +283,28 @@ def _filename_title(cleaned: str) -> str:
     if cleaned.islower():
         return cleaned.title()
     return cleaned
+
+
+def _service_name_residue(cleaned: str) -> str:
+    """Strip generic Affidavit/Affirmation of Service chrome; keep the person/entity."""
+    text = cleaned or ""
+    text = re.sub(
+        r"(?i)\b(affirmation\s+)?affidavit(\s+or\s+affirmation)?\s+of\s+service\b",
+        " ",
+        text,
+    )
+    text = re.sub(r"(?i)\baffirmation\s+of\s+service\b", " ", text)
+    text = re.sub(r"(?i)\baos\b", " ", text)
+    text = re.sub(r"(?i)\b(exhibit|ex)\s*[_\-]?\s*[a-z0-9]+\b", " ", text)
+    text = re.sub(r"[_\-]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip(" –—-")
+    if not text or len(text) < 2:
+        return ""
+    # Drop trailing file numbers already handled by _with_file_number.
+    text = re.sub(r"(?:^|[\s_\-])\d{1,4}$", "", text).strip()
+    if not text or len(text) < 2:
+        return ""
+    return _filename_title(text)[:80]
 
 
 def _keeps_file_identity(title: str, stem: str) -> bool:

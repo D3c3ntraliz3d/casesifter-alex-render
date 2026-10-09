@@ -101,10 +101,6 @@ def _elevate_docs_for_conflicts(docs: list[dict], conflicts: list[dict]) -> list
         target = bump.get(str(row.get("id") or ""))
         if target and rank.get(target, 0) > rank.get(str(row.get("risk_level") or "green"), 0):
             row["risk_level"] = target
-            if target == "red":
-                row["risk_score"] = max(int(row.get("risk_score") or 0), 70)
-            elif target == "yellow":
-                row["risk_score"] = max(int(row.get("risk_score") or 0), 35)
         out.append(row)
     return out
 
@@ -142,6 +138,59 @@ def delete_matter(matter_id: str, auth: dict = Depends(_require_analysis_auth)):
     if not ok:
         raise HTTPException(404, "Matter not found.")
     return {"deleted": matter_id}
+
+
+@matters_router.post("/{matter_id}/retitle")
+def retitle_matter_documents(matter_id: str, auth: dict = Depends(_require_analysis_auth)):
+    """Rebuild display names / kinds from original filenames (hosted Fix kinds)."""
+    from app.auto_title import (
+        looks_like_exhibit_filename,
+        propose_document_title,
+        uniquify_display_name,
+    )
+
+    ctx = _ctx(auth)
+    store = get_store()
+    if not store.get_matter(ctx["firm_id"], matter_id):
+        raise HTTPException(404, "Matter not found.")
+    docs = store.list_documents(ctx["firm_id"], matter_id)
+    taken: list[str] = []
+    changes: list[dict] = []
+    for doc in docs:
+        filename = doc.get("original_filename") or ""
+        proposed, kind = propose_document_title(filename, "")
+        if looks_like_exhibit_filename(filename) or looks_like_exhibit_filename(proposed):
+            kind = "exhibit"
+        unique = uniquify_display_name(proposed, taken, filename)
+        taken.append(unique)
+        fields: dict = {}
+        if unique != (doc.get("display_name") or ""):
+            fields["display_name"] = unique
+        if kind and kind != (doc.get("doc_kind") or doc.get("doc_type")):
+            fields["doc_type"] = kind
+        if fields:
+            store.update_document_labels(
+                ctx["firm_id"],
+                doc["id"],
+                display_name=fields.get("display_name"),
+                doc_type=fields.get("doc_type"),
+                user_id=ctx.get("user_id"),
+            )
+            changes.append({"document_id": doc["id"], **fields})
+    return {"updated": len(changes), "changes": changes}
+
+
+@matters_router.get("/{matter_id}/retryable-jobs")
+def list_retryable_jobs(matter_id: str, auth: dict = Depends(_require_analysis_auth)):
+    """Failed/interrupted jobs eligible for client auto-retry from IndexedDB."""
+    ctx = _ctx(auth)
+    store = get_store()
+    if not store.get_matter(ctx["firm_id"], matter_id):
+        raise HTTPException(404, "Matter not found.")
+    rows = store.list_retryable_failed_jobs(
+        firm_id=ctx["firm_id"], matter_id=matter_id, max_attempts=3
+    )
+    return {"jobs": rows}
 
 
 @matters_router.get("/{matter_id}/findings")

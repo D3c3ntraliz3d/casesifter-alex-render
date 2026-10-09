@@ -366,6 +366,33 @@ async def create_ephemeral_job(
 
     # Hash off the event loop — large PDFs must not stall /health.
     digest = await asyncio.to_thread(sha256_file, dest)
+
+    # Server dedupe: do not create a second job if one is already active for matter+sha.
+    if resolved_matter and firm_ctx and digest:
+        try:
+            from app.fact_memory.store import get_store
+
+            active = get_store().find_active_analysis_job(
+                firm_id=firm_ctx["firm_id"],
+                matter_id=resolved_matter,
+                sha256=digest,
+            )
+            if active:
+                delete_job_files(job_id)
+                logger.info(
+                    "dedupe active job matter=%s sha=%s existing=%s",
+                    resolved_matter,
+                    digest[:12],
+                    (active.get("job_id") or "")[:8],
+                )
+                return UploadResponse(
+                    job_id=active["job_id"],
+                    filename=safe_name,
+                    status=active.get("status") or "queued",
+                )
+        except Exception:
+            logger.exception("active-job dedupe check failed")
+
     queue_msg = "Queued for analysis." + (
         " Matter fact memory enabled." if persist else ""
     )

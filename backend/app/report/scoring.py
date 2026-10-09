@@ -25,6 +25,14 @@ def score_risk(findings: list[Finding]) -> tuple[RiskLevel, int]:
     gotchas and the other does not. Procedural and admission gotchas weigh more
     than a minor factual inconsistency.
     """
+    risk, score, _drivers = score_risk_details(findings)
+    return risk, score
+
+
+def score_risk_details(
+    findings: list[Finding],
+) -> tuple[RiskLevel, int, list[dict[str, object]]]:
+    """Return the score plus an audit-friendly explanation of any score floor."""
     actionable = [
         f
         for f in findings
@@ -44,14 +52,49 @@ def score_risk(findings: list[Finding]) -> tuple[RiskLevel, int]:
                 weight *= 1.1
         raw += int(weight)
     score = min(100, raw)
+    drivers: list[dict[str, object]] = [
+        {
+            "type": "weighted_findings",
+            "raw_score": score,
+            "finding_count": len(actionable),
+            "explanation": "Sum of severity weights adjusted by confidence and verified finding type.",
+        }
+    ]
 
     if any(f.severity == "critical" and f.confidence >= 70 for f in actionable):
-        return "red", max(score, 80)
+        final = max(score, 80)
+        if final > score:
+            drivers.append(
+                {
+                    "type": "score_floor",
+                    "floor": 80,
+                    "reason": "At least one critical finding has confidence of 70 or higher.",
+                }
+            )
+        return "red", final, drivers
     if any(f.severity == "high" and f.confidence >= 70 for f in actionable):
-        return "red", max(score, 70)
+        final = max(score, 70)
+        if final > score:
+            drivers.append(
+                {
+                    "type": "score_floor",
+                    "floor": 70,
+                    "reason": "At least one high-severity finding has confidence of 70 or higher.",
+                }
+            )
+        return "red", final, drivers
     if any(f.severity in {"medium", "high"} and f.confidence >= 55 for f in actionable):
-        return "yellow", max(score, 35)
-    return "green", score
+        final = max(score, 35)
+        if final > score:
+            drivers.append(
+                {
+                    "type": "score_floor",
+                    "floor": 35,
+                    "reason": "At least one medium/high finding has confidence of 55 or higher.",
+                }
+            )
+        return "yellow", final, drivers
+    return "green", score, drivers
 
 
 def pick_top_findings(findings: list[Finding], limit: int = 3) -> list[Finding]:

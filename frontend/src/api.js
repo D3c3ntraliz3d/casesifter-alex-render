@@ -680,10 +680,19 @@ export async function patchDocument(caseId, documentId, payload) {
 
 export async function retitleCaseDocuments(caseId) {
   if (isHostedAnalysis()) {
+    const res = await analysisFetch(`/api/v1/matters/${caseId}/retitle`, { method: "POST" });
+    await readJson(res);
     return getCase(caseId);
   }
   const res = await apiFetch(`/api/cases/${caseId}/retitle`, { method: "POST" });
   if (res.status === 404) throw vaultUnavailableError();
+  return readJson(res);
+}
+
+export async function listRetryableJobs(matterId) {
+  if (!isHostedAnalysis()) return { jobs: [] };
+  const res = await analysisFetch(`/api/v1/matters/${matterId}/retryable-jobs`);
+  if (!res.ok) return { jobs: [] };
   return readJson(res);
 }
 

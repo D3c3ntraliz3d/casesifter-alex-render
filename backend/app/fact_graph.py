@@ -603,7 +603,8 @@ OFFICE_APPOINTMENT_RE = re.compile(
 )
 
 CONTRACT_RATE_RE = re.compile(
-    r"(?i)(?:(?:mortgage\s+)?note|promissory\s+note|contract).{0,120}?"
+    r"(?i)(?:(?:(?:prior|first|second|gap|consolidated)\s+)?(?:mortgage\s+)?note|"
+    r"(?:(?:prior|first|second|gap|consolidated)\s+)?mortgage|promissory\s+note|contract).{0,120}?"
     r"(?:interest\s+(?:rate\s+)?(?:of\s+)?|rate\s+of)\s*"
     r"(\d{1,2}(?:\.\d{1,4})?)\s*%"
     r"|(?:interest\s+(?:rate\s+)?(?:of\s+)?|rate\s+of)\s*"
@@ -614,6 +615,13 @@ CONTRACT_RATE_RE = re.compile(
 SOUGHT_RATE_RE = re.compile(
     r"(?i)(?:seeks?\s+interest|interest\s+(?:at|of)|judgment\s+.{0,40}?interest)"
     r"[^\d%]{0,40}(\d{1,2}(?:\.\d{1,4})?)\s*%"
+)
+
+PURPOSE_RATE_RE = re.compile(
+    r"(?i)(?:(?P<purpose>default|late|penalty)\s+(?:interest\s+)?rate|"
+    r"(?:interest\s+)?rate\s+(?:upon|after|in\s+the\s+event\s+of)\s+"
+    r"(?P<purpose2>default|late\s+payment))"
+    r"[^\d%]{0,50}(?P<rate>\d{1,2}(?:\.\d{1,4})?)\s*%"
 )
 
 # Occupancy commencement (same person, incompatible starts = credibility)
@@ -651,6 +659,13 @@ MORTGAGE_ORIGINATION_RE = re.compile(
     rf"({DATE_TOKEN})"
 )
 
+LEGAL_INSTRUMENT_DATE_RE = re.compile(
+    rf"(?i)(?P<label>"
+    rf"effective(?:\s+as\s+of)?|recorded|filed|commenced|commencement|"
+    rf"notarized|acknowledged|allonge(?:\s+dated)?)"
+    rf"\s*(?:on|as\s+of|:)?\s*(?P<date>{DATE_TOKEN})"
+)
+
 CLAIMED_ARREARS_RE = re.compile(
     rf"(?i)(?:as\s+of\s+({DATE_TOKEN})[,.]?\s+)?"
     rf"(?:(?:Defendant\s+)?owes?\s+(?:Plaintiff\s+)?(?:an\s+)?aggregate\s+of|"
@@ -686,10 +701,6 @@ UTILITY_SERVICE_ADDRESS_RE = re.compile(
     r"([0-9]{1,6}(?:-[0-9]{1,4})?\s+[A-Za-z0-9 .'-]{2,60}(?:,?\s*[A-Za-z .'-]{2,40}){0,3})"
 )
 
-# Note-like roles that may still pair with judgment for the damages decline interrupt.
-_NOTE_LIKE_PRINCIPAL_ROLES = frozenset({"note", "assignment"})
-
-
 def _near_window(body: str, start: int, end: int, before: int = 220, after: int = 100) -> str:
     return body[max(0, start - before) : min(len(body), end + after)]
 
@@ -703,6 +714,12 @@ def _infer_principal_role(body: str, match: re.Match[str], *, default: str = "no
     before = body[max(0, match.start() - 160) : match.start()].lower()
     quote = match.group(0).lower()
     blob = f"{before} {quote}"
+    if re.search(
+        r"(?:principal\s+amount\s+of\s+the\s+note\s+or|up\s+to|not\s+to\s+exceed|"
+        r"maximum\s+principal(?:\s+amount)?)\s*\$?\s*[\d,]+",
+        blob,
+    ):
+        return "cap"
     # Leading instrument adjective attached to this principal line wins first.
     lead = re.search(
         r"(?i)\b(prior|first|original|existing|gap|second|new|additional|"
@@ -738,6 +755,69 @@ def _infer_principal_role(body: str, match: re.Match[str], *, default: str = "no
     if re.search(r"\bassignment\s+of\s+(?:the\s+)?(?:mortgage|note)\b|\bassigned\s+principal\b", blob):
         return "assignment"
     return default
+
+
+def _infer_instrument_scope(body: str, start: int, end: int, *, default: str) -> str:
+    """Best-effort instrument identity; never merge an expressly different lien."""
+    window_start = max(0, start - 180)
+    blob = body[window_start : min(len(body), end + 60)].lower()
+    scoped: list[tuple[int, str]] = []
+    for scope_match in re.finditer(
+        r"\b(gap|prior|first|original|existing|second|new|additional|"
+        r"consolidated|consolidation|cema)\s+(?:mortgage|note)\b",
+        blob,
+    ):
+        token = scope_match.group(1)
+        scope = (
+            "prior"
+            if token in {"prior", "first", "original", "existing"}
+            else "second"
+            if token in {"second", "new", "additional"}
+            else "consolidated"
+            if token in {"consolidated", "consolidation", "cema"}
+            else "gap"
+        )
+        global_pos = window_start + scope_match.start()
+        scoped.append((abs(global_pos - start), scope))
+    if scoped:
+        return min(scoped)[1]
+    if re.search(r"\bcema\b|\bconsolidat", blob):
+        return "consolidated"
+    if re.search(r"\ballonge\b", blob):
+        return "allonge"
+    if re.search(r"\bassignment\b", blob):
+        positions = [
+            window_start + m.start()
+            for m in re.finditer(r"\bassignment\b", blob)
+        ]
+        nearest = min(positions, key=lambda pos: abs(pos - start))
+        return f"asg@{nearest}"
+    if re.search(r"\bmortgage\b", blob) and not re.search(r"\bnote\b", blob):
+        return "mortgage"
+    if re.search(r"\bnote\b|\bpromissory\b", blob):
+        return "note"
+    return default
+
+
+def _legal_date_role(body: str, match: re.Match[str]) -> tuple[str, str]:
+    label = str(match.group("label") or "").lower()
+    blob = body[max(0, match.start() - 180) : match.end()].lower()
+    scope = _infer_instrument_scope(body, match.start(), match.end(), default="case")
+    if "commenc" in label or re.search(r"\baction\s+(?:was\s+)?commenced\b", blob):
+        return "commencement", "case"
+    if "record" in label or label == "filed":
+        return "recording" if "record" in label else "filed", scope
+    if "notar" in label or "acknowledg" in label:
+        return "notarization", scope
+    if "allonge" in label or "allonge" in blob:
+        return "allonge", "allonge"
+    if "assignment" in blob:
+        return ("assignment_effective" if "effective" in label else "assignment_execution"), scope
+    if "mortgage" in blob:
+        return "mortgage", scope
+    if "note" in blob:
+        return "origination", scope
+    return label.replace(" ", "_"), scope
 
 
 def _infer_instrument_date_scope(
@@ -788,11 +868,17 @@ def extract_grounded_facts(
     if not body.strip():
         return []
     facts: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str]] = set()
+    seen: set[tuple[str, str, str, str]] = set()
 
     def _add(rec: dict[str, Any]) -> bool:
         entity = _entity_key(rec)
-        token = (rec["key"], entity, str(rec.get("value")))
+        qualifier = str(
+            rec.get("date_role")
+            or rec.get("rate_purpose")
+            or rec.get("principal_role")
+            or ""
+        )
+        token = (rec["key"], entity, qualifier, str(rec.get("value")))
         if token in seen:
             return False
         seen.add(token)
@@ -1371,6 +1457,9 @@ def extract_grounded_facts(
             match.group(0)[:220],
             extra={
                 "principal_role": role,
+                "instrument_scope": _infer_instrument_scope(
+                    body, match.start(), match.end(), default=role
+                ),
                 "arrears_context": arrears,
             },
         )
@@ -1878,7 +1967,7 @@ def extract_grounded_facts(
         if _add(rec):
             return _done()
 
-    # --- stated interest rate note vs sought ---
+    # --- stated interest rates, scoped by instrument and purpose ---
     for match in CONTRACT_RATE_RE.finditer(body):
         raw = match.group(1) or match.group(2)
         try:
@@ -1896,7 +1985,13 @@ def extract_grounded_facts(
             rate,
             f"{rate}%",
             match.group(0)[:220],
-            extra={"rate_role": "note"},
+            extra={
+                "rate_role": "note",
+                "rate_purpose": "note",
+                "instrument_scope": _infer_instrument_scope(
+                    body, match.start(), match.end(), default="note"
+                ),
+            },
         )
         if _add(rec):
             return _done()
@@ -1919,7 +2014,37 @@ def extract_grounded_facts(
             rate,
             f"{rate}%",
             match.group(0)[:220],
-            extra={"rate_role": "sought"},
+            extra={
+                "rate_role": "sought",
+                "rate_purpose": "sought",
+                "instrument_scope": _infer_instrument_scope(
+                    body, match.start(), match.end(), default="case"
+                ),
+            },
+        )
+        if _add(rec):
+            return _done()
+
+    for match in PURPOSE_RATE_RE.finditer(body):
+        try:
+            rate = float(match.group("rate"))
+        except (TypeError, ValueError):
+            continue
+        if rate < 0.5 or rate > 40:
+            continue
+        purpose = "late" if "late" in str(match.group("purpose") or match.group("purpose2") or "").lower() else "default"
+        rec = _graph_record(
+            "stated_interest_rate",
+            rate,
+            f"{rate}%",
+            match.group(0)[:220],
+            extra={
+                "rate_role": purpose,
+                "rate_purpose": purpose,
+                "instrument_scope": _infer_instrument_scope(
+                    body, match.start(), match.end(), default="note"
+                ),
+            },
         )
         if _add(rec):
             return _done()
@@ -2086,6 +2211,38 @@ def extract_grounded_facts(
                 "day": parsed.get("day"),
                 "instrument_event": instrument_event,
                 "instrument_scope": instrument_scope,
+                "date_role": "assignment_execution"
+                if instrument_event == "assignment"
+                else ("origination" if instrument_event == "note" else "mortgage"),
+                "timeline_context": True,
+            },
+        )
+        if _add(rec):
+            return _done()
+
+    # Legal timeline dates are context by default. They conflict only within the
+    # same role and instrument; standing is evaluated separately at case level.
+    for match in LEGAL_INSTRUMENT_DATE_RE.finditer(body):
+        parsed = _date(match.group("date"))
+        if not parsed:
+            continue
+        date_role, instrument_scope = _legal_date_role(body, match)
+        rec = _graph_record(
+            "mortgage_origination",
+            str(parsed["value"])[:10],
+            parsed.get("display") or parsed["value"],
+            match.group(0)[:220],
+            extra={
+                "month_key": parsed.get("month_key"),
+                "year": parsed.get("year"),
+                "month": parsed.get("month"),
+                "day": parsed.get("day"),
+                "instrument_event": "assignment"
+                if date_role.startswith("assignment_")
+                else date_role,
+                "instrument_scope": instrument_scope,
+                "date_role": date_role,
+                "timeline_context": True,
             },
         )
         if _add(rec):
@@ -2312,7 +2469,9 @@ def cluster_key(fact: dict[str, Any]) -> str:
     if key == "loan_payment_date":
         return "loan_payment_date::loan"
     if key == "stated_interest_rate":
-        return "stated_interest_rate::loan"
+        scope = str(fact.get("instrument_scope") or "loan")
+        purpose = str(fact.get("rate_purpose") or fact.get("rate_role") or "note")
+        return f"stated_interest_rate::{scope}|{purpose}"
     if key == "execution_venue":
         # Per-affidavit / per-document — NY vs Bronx across different affidavits is normal.
         doc = str(fact.get("document_id") or "")
@@ -2323,7 +2482,7 @@ def cluster_key(fact: dict[str, Any]) -> str:
         person = _norm_name(str(fact.get("person") or "")) or "_"
         return f"{key}::{person}"
     if key == "mortgage_origination":
-        event = str(fact.get("instrument_event") or "mortgage")
+        event = str(fact.get("date_role") or fact.get("instrument_event") or "mortgage")
         scope = str(fact.get("instrument_scope") or "loan")
         return f"mortgage_origination::{event}|{scope}"
     if key == "claimed_arrears":
@@ -2335,7 +2494,8 @@ def cluster_key(fact: dict[str, Any]) -> str:
         return f"{key}::{person}"
     if key == "stated_principal":
         role = str(fact.get("principal_role") or "note")
-        return f"stated_principal::{role}"
+        scope = str(fact.get("instrument_scope") or role)
+        return f"stated_principal::{role}|{scope}"
     if key == "sale_grantee":
         return "sale_grantee::sale"
     if entity and entity != "_":
@@ -2353,9 +2513,10 @@ def _entity_key(fact: dict[str, Any]) -> str:
             return person
         return f"_|{on_date}" if on_date else "_"
     if fact.get("key") == "stated_principal":
-        return str(fact.get("principal_role") or "note")
+        role = str(fact.get("principal_role") or "note")
+        return f"{role}|{fact.get('instrument_scope') or role}"
     if fact.get("key") == "mortgage_origination":
-        event = str(fact.get("instrument_event") or "mortgage")
+        event = str(fact.get("date_role") or fact.get("instrument_event") or "mortgage")
         scope = str(fact.get("instrument_scope") or "loan")
         return f"{event}|{scope}"
     if fact.get("key") == "execution_venue":
@@ -2406,7 +2567,12 @@ def entity_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:
     if left.get("key") == "loan_payment_date" and right.get("key") == "loan_payment_date":
         return True
     if left.get("key") == "stated_interest_rate" and right.get("key") == "stated_interest_rate":
-        return True
+        return (
+            str(left.get("instrument_scope") or "loan")
+            == str(right.get("instrument_scope") or "loan")
+            and str(left.get("rate_purpose") or left.get("rate_role") or "note")
+            == str(right.get("rate_purpose") or right.get("rate_role") or "note")
+        )
     if left.get("key") == "execution_venue" and right.get("key") == "execution_venue":
         # Only the same affidavit/document can state two incompatible venues.
         doc_a = str(left.get("document_id") or "")
@@ -2445,16 +2611,16 @@ def entity_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:
     if left.get("key") == "stated_principal" and right.get("key") == "stated_principal":
         ra = str(left.get("principal_role") or "note")
         rb = str(right.get("principal_role") or "note")
+        if "cap" in {ra, rb}:
+            return False
         if ra == rb:
-            return True
-        # Damages carve-out: note/assignment principal vs judgment principal decline.
-        roles = {ra, rb}
-        if "judgment" in roles and (roles - {"judgment"}) <= _NOTE_LIKE_PRINCIPAL_ROLES:
-            return True
+            return str(left.get("instrument_scope") or ra) == str(
+                right.get("instrument_scope") or rb
+            )
         return False
     if left.get("key") == "mortgage_origination" and right.get("key") == "mortgage_origination":
-        ea = str(left.get("instrument_event") or "mortgage")
-        eb = str(right.get("instrument_event") or "mortgage")
+        ea = str(left.get("date_role") or left.get("instrument_event") or "mortgage")
+        eb = str(right.get("date_role") or right.get("instrument_event") or "mortgage")
         sa = str(left.get("instrument_scope") or "loan")
         sb = str(right.get("instrument_scope") or "loan")
         return ea == eb and sa == sb
@@ -2480,6 +2646,8 @@ def entity_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:
 
 def same_nameable_fact(left: dict[str, Any], right: dict[str, Any]) -> bool:
     """Same attribute (or hire-vs-W2 cross-attribute) for a compatible entity."""
+    if _fact_is_low_confidence(left) or _fact_is_low_confidence(right):
+        return False
     keys = {left.get("key"), right.get("key")}
     if left.get("key") == right.get("key"):
         return entity_compatible(left, right)
@@ -2797,19 +2965,21 @@ def _payment_dates_compatible(left: dict[str, Any], right: dict[str, Any]) -> bo
 
 
 def _rate_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:
-    """False when note/contract rate differs from sought/judgment rate."""
+    """Only the same instrument and same rate purpose can conflict."""
     try:
         a = float(left.get("value"))
         b = float(right.get("value"))
     except (TypeError, ValueError):
         return True
-    role_a = str(left.get("rate_role") or "")
-    role_b = str(right.get("rate_role") or "")
-    if role_a == role_b:
-        return abs(a - b) <= 0.05
-    if {role_a, role_b} == {"note", "sought"}:
-        return abs(a - b) <= float((GRAPH_ATTRIBUTES.get("stated_interest_rate") or {}).get("abs") or 0.10)
-    return True
+    scope_a = str(left.get("instrument_scope") or "loan")
+    scope_b = str(right.get("instrument_scope") or "loan")
+    purpose_a = str(left.get("rate_purpose") or left.get("rate_role") or "note")
+    purpose_b = str(right.get("rate_purpose") or right.get("rate_role") or "note")
+    if scope_a != scope_b or purpose_a != purpose_b:
+        return True
+    return abs(a - b) <= float(
+        (GRAPH_ATTRIBUTES.get("stated_interest_rate") or {}).get("abs") or 0.10
+    )
 
 
 def _venue_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:
@@ -2817,11 +2987,7 @@ def _venue_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:
 
 
 def _principal_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:
-    """False when judgment principal is materially lower than note principal with arrears and no payments.
-
-    Different principal_role values are different instruments / CEMA components — compatible
-    unless the note-like vs judgment damages carve-out applies.
-    """
+    """Compare only principal statements for the same instrument and role."""
     try:
         a = float(left.get("value"))
         b = float(right.get("value"))
@@ -2829,28 +2995,47 @@ def _principal_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:
         return True
     role_a = str(left.get("principal_role") or "note")
     role_b = str(right.get("principal_role") or "note")
+    if "cap" in {role_a, role_b}:
+        return True
     if role_a == role_b:
         # Same role / same principal fact — ordinary money compare with thresholds
         delta = abs(a - b)
         baseline = max(a, b, 1.0)
         meta = GRAPH_ATTRIBUTES.get("stated_principal") or {}
         return not (delta > float(meta.get("abs") or 1000) or (delta / baseline) > float(meta.get("pct") or 0.005))
-    roles = {role_a, role_b}
-    # note/assignment vs judgment: only interrupt on a *decline* into judgment with arrears
-    if "judgment" not in roles or (roles - {"judgment"}) - _NOTE_LIKE_PRINCIPAL_ROLES:
-        return True
-    note_v = a if role_a in _NOTE_LIKE_PRINCIPAL_ROLES else b
-    judg_v = b if role_a in _NOTE_LIKE_PRINCIPAL_ROLES else a
-    if judg_v >= note_v:
-        return True  # increase / same is ordinary loan movement — suppress
-    delta = note_v - judg_v
-    baseline = max(note_v, 1.0)
-    meta = GRAPH_ATTRIBUTES.get("stated_principal") or {}
-    material = delta > float(meta.get("abs") or 1000) or (delta / baseline) > float(meta.get("pct") or 0.005)
-    arrears = bool(left.get("arrears_context") or right.get("arrears_context"))
-    if material and arrears:
-        return False
+    # Different roles represent different instruments/status points. Components
+    # are checked as an equation against consolidated principal by case_consistency.
     return True
+
+
+def _fact_is_low_confidence(fact: dict[str, Any]) -> bool:
+    """Reject placeholder/OCR-garbage values before they enter conflict clusters."""
+    if fact.get("low_confidence") or fact.get("confidence") == "low":
+        return True
+    raw = " ".join(
+        str(fact.get(field) or "") for field in ("value", "display", "quote")
+    ).strip()
+    if not raw:
+        return True
+    low = raw.lower()
+    if re.search(r"\b(?:d[_\W]*l[_\W]*_|mm[/_-]dd[/_-]yyyy|xx[/_-]xx[/_-]xxxx|tbd|unknown)\b", low):
+        return True
+    # OCR tokens with several underscores/replacement glyphs or no usable
+    # alphanumeric run are not evidence, even when a permissive parser accepts them.
+    if raw.count("_") >= 2 or raw.count("�") >= 1:
+        return True
+    value = str(fact.get("value") or "")
+    if re.fullmatch(r"[\W_]+", value):
+        return True
+    if fact.get("kind") == "date" and not re.fullmatch(
+        r"\d{4}(?:-\d{2}(?:-\d{2})?)?", value[:10]
+    ):
+        return True
+    return False
+
+
+def fact_conflict_eligible(fact: dict[str, Any]) -> bool:
+    return not _fact_is_low_confidence(fact)
 
 
 def _parse_money(raw: str | None) -> float | None:

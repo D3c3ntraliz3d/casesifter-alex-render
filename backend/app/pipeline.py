@@ -31,7 +31,14 @@ from app.engines.statement_dates import find_statement_date_conflicts
 from app.engines.template_fabrication import find_template_leftovers, review_print_scan_ela
 from app.finding_policy import triage_findings
 from app.impact_judge import apply_case_impact_judge
-from app.report import executive_summary, pick_top_findings, recommended_actions, render_html, render_pdf, score_risk
+from app.report import (
+    executive_summary,
+    pick_top_findings,
+    recommended_actions,
+    render_html,
+    render_pdf,
+    score_risk_details,
+)
 from app.scan_profile import (
     PROFILE_COURT_FILING,
     finalize_scan_profile,
@@ -355,8 +362,13 @@ def run_gemini_stage(
         source_file=_source_for_contextual(source, profile),
         scan_profile=profile,
     )
-
-    update_job(job_id, stage="generating_report", percent=94, message="Compiling the authenticity report…")
+    # Heartbeat only after a real sub-step completes (no timer ticker).
+    update_job(
+        job_id,
+        stage="generating_report",
+        percent=90,
+        message="Contextual review complete — extracting facts…",
+    )
 
     modules = [metadata, pdf, structural, images, ocr, contextual]
     findings: list[Finding] = []
@@ -378,6 +390,12 @@ def run_gemini_stage(
         ai_usage_out=ai_fact_usage,
         document_label=display_name or source.name,
         enable_ai=True,
+    )
+    update_job(
+        job_id,
+        stage="generating_report",
+        percent=94,
+        message="Fact extract complete — compiling the authenticity report…",
     )
     # Prefer union: keep local-only keys that AI missed.
     seen = {
@@ -529,6 +547,12 @@ def run_gemini_stage(
 
     findings = triage_findings(findings, profile)
     findings, impact_log = apply_case_impact_judge(findings)
+    update_job(
+        job_id,
+        stage="generating_report",
+        percent=96,
+        message="Triage complete — writing report…",
+    )
     if isinstance(contextual.extras.get("case_consistency"), dict):
         contextual.extras["case_consistency"]["case_impact"] = impact_log
 
@@ -544,6 +568,8 @@ def run_gemini_stage(
         fonts = [FontUsage.model_validate(item) for item in fonts]
     structural.extras.pop("dimension_models", None)
 
+    from app.case_consistency import timeline_context_from_facts
+
     comparison: dict[str, Any] = {
         "fonts": ocr.extras.get("fonts") or [],
         "page_dimensions": structural.extras.get("page_dimensions") or [],
@@ -554,6 +580,7 @@ def run_gemini_stage(
         "case_consistency": (contextual.extras or {}).get("case_consistency"),
         "gotcha_log": ((contextual.extras or {}).get("case_consistency") or {}).get("gotcha_log"),
         "facts": facts,
+        "timeline_context": timeline_context_from_facts(facts),
         "fact_matrix": fact_matrix,
         "scan_profile": profile,
         "doc_kind": doc_kind,
@@ -566,7 +593,8 @@ def run_gemini_stage(
         "text_excerpt": (full_text or "")[:24000],
     }
 
-    risk_level, risk_score = score_risk(findings)
+    risk_level, risk_score, score_drivers = score_risk_details(findings)
+    comparison["score_drivers"] = score_drivers
     top = pick_top_findings(findings)
     audit = AuditTrail(
         scanned_at=datetime.now(timezone.utc),
@@ -601,6 +629,12 @@ def run_gemini_stage(
 
     html = render_html(report)
     (job_dir(job_id) / "report.html").write_text(html, encoding="utf-8")
+    update_job(
+        job_id,
+        stage="generating_report",
+        percent=98,
+        message="Report HTML written…",
+    )
     try:
         render_pdf(report)
     except Exception:

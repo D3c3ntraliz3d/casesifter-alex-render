@@ -20,7 +20,12 @@ from typing import Any
 
 from app.engines import finding
 from app.fact_extract import FACT_META, GOTCHA_KEYS, extract_facts
-from app.fact_graph import cluster_key, facts_compatible, same_nameable_fact
+from app.fact_graph import (
+    cluster_key,
+    fact_conflict_eligible,
+    facts_compatible,
+    same_nameable_fact,
+)
 from app.models import Finding
 from app.scan_profile import COURT_FILING_KINDS
 
@@ -445,7 +450,8 @@ def _internal_fact_conflicts(doc_name: str, facts: list[dict[str, Any]]) -> list
     candidates = [
         fact
         for fact in facts
-        if fact.get("key") in GOTCHA_KEYS or fact.get("graph")
+        if (fact.get("key") in GOTCHA_KEYS or fact.get("graph"))
+        and fact_conflict_eligible(fact)
     ]
     out: list[Finding] = []
     seen_pairs: set[tuple[str, str]] = set()
@@ -521,7 +527,80 @@ def _internal_fact_conflicts(doc_name: str, facts: list[dict[str, Any]]) -> list
             if isinstance(finding_obj.evidence, dict):
                 finding_obj.evidence.update(evidence_extra)
             out.append(finding_obj)
+    rollup = _principal_rollup(facts)
+    if rollup and not rollup["compatible"]:
+        finding_obj = _case_finding(
+            prior_id=None,
+            prior_name=doc_name,
+            field="stated_principal",
+            new_value=rollup["component_display"],
+            prior_value=rollup["consolidated_display"],
+            title="High: CEMA component principals do not reconcile",
+            explanation=rollup["explanation"],
+            why=(
+                "The stated prior/gap/second principal components do not reconcile "
+                "to the stated consolidated principal."
+            ),
+            confidence=88,
+            severity="high",
+            material=True,
+            recommended_action="Reconcile the component and consolidated principal figures.",
+        )
+        if isinstance(finding_obj.evidence, dict):
+            finding_obj.evidence.update(
+                {
+                    "analysis_type": "fact_conflict",
+                    "contradiction_type": "factual_contradiction",
+                    "documentary": True,
+                    "case_impact": True,
+                    "case_impact_bucket": "damages",
+                }
+            )
+        out.append(finding_obj)
     return out
+
+
+def _principal_rollup(facts: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Compare CEMA components as an equation, not pairwise contradictions."""
+    by_role: dict[str, list[float]] = {}
+    for fact in facts:
+        if fact.get("key") != "stated_principal" or not fact_conflict_eligible(fact):
+            continue
+        role = str(fact.get("principal_role") or "note")
+        if role == "cap":
+            continue
+        try:
+            value = float(fact.get("value"))
+        except (TypeError, ValueError):
+            continue
+        by_role.setdefault(role, [])
+        if value not in by_role[role]:
+            by_role[role].append(value)
+    components = [
+        values[0]
+        for role, values in by_role.items()
+        if role in {"prior", "gap", "second"} and len(values) == 1
+    ]
+    consolidated = by_role.get("consolidated") or []
+    if len(components) < 2 or len(consolidated) != 1:
+        return None
+    component_sum = sum(components)
+    target = consolidated[0]
+    delta = abs(component_sum - target)
+    tolerance = max(500.0, abs(target) * 0.01)
+    compatible = delta <= tolerance
+    return {
+        "compatible": compatible,
+        "component_sum": component_sum,
+        "consolidated": target,
+        "component_display": f"components total ${component_sum:,.2f}",
+        "consolidated_display": f"consolidated ${target:,.2f}",
+        "explanation": (
+            f"The component principals total ${component_sum:,.2f}, while the "
+            f"consolidated principal is ${target:,.2f} (difference ${delta:,.2f}; "
+            f"tolerance ${tolerance:,.2f})."
+        ),
+    }
 
 
 def _score_graph_or_meta(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any] | None:
@@ -636,17 +715,7 @@ def _score_pair(left: dict[str, Any], right: dict[str, Any], key: str) -> dict[s
             )
         if key == "stated_principal":
             roles = {str(left.get("principal_role") or "note"), str(right.get("principal_role") or "note")}
-            note_like = roles & {"note", "assignment"}
-            if "judgment" in roles and note_like and float(left["value"]) != float(right["value"]):
-                materiality = (
-                    "Judgment principal that is materially lower than the note/assignment "
-                    "principal while the packet asserts arrears / missed payments (no payment "
-                    "history) is a damages interrupt — not ordinary loan-status movement."
-                )
-                over = True
-                borderline = False
-                discrepancy = f"${delta:,.2f} principal decline ({pct:.1%})"
-            elif len(roles) > 1:
+            if len(roles) > 1 or "cap" in roles:
                 # Different instruments / CEMA components are not the same principal fact.
                 over = False
                 borderline = False
@@ -796,10 +865,11 @@ def _score_pair(left: dict[str, Any], right: dict[str, Any], key: str) -> dict[s
             if _fc(left, right):
                 return _row(left, right, key, label, "same rate", "Rates match.", False, False, confidence=40)
             discrepancy = f"{left.get('display')} vs {right.get('display')} ({delta:.3f} points)"
+            purpose = str(left.get("rate_purpose") or left.get("rate_role") or "note")
+            scope = str(left.get("instrument_scope") or "loan")
             materiality = (
-                "Note/contract interest rate cannot both be true with a different rate "
-                "sought in the motion/judgment — damages / credibility interrupt (not ordinary "
-                "default/penalty rate movement)."
+                f"The same {purpose} rate for the same {scope} instrument is stated "
+                "at two incompatible values — a damages / credibility interrupt."
             )
             row = _row(left, right, key, label, discrepancy, materiality, True, False, confidence=88)
             row["documentary"] = True
@@ -1238,6 +1308,8 @@ def aggregate_fact_conflicts(snapshots: list[dict[str, Any]]) -> list[dict[str, 
             key = str(fact.get("key") or "")
             if key not in GOTCHA_KEYS and not fact.get("graph"):
                 continue
+            if not fact_conflict_eligible(fact):
+                continue
             if excluded_money and fact.get("kind") == "money":
                 continue
             stamped = dict(fact)
@@ -1394,4 +1466,148 @@ def aggregate_fact_conflicts(snapshots: list[dict[str, Any]]) -> list[dict[str, 
             }
         )
 
+    # CEMA arithmetic is a relationship across intentionally separate principal
+    # clusters, so evaluate it once after ordinary same-fact clustering.
+    all_facts = [
+        fact
+        for snap in snapshots
+        for fact in (snap.get("facts") or [])
+        if fact_conflict_eligible(fact)
+    ]
+    rollup = _principal_rollup(all_facts)
+    if rollup and not rollup["compatible"]:
+        related = [
+            {
+                "document_id": snap.get("document_id"),
+                "display_name": snap.get("display_name")
+                or snap.get("original_filename")
+                or "document",
+            }
+            for snap in snapshots
+            if any(
+                f.get("key") == "stated_principal"
+                and str(f.get("principal_role") or "") in {"prior", "gap", "second", "consolidated"}
+                for f in (snap.get("facts") or [])
+            )
+        ]
+        out.append(
+            {
+                "id": "fact-principal-rollup",
+                "title": "CEMA component principals do not reconcile",
+                "gotcha_level": "Case fact conflict",
+                "contradiction_type": "factual_contradiction",
+                "verified": True,
+                "gotcha": False,
+                "analysis_type": "fact_conflict",
+                "field": "stated_principal",
+                "severity": "high",
+                "confidence": 88,
+                "attorney_why": rollup["explanation"],
+                "case_impact": True,
+                "case_impact_bucket": "damages",
+                "variants": [],
+                "related_documents": related,
+                "document_id": related[0]["document_id"] if related else None,
+                "display_name": related[0]["display_name"] if related else None,
+            }
+        )
+
+    standing = _standing_after_commencement(snapshots)
+    if standing:
+        out.append(standing)
     return out
+
+
+def timeline_context_from_facts(facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Neutral legal chronology for the report; these rows are not findings."""
+    rows = []
+    for fact in facts:
+        if not fact.get("timeline_context") or not fact_conflict_eligible(fact):
+            continue
+        rows.append(
+            {
+                "date": str(fact.get("value") or "")[:10],
+                "date_role": fact.get("date_role") or fact.get("instrument_event"),
+                "instrument_scope": fact.get("instrument_scope"),
+                "display": fact.get("display"),
+                "quote": fact.get("quote"),
+                "neutral": True,
+            }
+        )
+    return sorted(rows, key=lambda row: (row["date"], str(row["date_role"])))
+
+
+def _standing_after_commencement(
+    snapshots: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    executions: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    commencements: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for snap in snapshots:
+        for fact in snap.get("facts") or []:
+            if not fact_conflict_eligible(fact):
+                continue
+            role = str(fact.get("date_role") or "")
+            if role == "assignment_execution":
+                executions.append((snap, fact))
+            elif role == "commencement":
+                commencements.append((snap, fact))
+    if not executions or not commencements:
+        return None
+    # An assignment executed before commencement establishes no automated
+    # standing defect, regardless of an even earlier stated effective date.
+    bad: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]] = []
+    for es, execution in executions:
+        ed = str(execution.get("value") or "")[:10]
+        for cs, commencement in commencements:
+            cd = str(commencement.get("value") or "")[:10]
+            if len(ed) == 10 and len(cd) == 10 and ed > cd:
+                bad.append((es, execution, cs, commencement))
+    if not bad:
+        return None
+    es, execution, cs, commencement = sorted(
+        bad, key=lambda item: str(item[1].get("value") or "")
+    )[0]
+    related = []
+    for snap in (es, cs):
+        doc = {
+            "document_id": snap.get("document_id"),
+            "display_name": snap.get("display_name")
+            or snap.get("original_filename")
+            or "document",
+        }
+        if doc not in related:
+            related.append(doc)
+    return {
+        "id": "fact-standing-post-commencement-assignment",
+        "title": "Assignment executed after case commencement",
+        "gotcha_level": "Case fact conflict",
+        "contradiction_type": "procedural/foundational",
+        "verified": True,
+        "gotcha": False,
+        "analysis_type": "standing_timeline",
+        "field": "standing",
+        "severity": "high",
+        "confidence": 92,
+        "attorney_why": (
+            f"The assignment was executed on {execution.get('display')} after the "
+            f"action commenced on {commencement.get('display')}. Confirm standing "
+            "and the chain evidence at commencement."
+        ),
+        "case_impact": True,
+        "case_impact_bucket": "element",
+        "variants": [
+            {
+                "display": execution.get("display"),
+                "quote": execution.get("quote"),
+                "documents": [related[0]],
+            },
+            {
+                "display": commencement.get("display"),
+                "quote": commencement.get("quote"),
+                "documents": [related[-1]],
+            },
+        ],
+        "related_documents": related,
+        "document_id": related[0]["document_id"] if related else None,
+        "display_name": related[0]["display_name"] if related else None,
+    }

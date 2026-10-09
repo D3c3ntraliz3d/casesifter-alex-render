@@ -1,5 +1,11 @@
 from app.report.generator import render_html, render_pdf
-from app.report.scoring import executive_summary, pick_top_findings, recommended_actions, score_risk
+from app.report.scoring import (
+    executive_summary,
+    pick_top_findings,
+    recommended_actions,
+    score_risk,
+    score_risk_details,
+)
 
 __all__ = [
     "render_html",
@@ -8,4 +14,5 @@ __all__ = [
     "pick_top_findings",
     "recommended_actions",
     "score_risk",
+    "score_risk_details",
 ]

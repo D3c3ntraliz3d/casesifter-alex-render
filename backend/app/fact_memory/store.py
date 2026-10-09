@@ -283,6 +283,30 @@ class FactMemoryStore:
             fernet = self._fernet(s, firm_id)
             return self._document_dict(doc, fernet)
 
+    def update_document_labels(
+        self,
+        firm_id: str,
+        document_id: str,
+        *,
+        display_name: str | None = None,
+        doc_type: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        with self.session() as s:
+            doc = s.execute(
+                select(Document).where(Document.id == document_id, Document.firm_id == firm_id)
+            ).scalar_one_or_none()
+            if not doc:
+                return None
+            fernet = self._fernet(s, firm_id)
+            if display_name is not None:
+                doc.display_name_enc = enc.encrypt_text(fernet, display_name)
+            if doc_type is not None:
+                doc.doc_type = doc_type or None
+            self._audit(s, firm_id, user_id, "document.retitle", document_id)
+            s.commit()
+            return self._document_dict(doc, fernet)
+
     def delete_document(self, firm_id: str, document_id: str, *, user_id: str | None = None) -> bool:
         """Hard delete document + cascade facts; mark findings that referenced it stale."""
         with self.session() as s:
@@ -946,11 +970,20 @@ class FactMemoryStore:
         message: str | None = None,
         error: str | None = None,
         sha256: str | None = None,
+        attempts: int | None = None,
     ) -> dict[str, Any] | None:
+        terminal = frozenset({"complete", "failed", "interrupted"})
         with self.session() as s:
             row = s.get(AnalysisJob, job_id)
             if row is None:
                 return None
+            if (
+                status is not None
+                and row.status in terminal
+                and status != row.status
+            ):
+                # Sticky terminal — refuse overwrite (A3).
+                return self._analysis_job_dict(row)
             if status is not None:
                 row.status = status
             if document_id is not None:
@@ -961,9 +994,83 @@ class FactMemoryStore:
                 row.error = error
             if sha256:
                 row.sha256 = sha256.lower()
+            if attempts is not None:
+                row.attempts = int(attempts)
             row.updated_at = _utcnow()
             s.commit()
             return self._analysis_job_dict(row)
+
+    def find_active_analysis_job(
+        self,
+        *,
+        firm_id: str,
+        matter_id: str,
+        sha256: str,
+    ) -> dict[str, Any] | None:
+        """Return queued/running/local_done job for matter+sha if any (server dedupe)."""
+        digest = (sha256 or "").lower().strip()
+        if not digest or not matter_id:
+            return None
+        active = ("queued", "running", "local_done")
+        with self.session() as s:
+            row = (
+                s.execute(
+                    select(AnalysisJob)
+                    .where(AnalysisJob.firm_id == firm_id)
+                    .where(AnalysisJob.matter_id == matter_id)
+                    .where(AnalysisJob.sha256 == digest)
+                    .where(AnalysisJob.status.in_(active))
+                    .order_by(AnalysisJob.created_at.desc())
+                )
+                .scalars()
+                .first()
+            )
+            return self._analysis_job_dict(row) if row else None
+
+    def list_retryable_failed_jobs(
+        self,
+        *,
+        firm_id: str,
+        matter_id: str,
+        max_attempts: int = 3,
+    ) -> list[dict[str, Any]]:
+        """Failed/interrupted jobs eligible for auto-retry (queue-age/stall/timeout/interrupted)."""
+        with self.session() as s:
+            rows = (
+                s.execute(
+                    select(AnalysisJob)
+                    .where(AnalysisJob.firm_id == firm_id)
+                    .where(AnalysisJob.matter_id == matter_id)
+                    .where(AnalysisJob.status.in_(("failed", "interrupted")))
+                    .order_by(AnalysisJob.updated_at.desc())
+                )
+                .scalars()
+                .all()
+            )
+            out: list[dict[str, Any]] = []
+            seen_sha: set[str] = set()
+            for row in rows:
+                if int(row.attempts or 0) >= max_attempts:
+                    continue
+                sha = (row.sha256 or "").lower()
+                if not sha or sha in seen_sha:
+                    continue
+                err = f"{row.error or ''} {row.message or ''}".lower()
+                eligible = (
+                    row.status == "interrupted"
+                    or "queued for more than" in err
+                    or "scan slots were likely wedged" in err
+                    or "no progress for more than" in err
+                    or "timed out" in err
+                    or "stall" in err
+                    or "timeout" in err
+                    or "interrupted" in err
+                )
+                if not eligible:
+                    continue
+                seen_sha.add(sha)
+                out.append(self._analysis_job_dict(row))
+            return out
 
     def get_analysis_job(self, job_id: str) -> dict[str, Any] | None:
         with self.session() as s:

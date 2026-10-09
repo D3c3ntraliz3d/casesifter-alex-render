@@ -150,10 +150,11 @@ def execute_ephemeral_job(payload: dict[str, Any]) -> dict[str, Any]:
 def execute_gemini_stage(payload: dict[str, Any]) -> dict[str, Any]:
     """Run Gemini stage in the web process. Deletes source on every terminal path."""
     from app.ephemeral import delete_ephemeral_source, maybe_delete_after_terminal
+    from app.gemini_cancel import CancelledError, clear_cancel, set_current_job
     from app.pipeline import run_gemini_stage
     from app.product_events import emit_scan_failed
     from app.resource import rss_mb
-    from app.storage import load_progress, update_job
+    from app.storage import TERMINAL_STATUSES, load_progress, update_job
     from app.v1_analysis import _persist_pipeline_result, _update_durable_job
 
     job_id = str(payload["job_id"])
@@ -166,6 +167,7 @@ def execute_gemini_stage(payload: dict[str, Any]) -> dict[str, Any]:
     doc_kind = payload.get("doc_kind")
     peak_rss = payload.get("peak_rss_mb")
 
+    set_current_job(job_id)
     web_rss = rss_mb()
     logger.info(
         "gemini stage start job=%s web_rss_mb=%s peak_rss_mb=%s",
@@ -173,6 +175,17 @@ def execute_gemini_stage(payload: dict[str, Any]) -> dict[str, Any]:
         web_rss,
         peak_rss,
     )
+    # If already sticky-failed by stage waiter, exit without overwriting.
+    existing = load_progress(job_id)
+    if existing and existing.status in TERMINAL_STATUSES:
+        logger.info(
+            "gemini stage skip — already terminal job=%s status=%s",
+            job_id[:8],
+            existing.status,
+        )
+        set_current_job(None)
+        return {"job_id": job_id, "status": existing.status, "timing": None, "web_rss_mb": web_rss}
+
     _update_durable_job(job_id, status="running", message="Gemini review running.")
     update_job(
         job_id,
@@ -214,8 +227,6 @@ def execute_gemini_stage(payload: dict[str, Any]) -> dict[str, Any]:
                 terminal_status = "complete"
                 terminal_message = "Analysis complete."
             try:
-                timing_path = Path(payload["dest"]).parent / "timing.json"
-                # job_dir timing
                 from app.storage import job_dir
 
                 tpath = job_dir(job_id) / "timing.json"
@@ -223,6 +234,13 @@ def execute_gemini_stage(payload: dict[str, Any]) -> dict[str, Any]:
                     timing = json.loads(tpath.read_text(encoding="utf-8"))
             except Exception:
                 timing = None
+        except CancelledError as exc:
+            # Stage waiter already sticky-failed; do not fight it.
+            progress = load_progress(job_id)
+            terminal_status = (progress.status if progress else None) or "failed"
+            terminal_message = (progress.message if progress else None) or "Gemini stage cancelled."
+            terminal_error = (progress.error if progress else None) or str(exc)
+            logger.info("gemini stage cancelled job=%s", job_id[:8])
         except Exception as exc:
             emit_scan_failed(job_id=job_id, stage="failed", error_message=str(exc))
             update_job(
@@ -240,6 +258,8 @@ def execute_gemini_stage(payload: dict[str, Any]) -> dict[str, Any]:
             maybe_delete_after_terminal(job_id, retain_report=persist)
             delete_ephemeral_source(job_id)
     finally:
+        clear_cancel(job_id)
+        set_current_job(None)
         _update_durable_job(
             job_id,
             status=terminal_status,
