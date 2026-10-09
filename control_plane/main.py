@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
@@ -17,7 +18,8 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field
 
-DATA = Path(__file__).resolve().parent / "data"
+_DATA_ENV = (os.environ.get("CONTROL_DATA_DIR") or "").strip()
+DATA = Path(_DATA_ENV) if _DATA_ENV else (Path(__file__).resolve().parent / "data")
 DATA.mkdir(parents=True, exist_ok=True)
 STORE = DATA / "accounts.json"
 
@@ -32,6 +34,9 @@ INVITE_CODES = {
     for part in os.environ.get("CASESIFTER_INVITE_CODES", "").split(",")
     if part.strip()
 }
+# Fixed signing secret so control deploys do not invalidate browser sessions.
+SESSION_SECRET = (os.environ.get("SESSION_SECRET") or "").strip()
+SESSION_TTL_S = int(float(os.environ.get("SESSION_TTL_DAYS", "30") or 30) * 86400)
 
 # Free consumer mail — trial limit is per email address, not per domain.
 FREE_EMAIL_DOMAINS = {
@@ -117,6 +122,53 @@ def _save(data: dict[str, Any]) -> None:
     data.setdefault("trial_domains", {})
     data.setdefault("trial_emails", {})
     STORE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def _b64url_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _b64url_decode(text: str) -> bytes:
+    pad = "=" * (-len(text) % 4)
+    return base64.urlsafe_b64decode(text + pad)
+
+
+def _issue_session_token(email: str, data: dict[str, Any]) -> str:
+    """HMAC-signed token when SESSION_SECRET is set; else opaque store-backed token."""
+    email_l = email.lower().strip()
+    if SESSION_SECRET:
+        issued = int(time.time())
+        nonce = secrets.token_hex(8)
+        payload = f"{email_l}|{issued}|{nonce}".encode("utf-8")
+        sig = hmac.new(SESSION_SECRET.encode("utf-8"), payload, hashlib.sha256).digest()
+        return f"cs1.{_b64url_encode(payload)}.{_b64url_encode(sig)}"
+    token = secrets.token_urlsafe(32)
+    data["sessions"][token] = {"email": email_l, "created_at": time.time()}
+    return token
+
+
+def _verify_signed_session(token: str, data: dict[str, Any]) -> dict[str, Any] | None:
+    if not SESSION_SECRET or not token.startswith("cs1."):
+        return None
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        payload = _b64url_decode(parts[1])
+        sig = _b64url_decode(parts[2])
+    except Exception:
+        return None
+    expect = hmac.new(SESSION_SECRET.encode("utf-8"), payload, hashlib.sha256).digest()
+    if not hmac.compare_digest(sig, expect):
+        return None
+    try:
+        email, issued_s, _nonce = payload.decode("utf-8").split("|", 2)
+        issued = int(issued_s)
+    except Exception:
+        return None
+    if SESSION_TTL_S > 0 and (time.time() - issued) > SESSION_TTL_S:
+        return None
+    return data["users"].get(email.lower().strip())
 
 
 def _email_domain(email: str) -> str:
@@ -499,8 +551,7 @@ def signup(body: SignupBody):
         "cohort": cohort,
     }
     _ensure_user_identity(data["users"][email], cohort=cohort)
-    token = secrets.token_urlsafe(32)
-    data["sessions"][token] = {"email": email, "created_at": time.time()}
+    token = _issue_session_token(email, data)
     _save(data)
     return {"token": token, "entitlement": _entitlement_payload(data["users"][email])}
 
@@ -517,8 +568,7 @@ def login(body: LoginBody):
         raise HTTPException(401, "Invalid email or password.")
     _ensure_user_identity(user)
     data["users"][email] = user
-    token = secrets.token_urlsafe(32)
-    data["sessions"][token] = {"email": email, "created_at": time.time()}
+    token = _issue_session_token(email, data)
     _save(data)
     return {"token": token, "entitlement": _entitlement_payload(user)}
 
@@ -528,6 +578,9 @@ def _session_user(authorization: str | None) -> tuple[dict[str, Any], str, dict[
         raise HTTPException(401, "Bearer token required.")
     token = authorization[7:].strip()
     data = _load()
+    signed_user = _verify_signed_session(token, data)
+    if signed_user is not None:
+        return signed_user, token, data
     session = data["sessions"].get(token)
     if not session:
         raise HTTPException(401, "Invalid session.")

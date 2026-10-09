@@ -6,9 +6,11 @@ from datetime import date
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from app.fact_memory.store import get_store
+from app.recompute_jobs import get_recompute_job, start_recompute_job
 from app.v1_analysis import _require_analysis_auth, resolve_firm_context
 
 matters_router = APIRouter(prefix="/v1/matters", tags=["matters"])
@@ -195,20 +197,32 @@ def list_retryable_jobs(matter_id: str, auth: dict = Depends(_require_analysis_a
 
 @matters_router.post("/{matter_id}/recompute-facts")
 def recompute_matter_facts(matter_id: str, auth: dict = Depends(_require_analysis_auth)):
-    """Re-extract facts from stored text excerpts (no PDFs) with current B-rules."""
+    """Start async recompute from stored text excerpts. Returns 202 + job_id."""
     ctx = _ctx(auth)
     store = get_store()
-    try:
-        result = store.recompute_facts_from_excerpts(
-            ctx["firm_id"], matter_id, user_id=ctx.get("user_id")
-        )
-    except KeyError as exc:
-        raise HTTPException(404, "Matter not found.") from exc
-    except Exception as exc:
-        raise HTTPException(
-            500, f"Could not recompute case facts: {exc.__class__.__name__}: {exc}"
-        ) from exc
-    return result
+    if not store.get_matter(ctx["firm_id"], matter_id):
+        raise HTTPException(404, "Matter not found.")
+    row = start_recompute_job(
+        firm_id=ctx["firm_id"],
+        matter_id=matter_id,
+        user_id=ctx.get("user_id"),
+    )
+    return JSONResponse(status_code=202, content=row)
+
+
+@matters_router.get("/{matter_id}/recompute-facts/{job_id}")
+def get_recompute_matter_facts(
+    matter_id: str, job_id: str, auth: dict = Depends(_require_analysis_auth)
+):
+    """Poll async recompute job status (progress + before/after when complete)."""
+    ctx = _ctx(auth)
+    store = get_store()
+    if not store.get_matter(ctx["firm_id"], matter_id):
+        raise HTTPException(404, "Matter not found.")
+    row = get_recompute_job(job_id)
+    if not row or row.get("matter_id") != matter_id or row.get("firm_id") != ctx["firm_id"]:
+        raise HTTPException(404, "Recompute job not found.")
+    return row
 
 
 @matters_router.get("/{matter_id}/findings")

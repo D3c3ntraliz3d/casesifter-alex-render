@@ -11,7 +11,7 @@ import logging
 import threading
 import uuid
 from datetime import date, datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from cryptography.fernet import Fernet
 from sqlalchemy import select
@@ -470,7 +470,12 @@ class FactMemoryStore:
         return facts
 
     def recompute_facts_from_excerpts(
-        self, firm_id: str, matter_id: str, *, user_id: str | None = None
+        self,
+        firm_id: str,
+        matter_id: str,
+        *,
+        user_id: str | None = None,
+        progress: Callable[..., None] | None = None,
     ) -> dict[str, Any]:
         """Re-extract facts from stored text_excerpt (no PDFs) and refresh snapshots.
 
@@ -510,11 +515,24 @@ class FactMemoryStore:
                     Document.firm_id == firm_id, Document.matter_id == matter_id
                 )
             ).scalars().all()
-            for doc in docs:
+            total = len(docs)
+            if progress is not None:
+                progress(
+                    done=0, total=total, updated=0, skipped=0, phase="docs"
+                )
+            for idx, doc in enumerate(docs, start=1):
                 snap = enc.decrypt_json(fernet, doc.snapshot_enc) or {}
                 text = str(snap.get("text_excerpt") or "").strip()
                 if not text:
                     skipped += 1
+                    if progress is not None:
+                        progress(
+                            done=idx,
+                            total=total,
+                            updated=updated,
+                            skipped=skipped,
+                            phase="docs",
+                        )
                     continue
                 facts = extract_facts(text)
                 for fact in facts:
@@ -558,8 +576,24 @@ class FactMemoryStore:
                         )
                     )
                 updated += 1
+                if progress is not None:
+                    progress(
+                        done=idx,
+                        total=total,
+                        updated=updated,
+                        skipped=skipped,
+                        phase="docs",
+                    )
             # FindingRow has no document_id column — stale open fact_conflict rows
             # for the whole matter; the board rebuilds from aggregates.
+            if progress is not None:
+                progress(
+                    done=total,
+                    total=total,
+                    updated=updated,
+                    skipped=skipped,
+                    phase="aggregate",
+                )
             findings = s.execute(
                 select(FindingRow).where(
                     FindingRow.firm_id == firm_id,

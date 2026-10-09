@@ -1350,6 +1350,7 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
           }
           return;
         }
+        const pendingJobIds = [];
         for (const row of jobs) {
           const sha = String(row.sha256 || "").toLowerCase();
           if (!sha) continue;
@@ -1369,6 +1370,7 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
               matterId: caseData.id,
               submittedBy: "web-app-auto-retry",
             });
+            if (result?.job_id) pendingJobIds.push(result.job_id);
             if (result?.skipped === "already_active") skippedActive += 1;
             else created += 1;
           } catch (err) {
@@ -1388,12 +1390,72 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
         if (misses.length) parts.push(`${misses.length} not in cache`);
         if (parts.length) {
           setUploadNote(`Auto-retry: ${parts.join(" · ")}.`);
-          if (created) {
-            try {
-              await onRefresh();
-            } catch {
-              /* ignore */
-            }
+        }
+        if (pendingJobIds.length) {
+          try {
+            await onRefresh();
+          } catch {
+            /* ignore */
+          }
+          let complete = 0;
+          let failed = 0;
+          const open = new Set(pendingJobIds);
+          for (let tick = 0; tick < 900 && open.size && !cancelled; tick += 1) {
+            let running = 0;
+            let queued = 0;
+            let bestEta = null;
+            let bestPos = null;
+            await Promise.all(
+              [...open].map(async (jobId) => {
+                try {
+                  const progress = await getJob(jobId, { includeReport: false });
+                  const st = String(progress?.status || "");
+                  if (st === "complete") {
+                    open.delete(jobId);
+                    complete += 1;
+                    return;
+                  }
+                  if (st === "failed" || st === "interrupted" || progress?.interrupted) {
+                    open.delete(jobId);
+                    failed += 1;
+                    return;
+                  }
+                  if (st === "queued" || st === "pending") queued += 1;
+                  else running += 1;
+                  const eta = progress?.eta_seconds;
+                  const pos = progress?.queue_position;
+                  if (typeof eta === "number" && eta > 0) {
+                    bestEta = bestEta == null ? eta : Math.max(bestEta, eta);
+                  }
+                  if (typeof pos === "number" && pos > 0) {
+                    bestPos = bestPos == null ? pos : Math.max(bestPos, pos);
+                  }
+                } catch {
+                  /* keep polling */
+                }
+              })
+            );
+            if (cancelled) break;
+            const etaLabel =
+              typeof bestEta === "number" && bestEta > 0
+                ? bestEta >= 60
+                  ? ` · ETA ~${Math.round(bestEta / 60)} min`
+                  : ` · ETA ~${bestEta}s`
+                : typeof bestPos === "number" && bestPos > 0
+                  ? ` · queue #${bestPos}`
+                  : "";
+            setUploadNote(
+              `Auto-retry: ${complete} complete · ${running} running · ${queued} queued` +
+                (failed ? ` · ${failed} failed` : "") +
+                etaLabel
+            );
+            if (!open.size) break;
+            await new Promise((r) => setTimeout(r, 2000));
+          }
+          try {
+            await onRefresh();
+          } catch {
+            /* ignore */
           }
         }
       } catch {
@@ -2034,9 +2096,25 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
                 onClick={async () => {
                   setBusy(true);
                   setScanBacklogError("");
+                  setUploadNote("Refreshing case facts…");
                   try {
-                    const result = await recomputeMatterFacts(caseData.id);
-                    const dropped = (result.before || []).length - (result.after || []).length;
+                    const result = await recomputeMatterFacts(caseData.id, {
+                      onProgress: (row) => {
+                        if (!row) return;
+                        if (row.status === "complete" || row.status === "failed") return;
+                        const pct =
+                          typeof row.percent === "number" ? ` ${row.percent}%` : "";
+                        setUploadNote(
+                          `Refreshing case facts${pct}` +
+                            (row.message ? ` — ${row.message}` : "…")
+                        );
+                      },
+                    });
+                    if (result?.status === "failed") {
+                      throw new Error(result.message || result.error || "Recompute failed");
+                    }
+                    const dropped =
+                      (result.before || []).length - (result.after || []).length;
                     setUploadNote(
                       `Case facts recomputed from ${result.updated || 0} excerpt${
                         (result.updated || 0) === 1 ? "" : "s"
@@ -2044,7 +2122,8 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
                         (result.skipped_no_excerpt
                           ? ` (${result.skipped_no_excerpt} without text).`
                           : ".") +
-                        (dropped > 0 ? ` ${dropped} case-impact card(s) cleared.` : "")
+                        (dropped > 0 ? ` ${dropped} case-impact card(s) cleared.` : "") +
+                        ` Case-impact: ${(result.before || []).length} → ${(result.after || []).length}.`
                     );
                     await onRefresh();
                   } catch (err) {

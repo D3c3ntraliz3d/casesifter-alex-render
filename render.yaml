@@ -93,7 +93,19 @@ services:
       paths:
         - control_plane/**
         - render.yaml
+    # Persist accounts across deploys (sessions are HMAC-signed; users live on disk).
+    disk:
+      name: casesifter-control-data
+      mountPath: /var/data
+      sizeGB: 1
     envVars:
+      - key: CONTROL_DATA_DIR
+        value: /var/data
+      # Generated once by Render; survives deploys so signed sessions stay valid.
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: SESSION_TTL_DAYS
+        value: "30"
       # John sets these in Render Dashboard (or Blueprint sync:false secrets).
       - key: STRIPE_SECRET_KEY
         sync: false

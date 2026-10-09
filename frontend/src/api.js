@@ -1048,12 +1048,27 @@ export async function getMatterDocumentReport(matterId, documentId) {
   return readJson(res);
 }
 
-/** Re-extract facts from stored text excerpts (no PDFs) with current B-rules. */
-export async function recomputeMatterFacts(matterId) {
+/** Start async recompute; polls until complete. onProgress({status,percent,message,...}). */
+export async function recomputeMatterFacts(matterId, { onProgress } = {}) {
   const res = await analysisFetch(`/api/v1/matters/${matterId}/recompute-facts`, {
     method: "POST",
   });
-  return readJson(res);
+  const started = await readJson(res);
+  if (res.status !== 202 || !started?.job_id) {
+    return started;
+  }
+  const jobId = started.job_id;
+  if (typeof onProgress === "function") onProgress(started);
+  for (let i = 0; i < 900; i += 1) {
+    await sleep(1000);
+    const poll = await analysisFetch(
+      `/api/v1/matters/${matterId}/recompute-facts/${jobId}`
+    );
+    const row = await readJson(poll);
+    if (typeof onProgress === "function") onProgress(row);
+    if (row.status === "complete" || row.status === "failed") return row;
+  }
+  throw new Error("Recompute timed out waiting for server job.");
 }
 
 export async function exportMatter(matterId) {

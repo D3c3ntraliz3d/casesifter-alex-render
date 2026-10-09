@@ -84,6 +84,46 @@ def test_valid_session_checkout_dev_without_stripe(tmp_path, monkeypatch):
     assert body.get("entitlement", {}).get("share_anonymized_outcomes") is True
 
 
+def test_signed_session_survives_sessions_wipe(tmp_path, monkeypatch):
+    """SESSION_SECRET tokens remain valid even if accounts.json sessions are cleared."""
+    store = tmp_path / "accounts.json"
+    monkeypatch.setattr(mod, "STORE", store)
+    monkeypatch.setattr(mod, "DATA", tmp_path)
+    monkeypatch.setattr(mod, "SESSION_SECRET", "unit-test-session-secret")
+    monkeypatch.setattr(mod, "STRIPE_SECRET", "")
+    monkeypatch.setattr(mod, "STRIPE_PRICE_ID", "")
+
+    data = {
+        "users": {},
+        "sessions": {},
+        "trials": {},
+        "trial_domains": {},
+        "trial_emails": {},
+    }
+    data["users"]["signed@example.com"] = {
+        "email": "signed@example.com",
+        "name": "",
+        "salt": "x",
+        "password_hash": "y",
+        "created_at": 1,
+        "subscription": {},
+        "trial_until": 0,
+    }
+    mod._ensure_user_identity(data["users"]["signed@example.com"])
+    token = mod._issue_session_token("signed@example.com", data)
+    assert token.startswith("cs1.")
+    # Simulate deploy wipe of opaque sessions only.
+    data["sessions"] = {}
+    store.write_text(__import__("json").dumps(data), encoding="utf-8")
+
+    res = client.get(
+        "/v1/entitlement",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert res.status_code == 200, res.text
+    assert res.json().get("email") == "signed@example.com"
+
+
 def test_checkout_disables_managed_payments(tmp_path, monkeypatch):
     store = tmp_path / "accounts.json"
     monkeypatch.setattr(mod, "STORE", store)
