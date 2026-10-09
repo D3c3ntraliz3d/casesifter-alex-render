@@ -269,6 +269,7 @@ def extract_facts(
     *,
     ai_usage_out: dict[str, Any] | None = None,
     document_label: str | None = None,
+    enable_ai: bool = True,
 ) -> list[dict[str, Any]]:
     body = text or ""
     facts: list[dict[str, Any]] = []
@@ -292,6 +293,7 @@ def extract_facts(
                     limit=limit,
                     ai_usage_out=ai_usage_out,
                     document_label=document_label,
+                    enable_ai=enable_ai,
                 )
     except Exception:
         pass
@@ -340,6 +342,7 @@ def extract_facts(
                     limit=limit,
                     ai_usage_out=ai_usage_out,
                     document_label=document_label,
+                    enable_ai=enable_ai,
                 )
 
     for match in RATE_RE.finditer(body):
@@ -364,6 +367,7 @@ def extract_facts(
                     limit=limit,
                     ai_usage_out=ai_usage_out,
                     document_label=document_label,
+                    enable_ai=enable_ai,
                 )
 
     for key, pattern in DATE_PATTERNS:
@@ -386,6 +390,7 @@ def extract_facts(
                     limit=limit,
                     ai_usage_out=ai_usage_out,
                     document_label=document_label,
+                    enable_ai=enable_ai,
                 )
 
     return _finalize_facts(
@@ -395,6 +400,7 @@ def extract_facts(
                     limit=limit,
                     ai_usage_out=ai_usage_out,
                     document_label=document_label,
+                    enable_ai=enable_ai,
                 )
 
 
@@ -406,10 +412,16 @@ def _finalize_facts(
     limit: int = 40,
     ai_usage_out: dict[str, Any] | None = None,
     document_label: str | None = None,
+    enable_ai: bool = True,
 ) -> list[dict[str, Any]]:
     from app.page_anchors import enrich_fact_anchors
 
     anchored = enrich_fact_anchors(facts, text, page_offsets)
+    if not enable_ai:
+        if ai_usage_out is not None:
+            ai_usage_out.clear()
+            ai_usage_out.update({"skipped": "local_stage", "calls": 0, "total_tokens": 0, "step": "ai_fact_extract"})
+        return anchored
     # Additive Gemini pass (no-op without API key). Regex remains the baseline.
     try:
         from app.ai_fact_extract import extract_ai_facts

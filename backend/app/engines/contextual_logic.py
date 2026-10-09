@@ -31,6 +31,7 @@ import hashlib
 import json
 import re
 import threading
+import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -957,23 +958,57 @@ def analyze_document(
 def _run_document_analysis(
     text: str, source_file: Path | None, extras: dict[str, Any]
 ) -> tuple[list[Finding], str]:
-    """Encode the exhibit for native upload, then hand it to analyze_document.
+    """Read+base64 inside the call, hold under the inflight byte cap, release immediately.
 
     A format Gemini cannot read natively, or a file too large for an inline request,
     degrades to text-only analysis rather than failing the module.
     """
-    file_base64, mime_type, note = _encode_source_file(source_file)
-    if note:
-        extras["document_analysis_note"] = note
+    from app.gemini_inflight import acquire as acquire_inflight
+    from app.gemini_inflight import release as release_inflight
 
-    if file_base64 is None and not (text or "").strip():
-        return [], "no_content"
+    file_base64: str | None = None
+    mime_type: str | None = None
+    payload_bytes = 0
+    held = False
+    result: dict[str, Any] | None = None
     try:
-        result = analyze_document(text, file_base64, mime_type, extras)
-    except Exception as exc:
-        extras["document_analysis_error"] = str(exc)
-        return [_verification_unavailable(exc, stage="document analysis")], "error"
+        est = 0
+        if source_file is not None:
+            try:
+                est = int(source_file.stat().st_size * 1.37)  # ~base64 expansion
+            except OSError:
+                est = 0
+        if est:
+            if not acquire_inflight(est, timeout=600):
+                extras["document_analysis_note"] = "Gemini inflight byte cap busy; analyzed text only."
+            else:
+                held = True
+                payload_bytes = est
+                file_base64, mime_type, note = _encode_source_file(source_file)
+                if note:
+                    extras["document_analysis_note"] = note
+                if file_base64 is None:
+                    release_inflight(payload_bytes)
+                    held = False
+                    payload_bytes = 0
+        else:
+            file_base64, mime_type, note = _encode_source_file(source_file)
+            if note:
+                extras["document_analysis_note"] = note
 
+        if file_base64 is None and not (text or "").strip():
+            return [], "no_content"
+        try:
+            result = analyze_document(text, file_base64, mime_type, extras)
+        except Exception as exc:
+            extras["document_analysis_error"] = str(exc)
+            return [_verification_unavailable(exc, stage="document analysis")], "error"
+    finally:
+        file_base64 = None
+        if held:
+            release_inflight(payload_bytes)
+
+    assert result is not None
     extras["document_analysis_result"] = {
         "count": len(result["findings"]),
         "file_sent": result["file_sent"],
@@ -1016,26 +1051,45 @@ def _encode_source_file(source_file: Path | None) -> tuple[str | None, str | Non
 
 
 def _post_gemini(payload: dict[str, Any], timeout: int | None = None) -> dict[str, Any]:
+    from app.gemini_timing import GeminiTimer
+
     url = GEMINI_ENDPOINT.format(model=settings.gemini_model)
-    request = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "x-goog-api-key": settings.gemini_api_key or "",
-        },
-    )
-    try:
-        with urllib.request.urlopen(
-            request, timeout=timeout or settings.gemini_timeout_s
-        ) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:300]
-        raise RuntimeError(f"Gemini returned HTTP {exc.code}: {detail}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"Could not reach Gemini: {exc.reason}") from exc
+    body_bytes = json.dumps(payload).encode("utf-8")
+    max_attempts = 5
+    last_err: Exception | None = None
+    with GeminiTimer():
+        for attempt in range(max_attempts):
+            request = urllib.request.Request(
+                url,
+                data=body_bytes,
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    "x-goog-api-key": settings.gemini_api_key or "",
+                },
+            )
+            try:
+                with urllib.request.urlopen(
+                    request, timeout=timeout or settings.gemini_timeout_s
+                ) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="replace")[:300]
+                if exc.code == 429 and attempt + 1 < max_attempts:
+                    # Honor Retry-After when present; otherwise exponential backoff.
+                    retry_after = exc.headers.get("Retry-After") if exc.headers else None
+                    try:
+                        delay = float(retry_after) if retry_after else (1.5 * (2**attempt))
+                    except (TypeError, ValueError):
+                        delay = 1.5 * (2**attempt)
+                    delay = min(60.0, max(0.5, delay))
+                    time.sleep(delay)
+                    last_err = RuntimeError(f"Gemini returned HTTP 429: {detail}")
+                    continue
+                raise RuntimeError(f"Gemini returned HTTP {exc.code}: {detail}") from exc
+            except urllib.error.URLError as exc:
+                raise RuntimeError(f"Could not reach Gemini: {exc.reason}") from exc
+    raise last_err or RuntimeError("Gemini request failed after retries.")
 
 
 def _parse_json_payload(body: dict[str, Any]) -> dict[str, Any]:

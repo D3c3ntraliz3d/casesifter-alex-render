@@ -87,8 +87,12 @@ class Settings(BaseSettings):
     # Scan watchdog: fail + release slot when a running job goes silent or runs too long.
     scan_stall_seconds: int = 420  # 7 minutes with no progress update
     scan_max_seconds: int = 1080  # 18 minutes wall-clock once running
-    # Concurrent pipeline processes. Keep at 1 on 512 MB Render; raise via env later.
+    # Concurrent local PDF/OCR processes. Keep at 1 on small Render plans.
     scan_max_concurrent: int = 1
+    # Gemini stage (web process threads). Independent of local process slots.
+    gemini_max_concurrent: int = 4
+    # Cap total base64/PDF payload bytes in flight across Gemini calls (MB).
+    gemini_max_inflight_mb: int = 150
 
     # Gotcha logic verifier (Track B). Historical impossibilities stay on Gemini (Track C).
     # auto = Claude if ANTHROPIC_API_KEY set, else Gemini.

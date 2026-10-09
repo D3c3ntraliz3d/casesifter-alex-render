@@ -81,7 +81,7 @@ def _maybe_reap_job(job_id: str, now: datetime) -> bool:
     progress = load_progress(job_id)
     if progress is None:
         return False
-    if progress.status in {"complete", "failed"}:
+    if progress.status in {"complete", "failed", "interrupted"}:
         return False
 
     stall_s = max(60, int(settings.scan_stall_seconds))
@@ -109,6 +109,23 @@ def _maybe_reap_job(job_id: str, now: datetime) -> bool:
                 "(scan slots were likely wedged). Re-scan after the API recovers."
             ),
         )
+
+    # local_done waits for Gemini slots — silence is expected; wall-clock only.
+    if progress.status == "local_done":
+        if started is not None:
+            wall = (now - started).total_seconds()
+            if wall >= max_s:
+                return _fail_job(
+                    job_id,
+                    stage=stage,
+                    minutes_since_update=(now - updated).total_seconds() / 60.0 if updated else wall / 60.0,
+                    message="Scan timed out waiting for Gemini. Re-scan this file.",
+                    error=(
+                        f"Job stayed in local_done longer than {max_s // 60} minutes "
+                        f"(last stage: {stage}). Re-scan this file."
+                    ),
+                )
+        return False
 
     # Running: no-progress heartbeat
     if updated is not None:
@@ -171,5 +188,15 @@ def _fail_job(
         error=error,
     )
     force_release(job_id)
+    try:
+        from app.ephemeral import delete_ephemeral_source
+        from app.gemini_executor import clear_ahead
+        from app.v1_analysis import _update_durable_job
+
+        clear_ahead(job_id)
+        _update_durable_job(job_id, status="failed", message=message, error=error)
+        delete_ephemeral_source(job_id)
+    except Exception:
+        logger.exception("watchdog cleanup failed job=%s", job_id[:12])
     logger.warning("reaped stuck job %s stage=%s: %s", job_id[:12], stage, error)
     return True

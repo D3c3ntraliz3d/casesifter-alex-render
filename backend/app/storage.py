@@ -72,7 +72,7 @@ def update_job(
     if progress is None:
         raise FileNotFoundError(f"Unknown job {job_id}")
     if status is not None:
-        if status == "running" and progress.started_at is None:
+        if status in {"running", "local_done"} and progress.started_at is None:
             progress.started_at = utcnow()
         progress.status = status
     if stage is not None:
@@ -83,7 +83,7 @@ def update_job(
         progress.message = message
     if error is not None:
         progress.error = error
-    elif status in {"queued", "running"}:
+    elif status in {"queued", "running", "local_done"}:
         progress.error = None
     if report is not None:
         progress.report = report

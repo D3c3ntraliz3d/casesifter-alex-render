@@ -383,22 +383,30 @@ async def create_ephemeral_job(
         # Marker so sweeper retains report (facts live in DB; PDF still deleted).
         (dest_dir / "persist.flag").write_text(resolved_matter or "", encoding="utf-8")
 
-    # Child process — not a thread in the web worker (GIL / CPU was killing /health).
+    # Schedule off the request thread — backpressure may wait for Gemini slots.
     ensure_scan_executor()
-    submit_ephemeral_job(
-        {
-            "job_id": job_id,
-            "dest": str(dest),
-            "submitted_by": submitted_by,
-            "display_name": display_name,
-            "doc_kind": doc_kind,
-            "prior_snapshots": peers,
-            "matter_id": resolved_matter,
-            "firm_ctx": firm_ctx,
-            "filed_date": filed_date,
-            "persist": persist,
-        }
-    )
+    payload = {
+        "job_id": job_id,
+        "dest": str(dest),
+        "submitted_by": submitted_by,
+        "display_name": display_name,
+        "doc_kind": doc_kind,
+        "prior_snapshots": peers,
+        "matter_id": resolved_matter,
+        "firm_ctx": firm_ctx,
+        "filed_date": filed_date,
+        "persist": persist,
+    }
+
+    def _kick() -> None:
+        try:
+            submit_ephemeral_job(payload)
+        except Exception:
+            logger.exception("Failed to schedule analysis job %s", job_id)
+
+    import threading
+
+    threading.Thread(target=_kick, daemon=True, name=f"schedule-{job_id[:8]}").start()
     return UploadResponse(job_id=job_id, filename=safe_name, status="queued")
 
 
@@ -508,6 +516,35 @@ def get_ephemeral_job(
             payload["matter_id"] = persist_flag.read_text(encoding="utf-8").strip() or None
         except OSError:
             payload["matter_id"] = None
+    # Timing + queue ETA for the hosted bulk UI.
+    try:
+        timing_path = job_dir(job_id) / "timing.json"
+        if timing_path.is_file():
+            payload["timing"] = json.loads(timing_path.read_text(encoding="utf-8"))
+        else:
+            raw = json.loads((job_dir(job_id) / "progress.json").read_text(encoding="utf-8"))
+            if isinstance(raw.get("timing"), dict):
+                payload["timing"] = raw["timing"]
+    except Exception:
+        pass
+    if progress.status in {"queued", "running", "local_done"}:
+        try:
+            from app.fact_memory.store import get_store
+            from app.gemini_executor import estimate_eta_seconds
+
+            active = get_store().list_analysis_jobs_by_status(
+                ["queued", "running", "local_done"]
+            )
+            position = 1
+            for idx, row in enumerate(active, start=1):
+                if row.get("job_id") == job_id:
+                    position = idx
+                    break
+            payload["queue_position"] = position
+            payload["queued_ahead"] = max(0, position - 1)
+            payload["eta_seconds"] = estimate_eta_seconds(queue_position=position)
+        except Exception:
+            logger.debug("queue eta failed job=%s", job_id[:8], exc_info=True)
     if include_report and progress.status == "complete":
         report = load_report(job_id)
         payload["report"] = report.model_dump(mode="json") if report else None

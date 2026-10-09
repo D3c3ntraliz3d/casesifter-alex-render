@@ -17,7 +17,14 @@ Category = Literal[
 ]
 Severity = Literal["info", "low", "medium", "high", "critical"]
 RiskLevel = Literal["green", "yellow", "red"]
-JobStatus = Literal["queued", "running", "complete", "failed", "interrupted"]
+JobStatus = Literal[
+    "queued",
+    "running",
+    "local_done",
+    "complete",
+    "failed",
+    "interrupted",
+]
 
 
 class Finding(BaseModel):

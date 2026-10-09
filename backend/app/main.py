@@ -83,10 +83,20 @@ def _startup() -> None:
     ensure_watchdog()
     try:
         from app.scan_executor import ensure_scan_executor
+        from app.gemini_executor import ensure_gemini_executor
 
         ensure_scan_executor()
+        ensure_gemini_executor()
     except Exception as exc:
         logger.warning("Scan process pool init failed: %s", exc)
+    try:
+        from app.job_recovery import recover_local_done_jobs
+
+        recovered = recover_local_done_jobs()
+        if recovered.get("seen"):
+            logger.warning("local_done recovery: %s", recovered)
+    except Exception as exc:
+        logger.warning("local_done recovery failed: %s", exc)
     if not settings.gemini_api_key:
         logger.warning(
             "GEMINI_API_KEY is not set — exhibit multimodal / historical fraud review is OFF. "
@@ -105,10 +115,13 @@ def _startup() -> None:
             _mode,
         )
     logger.info(
-        "Fact memory: PERSIST_FACTS=%s SOURCE_FILE_RETENTION=%s SCAN_MAX_CONCURRENT=%s",
+        "Fact memory: PERSIST_FACTS=%s SOURCE_FILE_RETENTION=%s "
+        "SCAN_MAX_CONCURRENT=%s GEMINI_MAX_CONCURRENT=%s GEMINI_MAX_INFLIGHT_MB=%s",
         settings.persist_facts,
         settings.source_file_retention,
         max(1, int(settings.scan_max_concurrent or 1)),
+        max(1, int(settings.gemini_max_concurrent or 4)),
+        max(16, int(settings.gemini_max_inflight_mb or 150)),
     )
 
 

@@ -1,9 +1,8 @@
-"""Process pool for exhibit analysis — keeps the FastAPI / uvicorn process free.
+"""Process pool for local PDF/OCR — keeps the FastAPI / uvicorn process free.
 
-CPU-heavy PDF/OCR/Gemini work runs in a child process so /api/health can answer
-within Render's 5s window even while a scan is running.
-
-Uses spawn (not fork): uvicorn is multi-threaded; forking that can deadlock.
+CPU-heavy local work runs in a child process so /api/health can answer within
+Render's 5s window. Gemini stage is scheduled in the web process thread pool
+after local_done (see gemini_executor).
 """
 
 from __future__ import annotations
@@ -41,21 +40,60 @@ def ensure_scan_executor() -> ProcessPoolExecutor:
 
 
 def submit_ephemeral_job(payload: dict[str, Any]) -> Future:
-    """Queue analysis in a child process. Returns immediately."""
+    """Queue local stage in a child process; on local_done schedule Gemini in-web."""
+    from app.gemini_executor import (
+        clear_ahead,
+        ensure_gemini_executor,
+        reserve_ahead,
+        submit_gemini_stage,
+    )
     from app.scan_job_runner import execute_ephemeral_job
 
-    pool = ensure_scan_executor()
+    ensure_gemini_executor()
     job_id = str(payload.get("job_id") or "")
+
+    # Backpressure: reserve an ahead slot from local submit through Gemini terminal.
+    if not reserve_ahead(job_id, timeout=900):
+        logger.error("local backpressure timeout job=%s — failing", job_id[:8])
+        try:
+            from app.ephemeral import delete_ephemeral_source
+            from app.storage import update_job
+            from app.v1_analysis import _update_durable_job
+
+            update_job(
+                job_id,
+                status="failed",
+                stage="failed",
+                percent=100,
+                message="Queue backpressure timeout.",
+                error="local_backpressure_timeout",
+            )
+            _update_durable_job(
+                job_id,
+                status="failed",
+                message="Queue backpressure timeout.",
+                error="local_backpressure_timeout",
+            )
+            delete_ephemeral_source(job_id)
+        except Exception:
+            logger.exception("backpressure fail path error job=%s", job_id[:8])
+        fut: Future = Future()
+        fut.set_result({"job_id": job_id, "status": "failed"})
+        return fut
+
+    pool = ensure_scan_executor()
     future = pool.submit(execute_ephemeral_job, payload)
 
-    def _log_done(fut: Future) -> None:
+    def _after_local(fut: Future) -> None:
         try:
-            fut.result()
+            result = fut.result()
         except Exception as exc:
+            clear_ahead(job_id)
             logger.exception("scan child crashed job=%s", job_id[:8] if job_id else "?")
             if not job_id:
                 return
             try:
+                from app.ephemeral import delete_ephemeral_source
                 from app.storage import update_job
                 from app.v1_analysis import _update_durable_job
 
@@ -73,10 +111,31 @@ def submit_ephemeral_job(payload: dict[str, Any]) -> Future:
                     message="Analysis worker crashed.",
                     error=str(exc),
                 )
+                delete_ephemeral_source(job_id)
             except Exception:
                 logger.exception("could not mark crashed job %s failed", job_id[:8])
+            return
 
-    future.add_done_callback(_log_done)
+        status = (result or {}).get("status")
+        if status != "local_done":
+            clear_ahead(job_id)
+            return
+        # Resume payload may have been enriched in the child (labels, peak rss).
+        gemini_payload = dict(payload)
+        try:
+            from app.gemini_executor import gemini_payload_path
+            import json
+
+            path = gemini_payload_path(job_id)
+            if path.is_file():
+                gemini_payload.update(json.loads(path.read_text(encoding="utf-8")))
+        except Exception:
+            logger.debug("gemini payload enrich failed job=%s", job_id[:8], exc_info=True)
+        if result.get("peak_rss_mb") is not None:
+            gemini_payload["peak_rss_mb"] = result["peak_rss_mb"]
+        submit_gemini_stage(gemini_payload)
+
+    future.add_done_callback(_after_local)
     return future
 
 
@@ -87,3 +146,9 @@ def shutdown_scan_executor() -> None:
     _executor.shutdown(wait=False, cancel_futures=False)
     _executor = None
     logger.info("scan process pool shut down")
+    try:
+        from app.gemini_executor import shutdown_gemini_executor
+
+        shutdown_gemini_executor()
+    except Exception:
+        pass

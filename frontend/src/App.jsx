@@ -43,6 +43,7 @@ import { sha256OfFile } from "./localFiles.js";
 
 const STAGES = [
   ["queued", "Queued"],
+  ["local_done", "Local done"],
   ["ingesting", "File intake"],
   ["metadata", "Metadata"],
   ["pdf_integrity", "PDF integrity"],
@@ -1588,7 +1589,7 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
           let progress = null;
           let blips = 0;
           try {
-            for (let i = 0; i < 120; i += 1) {
+            for (let i = 0; i < 240; i += 1) {
               try {
                 progress = await getJob(item.jobId, { includeReport: false });
                 blips = 0;
@@ -1627,6 +1628,23 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
                 continue;
               }
               if (progress.status === "complete" || progress.status === "failed") break;
+              const pos = progress.queue_position;
+              const eta = progress.eta_seconds;
+              const etaLabel =
+                typeof eta === "number" && eta > 0
+                  ? eta >= 60
+                    ? ` · ~${Math.round(eta / 60)} min`
+                    : ` · ~${eta}s`
+                  : "";
+              const queueLabel =
+                typeof pos === "number" && pos > 0 ? ` · queue #${pos}` : "";
+              const stage =
+                progress.status === "local_done"
+                  ? "waiting for Gemini"
+                  : progress.message || progress.stage || "analyzing";
+              setUploadNote(
+                `Analyzing ${done + 1} of ${pending.length}: ${item.name}${queueLabel}${etaLabel} — ${stage}`
+              );
               await new Promise((r) => setTimeout(r, 1000));
             }
             if (progress?.status === "complete") ok += 1;
@@ -3328,11 +3346,26 @@ function TermsModal({ onClose }) {
 function ProgressPanel({ job, filename }) {
   const percent = job.percent || 0;
   const current = job.stage;
+  const pos = job.queue_position;
+  const eta = job.eta_seconds;
+  const etaLabel =
+    typeof eta === "number" && eta > 0
+      ? eta >= 60
+        ? `~${Math.round(eta / 60)} min remaining`
+        : `~${eta}s remaining`
+      : null;
   return (
     <div className="card">
       <p className="kicker">Analyzing</p>
       <h2 className="serif" style={{ marginTop: 4 }}>{filename}</h2>
       <p>{job.message}</p>
+      {(typeof pos === "number" || etaLabel) && (
+        <p className="footnote" style={{ marginTop: 4 }}>
+          {typeof pos === "number" ? `Queue position ${pos}` : ""}
+          {typeof pos === "number" && etaLabel ? " · " : ""}
+          {etaLabel || ""}
+        </p>
+      )}
       <div className="progress-track">
         <div className="progress-fill" style={{ width: `${percent}%` }} />
       </div>

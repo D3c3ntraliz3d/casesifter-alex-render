@@ -977,7 +977,10 @@ class FactMemoryStore:
         *,
         message: str = "Instance restarted; job was interrupted. Re-submit to continue.",
     ) -> int:
-        """Mark queued/running durable jobs interrupted after a process boot."""
+        """Mark queued/running durable jobs interrupted after a process boot.
+
+        Leaves local_done alone — boot recovery resumes or requeues those.
+        """
         now = _utcnow()
         with self.session() as s:
             rows = (
@@ -994,6 +997,35 @@ class FactMemoryStore:
                 row.updated_at = now
             s.commit()
             return len(rows)
+
+    def list_analysis_jobs_by_status(self, statuses: list[str]) -> list[dict[str, Any]]:
+        if not statuses:
+            return []
+        with self.session() as s:
+            rows = (
+                s.execute(
+                    select(AnalysisJob)
+                    .where(AnalysisJob.status.in_(tuple(statuses)))
+                    .order_by(AnalysisJob.created_at.asc())
+                )
+                .scalars()
+                .all()
+            )
+            return [self._analysis_job_dict(row) for row in rows]
+
+    def bump_analysis_job_attempts(self, job_id: str, *, status: str, message: str | None = None) -> dict[str, Any] | None:
+        with self.session() as s:
+            row = s.get(AnalysisJob, job_id)
+            if row is None:
+                return None
+            row.attempts = int(row.attempts or 0) + 1
+            row.status = status
+            if message is not None:
+                row.message = message
+            row.error = None
+            row.updated_at = _utcnow()
+            s.commit()
+            return self._analysis_job_dict(row)
 
     def _analysis_job_dict(self, row: AnalysisJob) -> dict[str, Any]:
         return {

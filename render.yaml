@@ -46,9 +46,14 @@ services:
         value: "true"
       - key: OCR_MAX_PAGES
         value: "40"
-      # One scan process on the 512 MB starter. Raise later when the plan has more RAM.
+      # Local PDF/OCR stays serial. Gemini stage runs in the web process (parallel).
+      # Upgrade to Standard 2GB before beta firms.
       - key: SCAN_MAX_CONCURRENT
         value: "1"
+      - key: GEMINI_MAX_CONCURRENT
+        value: "4"
+      - key: GEMINI_MAX_INFLIGHT_MB
+        value: "150"
       # Gotcha verifier: auto picks Claude when ANTHROPIC_API_KEY is set; Gemini stays multimodal.
       - key: GOTCHA_VERIFY_PROVIDER
         value: auto

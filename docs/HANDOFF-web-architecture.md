@@ -163,6 +163,8 @@ At each checkpoint, update `HANDOFF.md` (done / blocked / next) and paste the `r
 - [ ] Click-through to the exact local page works after rename and after clearing browser data
 - [ ] Firm data isolation tested
 - [ ] Privacy page lists exactly what is stored and which third parties receive what (A5)
+- [ ] **Render plan:** Standard **2GB** (not starter 512MB) before beta firms
+- [ ] **Materiality false positives (must stay quiet):** assignment-chain dates; CEMA component principals; per-affidavit venue — confirm these do not interrupt after the queue/Gemini split
 
 ### Before beta firms — exhibit cache (not now)
 

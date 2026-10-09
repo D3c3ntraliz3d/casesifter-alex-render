@@ -1,13 +1,13 @@
-"""Picklable entry point for ProcessPoolExecutor child processes.
+"""Picklable entry points for ProcessPoolExecutor (local) and Gemini thread pool.
 
 Must stay at module top level. Resets DB engines after fork/spawn.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
-import time
 from pathlib import Path
 from typing import Any
 
@@ -15,8 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 def execute_ephemeral_job(payload: dict[str, Any]) -> dict[str, Any]:
-    """Run one ephemeral scan in a child process. payload is JSON-friendly."""
-    # Child must not reuse the parent's SQLAlchemy connections.
+    """Run local PDF/OCR stage in a child process. Parent then schedules Gemini."""
     try:
         from app.fact_memory.models import reset_engine
 
@@ -24,16 +23,12 @@ def execute_ephemeral_job(payload: dict[str, Any]) -> dict[str, Any]:
     except Exception:
         logger.debug("reset_engine skipped", exc_info=True)
 
-    from app.ephemeral import delete_ephemeral_source, maybe_delete_after_terminal
-    from app.pipeline import run_pipeline
+    from app.ephemeral import delete_ephemeral_source
+    from app.pipeline import run_local_stage
     from app.product_events import emit_scan_failed
     from app.resource import rss_mb
-    from app.storage import load_progress, update_job
-    from app.v1_analysis import (
-        _persist_pipeline_result,
-        _resolve_upload_labels,
-        _update_durable_job,
-    )
+    from app.storage import update_job
+    from app.v1_analysis import _resolve_upload_labels, _update_durable_job
 
     job_id = str(payload["job_id"])
     dest = Path(payload["dest"])
@@ -41,10 +36,6 @@ def execute_ephemeral_job(payload: dict[str, Any]) -> dict[str, Any]:
     display_name = payload.get("display_name")
     doc_kind = payload.get("doc_kind")
     prior_snapshots = payload.get("prior_snapshots") or []
-    matter_id = payload.get("matter_id")
-    firm_ctx = payload.get("firm_ctx")
-    filed_date = payload.get("filed_date")
-    persist = bool(payload.get("persist"))
 
     peak = {"mb": rss_mb() or 0.0}
     stop = threading.Event()
@@ -59,16 +50,16 @@ def execute_ephemeral_job(payload: dict[str, Any]) -> dict[str, Any]:
     sampler.start()
 
     logger.info(
-        "ephemeral child start job=%s rss_mb=%s",
+        "ephemeral local start job=%s rss_mb=%s",
         job_id[:8],
         rss_mb(),
     )
     terminal_status = "failed"
     terminal_message = None
     terminal_error = None
-    document_id = None
+    local_s = None
     try:
-        _update_durable_job(job_id, status="running", message="Scan running in worker process.")
+        _update_durable_job(job_id, status="running", message="Local PDF/OCR running in worker process.")
         try:
             sample = ""
             if not (doc_kind or "").strip():
@@ -88,7 +79,7 @@ def execute_ephemeral_job(payload: dict[str, Any]) -> dict[str, Any]:
             resolved_name, resolved_kind = _resolve_upload_labels(
                 dest.name, display_name, doc_kind, sample
             )
-            report = run_pipeline(
+            result = run_local_stage(
                 job_id,
                 dest,
                 submitted_by=submitted_by,
@@ -96,6 +87,109 @@ def execute_ephemeral_job(payload: dict[str, Any]) -> dict[str, Any]:
                 doc_kind=resolved_kind,
                 prior_snapshots=prior_snapshots or None,
             )
+            local_s = (result or {}).get("local_s")
+            terminal_status = "local_done"
+            terminal_message = "Local PDF/OCR complete — queued for Gemini review."
+            terminal_error = None
+            # Persist resume payload for Gemini stage / boot recovery.
+            from app.gemini_executor import gemini_payload_path
+
+            resume = {
+                **payload,
+                "display_name": resolved_name,
+                "doc_kind": resolved_kind,
+                "peak_rss_mb": peak["mb"],
+                "local_s": local_s,
+            }
+            gemini_payload_path(job_id).write_text(
+                json.dumps(resume, default=str), encoding="utf-8"
+            )
+        except Exception as exc:
+            emit_scan_failed(job_id=job_id, stage="failed", error_message=str(exc))
+            update_job(
+                job_id,
+                status="failed",
+                stage="failed",
+                percent=100,
+                message="Analysis failed.",
+                error=str(exc),
+            )
+            terminal_status = "failed"
+            terminal_message = "Analysis failed."
+            terminal_error = str(exc)
+            delete_ephemeral_source(job_id)
+    finally:
+        stop.set()
+        sampler.join(timeout=1.0)
+        end_rss = rss_mb()
+        if end_rss is not None and end_rss > peak["mb"]:
+            peak["mb"] = end_rss
+        _update_durable_job(
+            job_id,
+            status=terminal_status,
+            message=terminal_message,
+            error=terminal_error,
+        )
+        logger.info(
+            "ephemeral local end job=%s status=%s rss_mb=%s peak_rss_mb=%s local_s=%s",
+            job_id[:8],
+            terminal_status,
+            end_rss,
+            round(peak["mb"], 1),
+            local_s,
+        )
+    return {
+        "job_id": job_id,
+        "status": terminal_status,
+        "peak_rss_mb": peak["mb"],
+        "local_s": local_s,
+        "payload": payload,
+    }
+
+
+def execute_gemini_stage(payload: dict[str, Any]) -> dict[str, Any]:
+    """Run Gemini stage in the web process. Deletes source on every terminal path."""
+    from app.ephemeral import delete_ephemeral_source, maybe_delete_after_terminal
+    from app.pipeline import run_gemini_stage
+    from app.product_events import emit_scan_failed
+    from app.resource import rss_mb
+    from app.storage import load_progress, update_job
+    from app.v1_analysis import _persist_pipeline_result, _update_durable_job
+
+    job_id = str(payload["job_id"])
+    dest = Path(payload["dest"])
+    persist = bool(payload.get("persist"))
+    matter_id = payload.get("matter_id")
+    firm_ctx = payload.get("firm_ctx")
+    filed_date = payload.get("filed_date")
+    display_name = payload.get("display_name")
+    doc_kind = payload.get("doc_kind")
+    peak_rss = payload.get("peak_rss_mb")
+
+    web_rss = rss_mb()
+    logger.info(
+        "gemini stage start job=%s web_rss_mb=%s peak_rss_mb=%s",
+        job_id[:8],
+        web_rss,
+        peak_rss,
+    )
+    _update_durable_job(job_id, status="running", message="Gemini review running.")
+    update_job(
+        job_id,
+        status="running",
+        stage="contextual",
+        percent=88,
+        message="Gemini review running…",
+    )
+
+    terminal_status = "failed"
+    terminal_message = "Analysis failed."
+    terminal_error = None
+    document_id = None
+    timing = None
+    try:
+        try:
+            report = run_gemini_stage(job_id, dest, peak_rss_mb=peak_rss)
             if persist and matter_id and firm_ctx and report is not None:
                 document_id = _persist_pipeline_result(
                     job_id=job_id,
@@ -103,8 +197,8 @@ def execute_ephemeral_job(payload: dict[str, Any]) -> dict[str, Any]:
                     report=report,
                     matter_id=matter_id,
                     firm_ctx=firm_ctx,
-                    display_name=resolved_name,
-                    doc_kind=resolved_kind,
+                    display_name=display_name,
+                    doc_kind=doc_kind,
                     filed_date=filed_date,
                 )
             progress = load_progress(job_id)
@@ -119,6 +213,16 @@ def execute_ephemeral_job(payload: dict[str, Any]) -> dict[str, Any]:
             else:
                 terminal_status = "complete"
                 terminal_message = "Analysis complete."
+            try:
+                timing_path = Path(payload["dest"]).parent / "timing.json"
+                # job_dir timing
+                from app.storage import job_dir
+
+                tpath = job_dir(job_id) / "timing.json"
+                if tpath.is_file():
+                    timing = json.loads(tpath.read_text(encoding="utf-8"))
+            except Exception:
+                timing = None
         except Exception as exc:
             emit_scan_failed(job_id=job_id, stage="failed", error_message=str(exc))
             update_job(
@@ -134,12 +238,8 @@ def execute_ephemeral_job(payload: dict[str, Any]) -> dict[str, Any]:
             terminal_error = str(exc)
         finally:
             maybe_delete_after_terminal(job_id, retain_report=persist)
+            delete_ephemeral_source(job_id)
     finally:
-        stop.set()
-        sampler.join(timeout=1.0)
-        end_rss = rss_mb()
-        if end_rss is not None and end_rss > peak["mb"]:
-            peak["mb"] = end_rss
         _update_durable_job(
             job_id,
             status=terminal_status,
@@ -148,15 +248,15 @@ def execute_ephemeral_job(payload: dict[str, Any]) -> dict[str, Any]:
             document_id=document_id,
         )
         logger.info(
-            "ephemeral child end job=%s status=%s rss_mb=%s peak_rss_mb=%s",
+            "gemini stage end job=%s status=%s web_rss_mb=%s timing=%s",
             job_id[:8],
             terminal_status,
-            end_rss,
-            round(peak["mb"], 1),
+            rss_mb(),
+            timing,
         )
-        delete_ephemeral_source(job_id)
     return {
         "job_id": job_id,
         "status": terminal_status,
-        "peak_rss_mb": peak["mb"],
+        "timing": timing,
+        "web_rss_mb": rss_mb(),
     }
