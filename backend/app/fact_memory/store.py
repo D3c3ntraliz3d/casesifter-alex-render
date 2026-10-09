@@ -469,6 +469,128 @@ class FactMemoryStore:
                 )
         return facts
 
+    def recompute_facts_from_excerpts(
+        self, firm_id: str, matter_id: str, *, user_id: str | None = None
+    ) -> dict[str, Any]:
+        """Re-extract facts from stored text_excerpt (no PDFs) and refresh snapshots.
+
+        Case-impact cards are derived from snapshots at read time; rewriting facts
+        with current B-rules clears stale principal/rate/venue interrupts without
+        a full re-scan.
+        """
+        from app.case_consistency import aggregate_fact_conflicts
+        from app.fact_extract import extract_facts
+
+        before_snaps = self.list_prior_snapshots(firm_id, matter_id)
+        before = [
+            {
+                "field": c.get("field"),
+                "title": c.get("title") or c.get("label"),
+                "severity": c.get("severity"),
+                "discrepancy": c.get("discrepancy"),
+            }
+            for c in aggregate_fact_conflicts(before_snaps)
+            if str(c.get("severity") or "") in {"high", "medium", "critical"}
+        ]
+
+        updated = 0
+        skipped = 0
+        with self.session() as s:
+            if not s.execute(
+                select(Matter).where(Matter.id == matter_id, Matter.firm_id == firm_id)
+            ).scalar_one_or_none():
+                raise KeyError("matter not found")
+            fernet = self._fernet(s, firm_id)
+            store_snippets = True
+            firm = s.get(Firm, firm_id)
+            if firm is not None:
+                store_snippets = bool(firm.store_snippets)
+            docs = s.execute(
+                select(Document).where(
+                    Document.firm_id == firm_id, Document.matter_id == matter_id
+                )
+            ).scalars().all()
+            for doc in docs:
+                snap = enc.decrypt_json(fernet, doc.snapshot_enc) or {}
+                text = str(snap.get("text_excerpt") or "").strip()
+                if not text:
+                    skipped += 1
+                    continue
+                facts = extract_facts(text)
+                for fact in facts:
+                    if isinstance(fact, dict) and not fact.get("document_id"):
+                        fact["document_id"] = doc.id
+                snap["facts"] = facts
+                snap.setdefault("document_id", doc.id)
+                doc.snapshot_enc = enc.encrypt_json(fernet, snap)
+                for old in list(doc.facts):
+                    s.delete(old)
+                s.flush()
+                for fact in facts:
+                    if not isinstance(fact, dict):
+                        continue
+                    attr = str(fact.get("key") or fact.get("attribute") or "unknown")
+                    value = fact.get("display") or fact.get("value")
+                    value_norm = fact.get("value")
+                    snippet = None
+                    if store_snippets:
+                        raw_snip = fact.get("quote") or fact.get("snippet") or ""
+                        snippet = str(raw_snip)[:300] if raw_snip else None
+                    s.add(
+                        Fact(
+                            id=_new_id(),
+                            matter_id=matter_id,
+                            firm_id=firm_id,
+                            document_id=doc.id,
+                            entity_id=None,
+                            attribute=attr,
+                            value_enc=enc.encrypt_text(
+                                fernet, None if value is None else str(value)
+                            ),
+                            value_normalized_enc=enc.encrypt_text(
+                                fernet, None if value_norm is None else str(value_norm)
+                            ),
+                            page=fact.get("page"),
+                            snippet_enc=enc.encrypt_text(fernet, snippet),
+                            confidence=float(fact.get("confidence") or 0) or None,
+                            created_at=_utcnow(),
+                            fact_blob_enc=enc.encrypt_json(fernet, fact),
+                        )
+                    )
+                # Stale pairwise fact_conflict rows — board prefers aggregates.
+                findings = s.execute(
+                    select(FindingRow).where(
+                        FindingRow.firm_id == firm_id,
+                        FindingRow.matter_id == matter_id,
+                        FindingRow.document_id == doc.id,
+                        FindingRow.status == "open",
+                    )
+                ).scalars().all()
+                for finding in findings:
+                    if str(finding.finding_type or "") == "fact_conflict":
+                        finding.status = "stale"
+                updated += 1
+            self._audit(s, firm_id, user_id, "matter.recompute_facts", matter_id)
+            s.commit()
+
+        after_snaps = self.list_prior_snapshots(firm_id, matter_id)
+        after = [
+            {
+                "field": c.get("field"),
+                "title": c.get("title") or c.get("label"),
+                "severity": c.get("severity"),
+                "discrepancy": c.get("discrepancy"),
+            }
+            for c in aggregate_fact_conflicts(after_snaps)
+            if str(c.get("severity") or "") in {"high", "medium", "critical"}
+        ]
+        return {
+            "updated": updated,
+            "skipped_no_excerpt": skipped,
+            "before": before,
+            "after": after,
+        }
+
     def persist_scan(
         self,
         *,

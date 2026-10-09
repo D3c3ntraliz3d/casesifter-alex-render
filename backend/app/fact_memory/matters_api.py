@@ -71,36 +71,33 @@ def purge_firm(auth: dict = Depends(_require_analysis_auth)):
 
 
 def _elevate_docs_for_conflicts(docs: list[dict], conflicts: list[dict]) -> list[dict]:
-    """Overlay red/yellow on docs cited by material case fact conflicts (triage strip)."""
-    rank = {"green": 0, "yellow": 1, "red": 2}
-    bump: dict[str, str] = {}
+    """Mark docs cited by case conflicts without rewriting forensic score/level.
+
+    Case-impact cards live in findings; each document's risk_level must match
+    its own risk_score (no High label at score 0).
+    """
+    from app.report.scoring import risk_level_from_score
+
+    cited: set[str] = set()
     for conflict in conflicts or []:
         sev = str(conflict.get("severity") or "")
         if sev not in {"medium", "high", "critical"}:
             continue
-        target = "yellow" if sev == "medium" else "red"
-        ids: set[str] = set()
         for variant in conflict.get("variants") or []:
             for doc in variant.get("documents") or []:
                 doc_id = doc.get("document_id")
                 if doc_id:
-                    ids.add(str(doc_id))
+                    cited.add(str(doc_id))
         for doc in conflict.get("related_documents") or []:
             doc_id = doc.get("document_id") or doc.get("id")
             if doc_id:
-                ids.add(str(doc_id))
-        for doc_id in ids:
-            prev = bump.get(doc_id, "green")
-            if rank.get(target, 0) > rank.get(prev, 0):
-                bump[doc_id] = target
-    if not bump:
-        return docs
+                cited.add(str(doc_id))
     out = []
     for doc in docs:
         row = dict(doc)
-        target = bump.get(str(row.get("id") or ""))
-        if target and rank.get(target, 0) > rank.get(str(row.get("risk_level") or "green"), 0):
-            row["risk_level"] = target
+        row["risk_level"] = risk_level_from_score(row.get("risk_score"))
+        if str(row.get("id") or "") in cited:
+            row["case_conflict_cited"] = True
         out.append(row)
     return out
 
@@ -191,6 +188,20 @@ def list_retryable_jobs(matter_id: str, auth: dict = Depends(_require_analysis_a
         firm_id=ctx["firm_id"], matter_id=matter_id, max_attempts=3
     )
     return {"jobs": rows}
+
+
+@matters_router.post("/{matter_id}/recompute-facts")
+def recompute_matter_facts(matter_id: str, auth: dict = Depends(_require_analysis_auth)):
+    """Re-extract facts from stored text excerpts (no PDFs) with current B-rules."""
+    ctx = _ctx(auth)
+    store = get_store()
+    try:
+        result = store.recompute_facts_from_excerpts(
+            ctx["firm_id"], matter_id, user_id=ctx.get("user_id")
+        )
+    except KeyError as exc:
+        raise HTTPException(404, "Matter not found.") from exc
+    return result
 
 
 @matters_router.get("/{matter_id}/findings")

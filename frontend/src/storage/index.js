@@ -2,6 +2,7 @@ export { sha256OfBlob } from "./hashFile.js";
 export {
   cacheUsage,
   cacheUsageLabel,
+  cacheCoverageForDocs,
   clearCachedExhibits,
   formatCacheGb,
   localCacheAdapter,

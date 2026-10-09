@@ -590,42 +590,25 @@ def list_case_fact_conflicts(case_id: str) -> list[dict[str, Any]]:
     return aggregate_fact_conflicts(list_case_snapshots(case_id))
 
 
-_RISK_RANK = {"green": 0, "yellow": 1, "red": 2}
-
-
 def elevate_documents_for_fact_conflicts(case_id: str) -> int:
-    """Bump risk_level on every document involved in a material case fact conflict.
+    """Re-sync each document's risk_level from its forensic risk_score.
 
-    Vault scans only attach pairwise findings to the *new* file, so the earlier
-    affidavit can stay green in Reports-by-risk even when occupancy_start collides.
-    Call after scan and when the gotcha board loads so :5173 matches the interrupt.
+    Case-impact cards stay on the findings board. Document triage labels must
+    never show High at score 0 (related-doc conflict elevation removed).
     """
-    conflicts = list_case_fact_conflicts(case_id)
+    from app.report.scoring import risk_level_from_score
+
     elevated = 0
-    for conflict in conflicts:
-        sev = str(conflict.get("severity") or "")
-        if sev not in {"medium", "high", "critical"}:
+    for row in list_documents(case_id):
+        document_id = str(row.get("id") or "")
+        if not document_id:
             continue
-        target = "yellow" if sev == "medium" else "red"
-        ids: set[str] = set()
-        for variant in conflict.get("variants") or []:
-            for doc in variant.get("documents") or []:
-                doc_id = doc.get("document_id")
-                if doc_id:
-                    ids.add(str(doc_id))
-        for doc in conflict.get("related_documents") or []:
-            doc_id = doc.get("document_id") or doc.get("id")
-            if doc_id:
-                ids.add(str(doc_id))
-        for document_id in ids:
-            row = get_document(document_id)
-            if not row or row.get("case_id") != case_id:
-                continue
-            cur = str(row.get("risk_level") or "")
-            if _RISK_RANK.get(cur, -1) >= _RISK_RANK[target]:
-                continue
-            update_document(document_id, risk_level=target)
-            elevated += 1
+        target = risk_level_from_score(row.get("risk_score"))
+        cur = str(row.get("risk_level") or "")
+        if cur == target:
+            continue
+        update_document(document_id, risk_level=target)
+        elevated += 1
     return elevated
 
 

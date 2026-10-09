@@ -125,6 +125,25 @@ def test_execution_venue_cross_affidavit_quiet():
     assert not conflicts
 
 
+def test_execution_venue_multi_affidavit_package_quiet():
+    """Summons & Complaint packages often bind several affidavits — venues are per jurat."""
+    text = (
+        "SUMMONS AND COMPLAINT\n"
+        "AFFIDAVIT OF SERVICE\nI, Timothy Brailsford, being duly sworn\n"
+        "State of New York, County of New York\nSworn on April 9, 2007\n"
+        "\n"
+        "AFFIDAVIT OF MERIT\nI, Jane Servicer, being duly sworn\n"
+        "State of New York, County of Bronx\nSworn on April 9, 2007\n"
+    )
+    facts = extract_facts(text)
+    venues = [f for f in facts if f.get("key") == "execution_venue"]
+    assert len(venues) >= 2
+    units = {str(v.get("affidavit_unit") or "") for v in venues}
+    assert len(units) >= 2
+    assert not entity_compatible(venues[0], venues[1])
+    assert not _internal_fact_conflicts("Exhibit 41 Summons package", facts)
+
+
 def test_execution_venue_same_affidavit_conflicts():
     text = (
         "AFFIDAVIT OF SERVICE\nI, Timothy Brailsford, being duly sworn\n"
@@ -138,6 +157,24 @@ def test_execution_venue_same_affidavit_conflicts():
     assert not facts_compatible(venues[0], venues[1])
     hits = _internal_fact_conflicts("AOS", facts)
     assert hits
+
+
+def test_default_rate_twenty_four_percent_not_note_conflict():
+    text = (
+        "The Note provides for interest at the rate of 5.125% per annum.\n"
+        "Upon an Event of Default, interest at the rate of TWENTY-FOUR PERCENT (24%) "
+        "per annum shall accrue until the Default is cured.\n"
+    )
+    facts = [f for f in extract_facts(text) if f.get("key") == "stated_interest_rate"]
+    purposes = {str(f.get("rate_purpose") or f.get("rate_role") or "") for f in facts}
+    assert "note" in purposes
+    assert "default" in purposes
+    note = next(f for f in facts if f.get("rate_purpose") == "note")
+    default = next(f for f in facts if f.get("rate_purpose") == "default")
+    assert abs(float(note["value"]) - 5.125) < 0.01
+    assert abs(float(default["value"]) - 24.0) < 0.01
+    assert not same_nameable_fact(note, default)
+    assert not _internal_fact_conflicts("Note", extract_facts(text))
 
 
 def test_cema_components_sum_is_confirmation_not_conflict():

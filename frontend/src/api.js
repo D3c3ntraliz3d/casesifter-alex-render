@@ -883,15 +883,46 @@ export async function askCaseChat(caseId, question, { focusDocumentId, documents
   return readJson(res);
 }
 
-export async function scanDocument(caseId, documentId) {
+/** Hosted re-scan: submit cached bytes to /v1/jobs (PDFs are not on the server). */
+async function hostedRescanDocument(caseId, doc) {
+  const sha = String(doc?.sha256 || "").toLowerCase();
+  if (!sha) {
+    throw new Error("This document has no hash. Use Locate or re-upload the file.");
+  }
+  const { localCacheAdapter } = await import("./storage/localCache.js");
+  const blob = await localCacheAdapter.getFile(doc.id, sha);
+  if (!blob) {
+    throw new Error(
+      `“${doc.display_name || doc.original_filename || "File"}” is not cached on this computer. Use Locate or re-upload to re-scan.`
+    );
+  }
+  const name =
+    doc.original_filename ||
+    doc.display_name ||
+    `rescan-${sha.slice(0, 12)}.pdf`;
+  const file = new File([blob], name, { type: blob.type || "application/pdf" });
+  const job = await createAnalysisJob(file, {
+    matterId: caseId,
+    displayName: doc.display_name,
+    docKind: doc.doc_kind || doc.doc_type,
+    submittedBy: "web-app-rescan",
+  });
+  return { job_id: job.job_id, status: job.status || "queued", queued: true };
+}
+
+export async function scanDocument(caseId, documentId, docHint = null) {
   const cs = desktop();
   if (cs) return cs.analyzeDocument(caseId, documentId);
   if (isHostedAnalysis()) {
-    // Hosted scans happen at upload time; reopen stored report.
-    const res = await analysisFetch(`/api/v1/matters/${caseId}/documents/${documentId}/report`);
-    if (res.status === 404) throw new Error("No stored report for this document. Re-upload to scan.");
-    const report = await readJson(res);
-    return { job_id: documentId, status: "complete", report };
+    let doc = docHint;
+    if (!doc || !doc.sha256) {
+      const matter = await getCase(caseId);
+      doc = (matter.documents || []).find((d) => d.id === documentId);
+    }
+    if (!doc) {
+      throw new Error("Document not found on this matter.");
+    }
+    return hostedRescanDocument(caseId, doc);
   }
   const res = await apiFetch(`/api/cases/${caseId}/documents/${documentId}/scan`, {
     method: "POST",
@@ -949,7 +980,37 @@ export async function rescanCase(caseId, { waitingOnly = false } = {}) {
     };
   }
   if (isHostedAnalysis()) {
-    return { status: "idle", queued: 0, skipped: 0, message: "Re-upload a file to rescan on hosted matters." };
+    const matter = await getCase(caseId);
+    let docs = matter.documents || [];
+    if (waitingOnly) {
+      docs = docs.filter((d) => d.status === "uploaded" || d.status === "failed");
+    }
+    if (!docs.length) {
+      return { status: "idle", queued: 0, skipped: 0, missing: [] };
+    }
+    let queued = 0;
+    const missing = [];
+    const errors = [];
+    for (const doc of docs) {
+      try {
+        await hostedRescanDocument(caseId, doc);
+        queued += 1;
+      } catch (err) {
+        const msg = String(err?.message || err || "");
+        if (/not cached|Locate or re-upload/i.test(msg)) {
+          missing.push(doc.display_name || doc.original_filename || doc.id);
+        } else {
+          errors.push(`${doc.display_name || doc.id}: ${msg}`);
+        }
+      }
+    }
+    return {
+      status: queued ? "started" : "idle",
+      queued,
+      skipped: missing.length + errors.length,
+      missing,
+      error: errors[0] || (missing.length ? `${missing.length} file(s) need Locate / re-upload.` : null),
+    };
   }
   const res = await apiFetch(`/api/cases/${caseId}/rescan`, { method: "POST" });
   if (res.status === 404) throw vaultUnavailableError();
@@ -980,6 +1041,14 @@ export async function createAnalysisJob(
 
 export async function getMatterDocumentReport(matterId, documentId) {
   const res = await analysisFetch(`/api/v1/matters/${matterId}/documents/${documentId}/report`);
+  return readJson(res);
+}
+
+/** Re-extract facts from stored text excerpts (no PDFs) with current B-rules. */
+export async function recomputeMatterFacts(matterId) {
+  const res = await analysisFetch(`/api/v1/matters/${matterId}/recompute-facts`, {
+    method: "POST",
+  });
   return readJson(res);
 }
 

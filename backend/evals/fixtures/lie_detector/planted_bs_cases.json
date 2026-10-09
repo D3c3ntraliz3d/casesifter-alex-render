@@ -580,6 +580,24 @@
       "notes": "2026-09-24 #2 — contract note rate vs sought motion rate (loan-status exception)."
     },
     {
+      "id": "fp_note_rate_vs_default_rate_twenty_four",
+      "label": "fp",
+      "shape": "stated_interest_rate_note_vs_default",
+      "mode": "internal_binder",
+      "must_suppress": true,
+      "text": "The Note provides for interest at the rate of 5.125% per annum.\nUpon an Event of Default, interest at the rate of TWENTY-FOUR PERCENT (24%) per annum shall accrue until the Default is cured.\n",
+      "notes": "Note rate vs default/event-of-default rate (including spelled TWENTY-FOUR PERCENT) is loan-status noise — not a gotcha."
+    },
+    {
+      "id": "fp_execution_venue_multi_affidavit_package_quiet",
+      "label": "fp",
+      "shape": "execution_venue_package_affidavits",
+      "mode": "internal_binder",
+      "must_suppress": true,
+      "text": "SUMMONS AND COMPLAINT\nAFFIDAVIT OF SERVICE\nI, Timothy Brailsford, being duly sworn\nState of New York, County of New York\nSworn on April 9, 2007\n\nAFFIDAVIT OF MERIT\nI, Jane Servicer, being duly sworn\nState of New York, County of Bronx\nSworn on April 9, 2007\n",
+      "notes": "Venue is per affidavit inside a multi-affidavit exhibit package — Bronx vs New York County across jurats is not a conflict."
+    },
+    {
       "id": "p0_payment_event_three_dates",
       "label": "tp",
       "shape": "loan_payment_date_reconciliation",

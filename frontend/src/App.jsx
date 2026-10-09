@@ -33,6 +33,7 @@ import {
   getDesktopReport,
   isDesktopApp,
   rescanCase,
+  recomputeMatterFacts,
   retitleCaseDocuments,
   saveLicense,
   scanDocument,
@@ -1280,6 +1281,7 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
   const [selectedDocs, setSelectedDocs] = useState(() => new Set());
   const [stampById, setStampById] = useState({});
   const [failedBatch, setFailedBatch] = useState([]);
+  const [cacheCoverage, setCacheCoverage] = useState(null);
   const inputRef = useRef(null);
   const backfillKeyRef = useRef("");
   const scanningRef = useRef(false);
@@ -1289,6 +1291,25 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
     () => dedupeDocumentList(caseData.documents || []),
     [caseData.documents]
   );
+
+  useEffect(() => {
+    if (!isHostedAnalysis() || !docs.length) {
+      setCacheCoverage(null);
+      return;
+    }
+    let cancelled = false;
+    import("./storage/localCache.js")
+      .then(({ cacheCoverageForDocs }) => cacheCoverageForDocs(docs))
+      .then((cov) => {
+        if (!cancelled) setCacheCoverage(cov);
+      })
+      .catch(() => {
+        if (!cancelled) setCacheCoverage(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [docs, caseData.id, uploadNote]);
 
   // Hosted: auto-resubmit queue-age / stall / timeout / interrupted jobs from IndexedDB.
   useEffect(() => {
@@ -1447,7 +1468,7 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
           `${notePrefix} ${Math.min(i + 1, targetDocs.length)}/${targetDocs.length}: ${doc.display_name || doc.original_filename}`
         );
         try {
-          await scanDocument(caseData.id, doc.id);
+          await scanDocument(caseData.id, doc.id, doc);
           queued += 1;
         } catch (err) {
           scanFailed.push(`${doc.display_name || doc.original_filename}: ${err.message || "scan failed"}`);
@@ -1835,12 +1856,21 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
 
   async function rescan(doc) {
     setBusy(true);
+    setScanBacklogError("");
+    onError("");
     try {
-      await scanDocument(caseData.id, doc.id);
+      const result = await scanDocument(caseData.id, doc.id, doc);
+      setUploadNote(
+        result?.queued
+          ? `Re-scan queued for ${doc.display_name || doc.original_filename || "file"}.`
+          : `Re-scan started for ${doc.display_name || doc.original_filename || "file"}.`
+      );
       await onRefresh();
     } catch (err) {
-      onError(err.message);
-      setScanBacklogError(err.message);
+      const msg = err?.message || String(err) || "Re-scan failed.";
+      onError(msg);
+      setScanBacklogError(msg);
+      setUploadNote("");
     } finally {
       setBusy(false);
     }
@@ -1900,16 +1930,25 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
     setScanBacklogError("");
     try {
       const result = await rescanCase(caseData.id, { waitingOnly: false });
+      const missing = result.missing || [];
       setUploadNote(
-        result.status === "idle"
+        result.status === "idle" && !missing.length
           ? "Nothing to rescan right now."
-          : `Started rescan of ${result.queued} file${result.queued === 1 ? "" : "s"}` +
-            (result.skipped ? ` (${result.skipped} skipped).` : ".") +
-            " Running two at a time."
+          : `Started rescan of ${result.queued || 0} file${(result.queued || 0) === 1 ? "" : "s"}` +
+            (missing.length
+              ? ` · ${missing.length} need Locate / re-upload: ${missing.slice(0, 5).join(", ")}${
+                  missing.length > 5 ? ` +${missing.length - 5} more` : ""
+                }`
+              : result.skipped
+                ? ` (${result.skipped} skipped).`
+                : ".")
       );
-      if (result.error) {
-        setScanBacklogError(result.error);
-        onError(result.error);
+      if (result.error || missing.length) {
+        const msg =
+          result.error ||
+          `${missing.length} file(s) not in this computer’s cache. Use Locate or re-upload.`;
+        setScanBacklogError(msg);
+        onError(msg);
       }
       await onRefresh();
     } catch (err) {
@@ -1948,6 +1987,40 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
                   : "Rescan all"}
               </button>
             )}
+            {!caseData.archived_at && isHostedAnalysis() && docs.length > 0 && (
+              <button
+                className="btn secondary"
+                type="button"
+                disabled={busy}
+                title="Re-extract facts from stored text (no PDFs needed)"
+                onClick={async () => {
+                  setBusy(true);
+                  setScanBacklogError("");
+                  try {
+                    const result = await recomputeMatterFacts(caseData.id);
+                    const dropped = (result.before || []).length - (result.after || []).length;
+                    setUploadNote(
+                      `Case facts recomputed from ${result.updated || 0} excerpt${
+                        (result.updated || 0) === 1 ? "" : "s"
+                      }` +
+                        (result.skipped_no_excerpt
+                          ? ` (${result.skipped_no_excerpt} without text).`
+                          : ".") +
+                        (dropped > 0 ? ` ${dropped} case-impact card(s) cleared.` : "")
+                    );
+                    await onRefresh();
+                  } catch (err) {
+                    const msg = err?.message || "Could not recompute case facts.";
+                    onError(msg);
+                    setScanBacklogError(msg);
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+              >
+                Refresh facts
+              </button>
+            )}
             {caseData.archived_at ? (
               <button className="btn secondary" type="button" disabled={busy} onClick={onUnarchive}>
                 <RotateCcw size={14} /> Restore
@@ -1972,6 +2045,29 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
           {caseData.court || "Court not set"}
         </p>
         {uploadNote && <p className="footnote">{uploadNote}</p>}
+        {cacheCoverage && cacheCoverage.total > 0 && (
+          <div className={`banner scan-backlog${cacheCoverage.missing.length ? " warn" : ""}`}>
+            <div>
+              <strong>
+                Local cache: {cacheCoverage.cached} of {cacheCoverage.total} unique file
+                {cacheCoverage.total === 1 ? "" : "s"}
+              </strong>
+              {cacheCoverage.missing.length ? (
+                <p className="footnote" style={{ margin: "4px 0 0" }}>
+                  Need Locate / re-upload:{" "}
+                  {cacheCoverage.missing.slice(0, 8).join(", ")}
+                  {cacheCoverage.missing.length > 8
+                    ? ` +${cacheCoverage.missing.length - 8} more`
+                    : ""}
+                </p>
+              ) : (
+                <p className="footnote" style={{ margin: "4px 0 0" }}>
+                  All matter PDFs are cached on this computer for re-scan.
+                </p>
+              )}
+            </div>
+          </div>
+        )}
         {failedBatch.length > 0 && !caseData.archived_at && (
           <div className="banner scan-backlog warn">
             <div>
@@ -2060,7 +2156,7 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
         onOpenReport={onOpenReport}
         onError={onError}
         onScanDocument={async (doc) => {
-          await scanDocument(caseData.id, doc.id);
+          await scanDocument(caseData.id, doc.id, doc);
         }}
         onRescanWaiting={async () => {
           await scanWaitingNow();
@@ -3741,7 +3837,7 @@ function ReportViewer({
           onOpenReport={onOpenReport}
           onError={onError || (() => {})}
           onScanDocument={async (doc) => {
-            await scanDocument(caseId, doc.id);
+            await scanDocument(caseId, doc.id, doc);
           }}
           onRescanWaiting={async () => {
             await rescanCase(caseId, { waitingOnly: true });

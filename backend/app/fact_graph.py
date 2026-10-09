@@ -606,22 +606,36 @@ CONTRACT_RATE_RE = re.compile(
     r"(?i)(?:(?:(?:prior|first|second|gap|consolidated)\s+)?(?:mortgage\s+)?note|"
     r"(?:(?:prior|first|second|gap|consolidated)\s+)?mortgage|promissory\s+note|contract).{0,120}?"
     r"(?:interest\s+(?:rate\s+)?(?:of\s+)?|rate\s+of)\s*"
-    r"(\d{1,2}(?:\.\d{1,4})?)\s*%"
+    r"(?:[A-Z][A-Z\s-]{2,40}PERCENT\s*)?\(?(\d{1,2}(?:\.\d{1,4})?)\)?\s*%"
     r"|(?:interest\s+(?:rate\s+)?(?:of\s+)?|rate\s+of)\s*"
-    r"(\d{1,2}(?:\.\d{1,4})?)\s*%"
+    r"(?:[A-Z][A-Z\s-]{2,40}PERCENT\s*)?\(?(\d{1,2}(?:\.\d{1,4})?)\)?\s*%"
     r".{0,80}?(?:per\s+annum|fixed)"
 )
 
 SOUGHT_RATE_RE = re.compile(
     r"(?i)(?:seeks?\s+interest|interest\s+(?:at|of)|judgment\s+.{0,40}?interest)"
-    r"[^\d%]{0,40}(\d{1,2}(?:\.\d{1,4})?)\s*%"
+    r"[^\d%]{0,60}(?:[A-Z][A-Z\s-]{2,40}PERCENT\s*)?\(?(\d{1,2}(?:\.\d{1,4})?)\)?\s*%"
 )
 
 PURPOSE_RATE_RE = re.compile(
     r"(?i)(?:(?P<purpose>default|late|penalty)\s+(?:interest\s+)?rate|"
     r"(?:interest\s+)?rate\s+(?:upon|after|in\s+the\s+event\s+of)\s+"
-    r"(?P<purpose2>default|late\s+payment))"
-    r"[^\d%]{0,50}(?P<rate>\d{1,2}(?:\.\d{1,4})?)\s*%"
+    r"(?P<purpose2>default|late\s+payment)|"
+    r"(?:event\s+of\s+default|upon\s+default|after\s+default|default\s+interest|"
+    r"accelerat(?:e|ion)|penalty\s+interest).{0,160}?"
+    r"interest\s+(?:at\s+)?(?:the\s+)?rate\s+of)"
+    r"[^\d%]{0,60}(?:[A-Z][A-Z\s-]{2,40}PERCENT\s*)?\(?(?P<rate>\d{1,2}(?:\.\d{1,4})?)\)?\s*%"
+)
+
+_DEFAULT_RATE_CONTEXT_RE = re.compile(
+    r"(?i)\b(?:event\s+of\s+default|upon\s+default|after\s+default|default\s+interest|"
+    r"default\s+rate|accelerat(?:e|ion)|penalty\s+(?:rate|interest)|"
+    r"late\s+(?:charge|fee|payment|interest))\b"
+)
+
+_AFFIDAVIT_UNIT_HEADER_RE = re.compile(
+    r"(?i)\b(?:affidavit(?:\s+of\s+[a-z]+)?|affirmation(?:\s+of\s+[a-z]+)?|"
+    r"verification|sworn\s+statement)\b"
 )
 
 # Occupancy commencement (same person, incompatible starts = credibility)
@@ -818,6 +832,37 @@ def _legal_date_role(body: str, match: re.Match[str]) -> tuple[str, str]:
     if "note" in blob:
         return "origination", scope
     return label.replace(" ", "_"), scope
+
+
+def _rate_purpose_from_context(body: str, start: int, end: int) -> str | None:
+    """Classify note vs default/late from nearby language (not the bare percentage).
+
+    Prefer leading context so a later Event of Default clause does not re-label
+    the note rate a few lines above.
+    """
+    # Leading clause + the rate phrase only — do not look past end-of-sentence
+    # into a following Event of Default paragraph.
+    before = body[max(0, start - 220) : start]
+    quote = body[start:end]
+    tail = body[end : min(len(body), end + 24)]
+    stop = re.search(r"[.\n]", tail)
+    after = tail[: stop.start()] if stop else tail
+    window = f"{before} {quote} {after}"
+    if not _DEFAULT_RATE_CONTEXT_RE.search(window):
+        return None
+    if re.search(r"(?i)\blate\s+(?:charge|fee|payment|interest)|penalty\b", window):
+        if re.search(r"(?i)\bdefault\b", window):
+            return "default"
+        return "late"
+    return "default"
+
+
+def _affidavit_unit_at(body: str, pos: int) -> str:
+    """Stable id for the nearest preceding affidavit/affirmation block in a package."""
+    headers = list(_AFFIDAVIT_UNIT_HEADER_RE.finditer(body[: max(0, pos) + 1]))
+    if headers:
+        return f"aff@{headers[-1].start()}"
+    return f"aff@{max(0, pos)}"
 
 
 def _infer_instrument_date_scope(
@@ -1968,6 +2013,36 @@ def extract_grounded_facts(
             return _done()
 
     # --- stated interest rates, scoped by instrument and purpose ---
+    # Default/late purpose first so "interest at the rate of TWENTY-FOUR PERCENT (24%)"
+    # in an event-of-default clause is never stored as the note rate.
+    for match in PURPOSE_RATE_RE.finditer(body):
+        try:
+            rate = float(match.group("rate"))
+        except (TypeError, ValueError):
+            continue
+        if rate < 0.5 or rate > 40:
+            continue
+        labeled = str(match.group("purpose") or match.group("purpose2") or "").lower()
+        if "late" in labeled:
+            purpose = "late"
+        else:
+            purpose = _rate_purpose_from_context(body, match.start(), match.end()) or "default"
+        rec = _graph_record(
+            "stated_interest_rate",
+            rate,
+            f"{rate}%",
+            match.group(0)[:220],
+            extra={
+                "rate_role": purpose,
+                "rate_purpose": purpose,
+                "instrument_scope": _infer_instrument_scope(
+                    body, match.start(), match.end(), default="note"
+                ),
+            },
+        )
+        if _add(rec):
+            return _done()
+
     for match in CONTRACT_RATE_RE.finditer(body):
         raw = match.group(1) or match.group(2)
         try:
@@ -1975,6 +2050,24 @@ def extract_grounded_facts(
         except (TypeError, ValueError):
             continue
         if rate < 0.5 or rate > 25:
+            continue
+        purpose = _rate_purpose_from_context(body, match.start(), match.end())
+        if purpose in {"default", "late"}:
+            rec = _graph_record(
+                "stated_interest_rate",
+                rate,
+                f"{rate}%",
+                match.group(0)[:220],
+                extra={
+                    "rate_role": purpose,
+                    "rate_purpose": purpose,
+                    "instrument_scope": _infer_instrument_scope(
+                        body, match.start(), match.end(), default="note"
+                    ),
+                },
+            )
+            if _add(rec):
+                return _done()
             continue
         # Prefer note context
         near = body[max(0, match.start() - 80) : match.end() + 40]
@@ -2003,6 +2096,24 @@ def extract_grounded_facts(
             continue
         if rate < 0.5 or rate > 25:
             continue
+        purpose = _rate_purpose_from_context(body, match.start(), match.end())
+        if purpose in {"default", "late"}:
+            rec = _graph_record(
+                "stated_interest_rate",
+                rate,
+                f"{rate}%",
+                match.group(0)[:220],
+                extra={
+                    "rate_role": purpose,
+                    "rate_purpose": purpose,
+                    "instrument_scope": _infer_instrument_scope(
+                        body, match.start(), match.end(), default="note"
+                    ),
+                },
+            )
+            if _add(rec):
+                return _done()
+            continue
         near = body[max(0, match.start() - 60) : match.end() + 40]
         if not re.search(r"(?i)seek|judgment|motion|plaintiff|per\s+annum", near):
             continue
@@ -2019,30 +2130,6 @@ def extract_grounded_facts(
                 "rate_purpose": "sought",
                 "instrument_scope": _infer_instrument_scope(
                     body, match.start(), match.end(), default="case"
-                ),
-            },
-        )
-        if _add(rec):
-            return _done()
-
-    for match in PURPOSE_RATE_RE.finditer(body):
-        try:
-            rate = float(match.group("rate"))
-        except (TypeError, ValueError):
-            continue
-        if rate < 0.5 or rate > 40:
-            continue
-        purpose = "late" if "late" in str(match.group("purpose") or match.group("purpose2") or "").lower() else "default"
-        rec = _graph_record(
-            "stated_interest_rate",
-            rate,
-            f"{rate}%",
-            match.group(0)[:220],
-            extra={
-                "rate_role": purpose,
-                "rate_purpose": purpose,
-                "instrument_scope": _infer_instrument_scope(
-                    body, match.start(), match.end(), default="note"
                 ),
             },
         )
@@ -2080,7 +2167,7 @@ def extract_grounded_facts(
         if _add(rec):
             return _done()
 
-    # --- execution venue ---
+    # --- execution venue (per affidavit block inside multi-affidavit packages) ---
     for match in EXECUTION_VENUE_RE.finditer(body):
         county = (match.group(1) or match.group(2) or match.group(3) or "").strip()
         if not county:
@@ -2094,10 +2181,14 @@ def extract_grounded_facts(
             parsed = _date(dm.group(1)) if dm else None
         if not parsed:
             continue
+        unit = _affidavit_unit_at(body, match.start())
+        # Scope name search to this affidavit block — never the whole package.
+        unit_start = int(unit.split("@", 1)[-1]) if "@" in unit else max(0, match.start() - 400)
+        local = body[unit_start : min(len(body), match.end() + 200)]
         server = None
-        m_server = PROCESS_SERVER_NAME_RE.search(body) or re.search(
+        m_server = PROCESS_SERVER_NAME_RE.search(local) or re.search(
             r"(?i)\bI,\s*((?:[A-Z][a-z]+(?:\s+[A-Z][a-z'.]+){1,3}))\b",
-            body[:400],
+            local[:400],
         )
         if m_server:
             server = m_server.group(1).strip()
@@ -2107,7 +2198,11 @@ def extract_grounded_facts(
             f"{county} County",
             match.group(0)[:220],
             person=server,
-            extra={"on_date": str(parsed["value"])[:10], "venue_county": county},
+            extra={
+                "on_date": str(parsed["value"])[:10],
+                "venue_county": county,
+                "affidavit_unit": unit,
+            },
         )
         if _add(rec):
             return _done()
@@ -2473,11 +2568,13 @@ def cluster_key(fact: dict[str, Any]) -> str:
         purpose = str(fact.get("rate_purpose") or fact.get("rate_role") or "note")
         return f"stated_interest_rate::{scope}|{purpose}"
     if key == "execution_venue":
-        # Per-affidavit / per-document — NY vs Bronx across different affidavits is normal.
+        # Per affidavit block — NY vs Bronx across separate jurats (even in one
+        # Summons & Complaint PDF) are independent, not the same fact.
         doc = str(fact.get("document_id") or "")
+        unit = str(fact.get("affidavit_unit") or "")
         on_date = str(fact.get("on_date") or "")[:10]
         server = _norm_name(str(fact.get("person") or "")) or "server"
-        return f"{key}::{doc}|{server}|{on_date}"
+        return f"{key}::{doc}|{unit}|{server}|{on_date}"
     if key == "occupancy_start":
         person = _norm_name(str(fact.get("person") or "")) or "_"
         return f"{key}::{person}"
@@ -2521,9 +2618,10 @@ def _entity_key(fact: dict[str, Any]) -> str:
         return f"{event}|{scope}"
     if fact.get("key") == "execution_venue":
         doc = str(fact.get("document_id") or "")
+        unit = str(fact.get("affidavit_unit") or "")
         on_date = str(fact.get("on_date") or "")[:10]
         server = _norm_name(str(fact.get("person") or "")) or "server"
-        return f"{doc}|{server}|{on_date}"
+        return f"{doc}|{unit}|{server}|{on_date}"
     person = _norm_name(str(fact.get("person") or ""))
     employer = _norm_name(str(fact.get("employer") or ""))
     if person and employer:
@@ -2574,10 +2672,16 @@ def entity_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:
             == str(right.get("rate_purpose") or right.get("rate_role") or "note")
         )
     if left.get("key") == "execution_venue" and right.get("key") == "execution_venue":
-        # Only the same affidavit/document can state two incompatible venues.
+        # Only the same affidavit block can state two incompatible venues.
         doc_a = str(left.get("document_id") or "")
         doc_b = str(right.get("document_id") or "")
         if doc_a != doc_b:
+            return False
+        unit_a = str(left.get("affidavit_unit") or "")
+        unit_b = str(right.get("affidavit_unit") or "")
+        if unit_a and unit_b and unit_a != unit_b:
+            return False
+        if (unit_a or unit_b) and unit_a != unit_b:
             return False
         da = str(left.get("on_date") or "")[:10]
         db = str(right.get("on_date") or "")[:10]

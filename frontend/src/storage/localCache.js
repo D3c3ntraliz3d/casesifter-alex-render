@@ -215,6 +215,31 @@ export async function cacheUsageLabel() {
   return `Cached exhibits on this computer: ${formatCacheGb(bytes)}`;
 }
 
+/** How many matter docs have bytes in IndexedDB / memory, plus names that need Locate. */
+export async function cacheCoverageForDocs(docs = []) {
+  const unique = new Map();
+  for (const doc of docs || []) {
+    const sha = String(doc?.sha256 || "").toLowerCase();
+    if (!sha) continue;
+    if (!unique.has(sha)) {
+      unique.set(sha, {
+        sha256: sha,
+        name: doc.display_name || doc.original_filename || sha.slice(0, 12),
+        id: doc.id,
+      });
+    }
+  }
+  const total = unique.size;
+  const missing = [];
+  let cached = 0;
+  for (const item of unique.values()) {
+    const hit = await localCacheAdapter.hasFile(item.id, item.sha256).catch(() => false);
+    if (hit) cached += 1;
+    else missing.push(item.name);
+  }
+  return { total, cached, missing };
+}
+
 export async function clearCachedExhibits() {
   memory.clear();
   try {

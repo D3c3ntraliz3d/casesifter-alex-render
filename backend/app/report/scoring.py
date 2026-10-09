@@ -18,6 +18,19 @@ SEVERITY_WEIGHT = {
 SEVERITY_RANK = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 
 
+def risk_level_from_score(score: int | None) -> RiskLevel:
+    """Map numeric forensic score to a label. Score 0 is never High."""
+    try:
+        n = int(score or 0)
+    except (TypeError, ValueError):
+        n = 0
+    if n >= 70:
+        return "red"
+    if n >= 35:
+        return "yellow"
+    return "green"
+
+
 def score_risk(findings: list[Finding]) -> tuple[RiskLevel, int]:
     """Score from verified findings only — never document type or title.
 
@@ -32,7 +45,7 @@ def score_risk(findings: list[Finding]) -> tuple[RiskLevel, int]:
 def score_risk_details(
     findings: list[Finding],
 ) -> tuple[RiskLevel, int, list[dict[str, object]]]:
-    """Return the score plus an audit-friendly explanation of any score floor."""
+    """Return score, level derived from that score, and score_drivers (no floors)."""
     actionable = [
         f
         for f in findings
@@ -60,41 +73,16 @@ def score_risk_details(
             "explanation": "Sum of severity weights adjusted by confidence and verified finding type.",
         }
     ]
-
-    if any(f.severity == "critical" and f.confidence >= 70 for f in actionable):
-        final = max(score, 80)
-        if final > score:
-            drivers.append(
-                {
-                    "type": "score_floor",
-                    "floor": 80,
-                    "reason": "At least one critical finding has confidence of 70 or higher.",
-                }
-            )
-        return "red", final, drivers
-    if any(f.severity == "high" and f.confidence >= 70 for f in actionable):
-        final = max(score, 70)
-        if final > score:
-            drivers.append(
-                {
-                    "type": "score_floor",
-                    "floor": 70,
-                    "reason": "At least one high-severity finding has confidence of 70 or higher.",
-                }
-            )
-        return "red", final, drivers
-    if any(f.severity in {"medium", "high"} and f.confidence >= 55 for f in actionable):
-        final = max(score, 35)
-        if final > score:
-            drivers.append(
-                {
-                    "type": "score_floor",
-                    "floor": 35,
-                    "reason": "At least one medium/high finding has confidence of 55 or higher.",
-                }
-            )
-        return "yellow", final, drivers
-    return "green", score, drivers
+    level = risk_level_from_score(score)
+    drivers.append(
+        {
+            "type": "level_from_score",
+            "score": score,
+            "level": level,
+            "explanation": "Risk label follows the numeric score (green <35, yellow <70, red >=70).",
+        }
+    )
+    return level, score, drivers
 
 
 def pick_top_findings(findings: list[Finding], limit: int = 3) -> list[Finding]:
