@@ -163,3 +163,10 @@ At each checkpoint, update `HANDOFF.md` (done / blocked / next) and paste the `r
 - [ ] Click-through to the exact local page works after rename and after clearing browser data
 - [ ] Firm data isolation tested
 - [ ] Privacy page lists exactly what is stored and which third parties receive what (A5)
+
+### Before beta firms — exhibit cache (not now)
+
+- [ ] Verify SHA-256 once on cache save and on Locate match; on later views check byteLength + hash key only, no full re-hash.
+- [ ] Delete the IndexedDB cache entry if the upload or scan fails.
+- [ ] Open/Download use a sanitized filename ending in .pdf when the title lacks it.
+- [ ] Confirm the Locate size pre-filter uses the original upload's exact byte length (`documents.source_size`).

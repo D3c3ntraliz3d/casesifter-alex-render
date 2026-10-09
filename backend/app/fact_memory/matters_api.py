@@ -5,11 +5,10 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from fastapi.responses import Response
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from app.fact_memory.store import content_disposition_inline, get_store
+from app.fact_memory.store import get_store
 from app.v1_analysis import _require_analysis_auth, resolve_firm_context
 
 matters_router = APIRouter(prefix="/v1/matters", tags=["matters"])
@@ -248,54 +247,24 @@ def get_document_report(
 def get_document_file(
     matter_id: str, document_id: str, auth: dict = Depends(_require_analysis_auth)
 ):
-    ctx = _ctx(auth)
-    store = get_store()
-    if not store.get_matter(ctx["firm_id"], matter_id):
-        raise HTTPException(404, "Matter not found.")
-    packed = store.load_document_source(ctx["firm_id"], matter_id, document_id)
-    if packed is None:
-        raise HTTPException(404, "Original file is no longer available.")
-    mime = packed["mime_type"] or "application/octet-stream"
-    return Response(
-        content=packed["bytes"],
-        media_type=mime,
-        headers={
-            "Content-Disposition": content_disposition_inline(packed["filename"], mime),
-            "X-Content-Type-Options": "nosniff",
-            "X-Source-SHA256": packed["sha256"],
-        },
+    """Exhibit bytes are not stored. The browser cache or a future vault holds the file."""
+    raise HTTPException(
+        status_code=410,
+        detail="Exhibit files are not stored on the server.",
     )
 
 
 @matters_router.post("/{matter_id}/documents/{document_id}/file")
-async def attach_document_file(
+def attach_document_file(
     matter_id: str,
     document_id: str,
-    file: UploadFile = File(...),
     auth: dict = Depends(_require_analysis_auth),
 ):
-    """Re-attach the original bytes. Rejects a file that is not the one that was scanned."""
-    ctx = _ctx(auth)
-    store = get_store()
-    if not store.get_matter(ctx["firm_id"], matter_id):
-        raise HTTPException(404, "Matter not found.")
-    data = await file.read()
-    if not data:
-        raise HTTPException(400, "Empty file.")
-    saved = store.save_document_source(
-        ctx["firm_id"],
-        matter_id,
-        document_id,
-        data,
-        filename=file.filename,
-        user_id=ctx.get("user_id"),
+    """Refuse uploads of exhibit bytes. The route does not read a body."""
+    raise HTTPException(
+        status_code=410,
+        detail="Exhibit files are not stored on the server.",
     )
-    if saved is None:
-        raise HTTPException(
-            409,
-            "That file does not match the scanned fingerprint. Re-attach the original exhibit.",
-        )
-    return saved
 
 
 @matters_router.patch("/{matter_id}/documents/{document_id}")

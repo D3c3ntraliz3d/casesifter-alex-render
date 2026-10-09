@@ -167,18 +167,13 @@ def test_matters_crud_and_job_matter_id(tmp_path, monkeypatch):
         f"/api/v1/matters/{matter_id}/documents/{docs[0]['id']}/file",
         headers=headers,
     )
-    assert source.status_code == 200, source.text
-    assert source.content == content
-    assert "text/plain" in source.headers["content-type"]
-    assert source.headers["content-disposition"].startswith("inline;")
-    assert source.headers["x-source-sha256"] == docs[0]["sha256"]
+    assert source.status_code == 410, source.text
 
-    mismatch = client.post(
+    refused = client.post(
         f"/api/v1/matters/{matter_id}/documents/{docs[0]['id']}/file",
         headers=headers,
-        files={"file": ("other.txt", io.BytesIO(b"not the scanned file"), "text/plain")},
     )
-    assert mismatch.status_code == 409
+    assert refused.status_code == 410
 
     # filed_date edit
     patched = client.patch(

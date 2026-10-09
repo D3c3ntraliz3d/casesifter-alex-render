@@ -23,7 +23,13 @@ from pydantic import BaseModel, Field
 from app.case_chat import ask_case_from_packet
 from app.config import settings
 from app.entitlement import require_scan_allowed
-from app.ephemeral import delete_job_files, ensure_sweeper, maybe_delete_after_terminal, sweep_stale_jobs
+from app.ephemeral import (
+    delete_ephemeral_source,
+    delete_job_files,
+    ensure_sweeper,
+    maybe_delete_after_terminal,
+    sweep_stale_jobs,
+)
 from app.models import UploadResponse
 from app.pipeline import run_pipeline
 from app.product_events import emit_chat_asked, emit_scan_failed
@@ -319,74 +325,78 @@ def _run_ephemeral(
     filed_date: str | None = None,
     persist: bool = False,
 ) -> None:
-    if not acquire_scan_slot(job_id, timeout=600):
-        emit_scan_failed(
-            job_id=job_id,
-            stage="queue",
-            error_class="timeout",
-            error_message="Scan queue timed out.",
-        )
-        update_job(
-            job_id,
-            status="failed",
-            stage="failed",
-            percent=100,
-            message="Scan queue timed out.",
-            error="Another scan held the queue for too long.",
-        )
-        maybe_delete_after_terminal(job_id, retain_report=persist)
-        return
     try:
-        sample = ""
-        if not (doc_kind or "").strip():
-            suffix = dest.suffix.lower()
-            if suffix == ".pdf":
-                try:
-                    from app.scan_profile import peek_pdf_text
-
-                    sample = peek_pdf_text(dest)[:4000]
-                except Exception:
-                    sample = ""
-            elif suffix in {".txt", ".text"}:
-                try:
-                    sample = dest.read_text(encoding="utf-8", errors="ignore")[:4000]
-                except OSError:
-                    sample = ""
-        resolved_name, resolved_kind = _resolve_upload_labels(
-            dest.name, display_name, doc_kind, sample
-        )
-        report = run_pipeline(
-            job_id,
-            dest,
-            submitted_by=submitted_by,
-            display_name=resolved_name,
-            doc_kind=resolved_kind,
-            prior_snapshots=prior_snapshots or None,
-        )
-        if persist and matter_id and firm_ctx and report is not None:
-            _persist_pipeline_result(
+        if not acquire_scan_slot(job_id, timeout=600):
+            emit_scan_failed(
                 job_id=job_id,
-                source=dest,
-                report=report,
-                matter_id=matter_id,
-                firm_ctx=firm_ctx,
+                stage="queue",
+                error_class="timeout",
+                error_message="Scan queue timed out.",
+            )
+            update_job(
+                job_id,
+                status="failed",
+                stage="failed",
+                percent=100,
+                message="Scan queue timed out.",
+                error="Another scan held the queue for too long.",
+            )
+            maybe_delete_after_terminal(job_id, retain_report=persist)
+            return
+        try:
+            sample = ""
+            if not (doc_kind or "").strip():
+                suffix = dest.suffix.lower()
+                if suffix == ".pdf":
+                    try:
+                        from app.scan_profile import peek_pdf_text
+
+                        sample = peek_pdf_text(dest)[:4000]
+                    except Exception:
+                        sample = ""
+                elif suffix in {".txt", ".text"}:
+                    try:
+                        sample = dest.read_text(encoding="utf-8", errors="ignore")[:4000]
+                    except OSError:
+                        sample = ""
+            resolved_name, resolved_kind = _resolve_upload_labels(
+                dest.name, display_name, doc_kind, sample
+            )
+            report = run_pipeline(
+                job_id,
+                dest,
+                submitted_by=submitted_by,
                 display_name=resolved_name,
                 doc_kind=resolved_kind,
-                filed_date=filed_date,
+                prior_snapshots=prior_snapshots or None,
             )
-    except Exception as exc:
-        emit_scan_failed(job_id=job_id, stage="failed", error_message=str(exc))
-        update_job(
-            job_id,
-            status="failed",
-            stage="failed",
-            percent=100,
-            message="Analysis failed.",
-            error=str(exc),
-        )
+            if persist and matter_id and firm_ctx and report is not None:
+                _persist_pipeline_result(
+                    job_id=job_id,
+                    source=dest,
+                    report=report,
+                    matter_id=matter_id,
+                    firm_ctx=firm_ctx,
+                    display_name=resolved_name,
+                    doc_kind=resolved_kind,
+                    filed_date=filed_date,
+                )
+        except Exception as exc:
+            emit_scan_failed(job_id=job_id, stage="failed", error_message=str(exc))
+            update_job(
+                job_id,
+                status="failed",
+                stage="failed",
+                percent=100,
+                message="Analysis failed.",
+                error=str(exc),
+            )
+        finally:
+            release_scan_slot(job_id)
+            maybe_delete_after_terminal(job_id, retain_report=persist)
     finally:
-        release_scan_slot(job_id)
-        maybe_delete_after_terminal(job_id, retain_report=persist)
+        # Success, failure, timeout, and cancel: the upload must not remain on disk.
+        delete_ephemeral_source(job_id)
 
 
 def _persist_pipeline_result(
@@ -400,15 +410,23 @@ def _persist_pipeline_result(
     doc_kind: str | None,
     filed_date: str | None,
 ) -> None:
-    from app.fact_memory.store import _mime_for_bytes, get_store
+    from app.fact_memory.store import get_store
     from app.ingestion import sha256_file
 
     store = get_store()
     digest = ""
-    if source.exists():
-        digest = sha256_file(source)
-    elif report.audit and report.audit.sha256:
+    if report.audit and report.audit.sha256:
         digest = report.audit.sha256
+    elif source.exists():
+        digest = sha256_file(source)
+    byte_length = None
+    if source.exists():
+        try:
+            byte_length = int(source.stat().st_size)
+        except OSError:
+            byte_length = None
+    if byte_length is None and report.audit and report.audit.file_size_bytes is not None:
+        byte_length = int(report.audit.file_size_bytes)
     comparison = report.comparison or {}
     facts = comparison.get("facts") or []
     entities = comparison.get("entities") or {}
@@ -421,16 +439,6 @@ def _persist_pipeline_result(
     page_count = len(report.page_dimensions or []) or None
     finding_dicts = [f.model_dump(mode="json") for f in (report.findings or [])]
     report_dict = report.model_dump(mode="json")
-    source_bytes = b""
-    if source.exists():
-        try:
-            source_bytes = source.read_bytes()
-        except OSError:
-            source_bytes = b""
-    file_type = ""
-    if report.audit and report.audit.file_type:
-        file_type = report.audit.file_type
-    mime = _mime_for_bytes(source_bytes, file_type) if source_bytes else None
     try:
         result = store.persist_scan(
             firm_id=firm_ctx["firm_id"],
@@ -452,8 +460,7 @@ def _persist_pipeline_result(
             extractor_version=settings.app_version,
             user_id=firm_ctx.get("user_id"),
             report=report_dict,
-            source_bytes=source_bytes or None,
-            mime_type=mime,
+            source_size=byte_length,
         )
         logger.info(
             "Persisted facts for matter=%s job=%s persisted=%s deduped=%s",

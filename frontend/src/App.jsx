@@ -8,14 +8,12 @@ import {
   createCase,
   deleteCase,
   deleteDocument,
-  documentFileUrl,
   exportUrl,
   getCase,
   getEntitlement,
   getJob,
   isAnalysisUnreachableError,
   isHostedAnalysis,
-  jobSourceUrl,
   listCaseChat,
   listCaseGotchas,
   listCases,
@@ -2821,10 +2819,27 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
   const [problemNote, setProblemNote] = useState("");
   const [showTerms, setShowTerms] = useState(false);
   const [working, setWorking] = useState("");
+  const [cacheLabel, setCacheLabel] = useState("Cached exhibits on this computer: …");
+  const [clearingCache, setClearingCache] = useState(false);
 
   useEffect(() => {
     if (entitlement?.email && !email) setEmail(entitlement.email);
   }, [entitlement?.email]);
+
+  useEffect(() => {
+    let cancelled = false;
+    import("./storage/index.js")
+      .then(({ cacheUsageLabel }) => cacheUsageLabel())
+      .then((label) => {
+        if (!cancelled) setCacheLabel(label);
+      })
+      .catch(() => {
+        if (!cancelled) setCacheLabel("Cached exhibits on this computer: unavailable");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   if (!entitlement) {
     return <div className="card"><p>Loading account status…</p></div>;
@@ -2938,6 +2953,31 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
         <p className="footnote" style={{ margin: "4px 0 0" }}>
           For product help and billing. Do not paste document content or privileged filings into email.
         </p>
+      </div>
+
+      <div style={{ marginTop: 16 }}>
+        <p className="footnote" style={{ margin: 0 }}>{cacheLabel}</p>
+        <button
+          className="btn secondary"
+          type="button"
+          style={{ marginTop: 8 }}
+          disabled={clearingCache}
+          onClick={async () => {
+            if (!window.confirm("Clear cached exhibits on this computer? Server findings are kept.")) return;
+            setClearingCache(true);
+            try {
+              const { clearCachedExhibits, cacheUsageLabel } = await import("./storage/index.js");
+              await clearCachedExhibits();
+              setCacheLabel(await cacheUsageLabel());
+            } catch (err) {
+              onError(err.message || "Could not clear cached exhibits.");
+            } finally {
+              setClearingCache(false);
+            }
+          }}
+        >
+          Clear cached exhibits
+        </button>
       </div>
 
       {isDesktopApp() && signedIn && (
@@ -3260,7 +3300,7 @@ function ProgressPanel({ job, filename }) {
   );
 }
 
-async function previewKind(blob, contentType, auditType) {
+async function previewKind(blob, contentType) {
   let magic = "";
   try {
     const head = new Uint8Array(await blob.slice(0, 5).arrayBuffer());
@@ -3269,10 +3309,10 @@ async function previewKind(blob, contentType, auditType) {
     magic = "";
   }
   if (magic.startsWith("%PDF-")) return "pdf";
-  const hint = `${contentType || ""} ${auditType || ""} ${blob?.type || ""}`.toLowerCase();
+  const hint = `${contentType || ""} ${blob?.type || ""}`.toLowerCase();
   if (hint.includes("pdf")) return "pdf";
   if (hint.includes("png") || hint.includes("jpeg") || hint.includes("gif") || hint.includes("image/")) return "image";
-  if (hint.includes("text/plain") || hint.includes("txt")) return "text";
+  if (hint.includes("text/plain") || hint === "text" || hint.includes(" text")) return "text";
   return "";
 }
 
@@ -3307,119 +3347,139 @@ function ReportViewer({
   const [localFileUrl, setLocalFileUrl] = useState(null);
   const [sourceKind, setSourceKind] = useState("");
   const [sourceMissing, setSourceMissing] = useState(false);
-  const [sourceLoading, setSourceLoading] = useState(false);
-  const reattachRef = useRef(null);
-  const hosted = isHostedAnalysis();
-  const vaultUrl = !hosted && caseId && documentId ? documentFileUrl(caseId, documentId) : null;
-  const remoteUrl = hosted ? null : (vaultUrl || (job?.job_id ? jobSourceUrl(job.job_id) : null));
-  const fileUrl = localFileUrl || remoteUrl;
-  const lowerName = (documentName || job.filename || report?.audit?.filename || "").toLowerCase();
-  const auditType = String(report?.audit?.file_type || "").toLowerCase();
-  const isPdf = sourceKind === "pdf" || auditType === "pdf" || auditType.includes("pdf") || lowerName.endsWith(".pdf");
-  const isImage = sourceKind === "image" || /\.(png|jpe?g|gif)$/i.test(lowerName) || auditType === "png" || auditType === "jpg" || auditType === "jpeg" || auditType === "gif";
-  const isText = sourceKind === "text" || lowerName.endsWith(".txt") || auditType === "txt" || auditType === "text";
+  const [sourceLoading, setSourceLoading] = useState(true);
+  const [locateNote, setLocateNote] = useState("");
+  const [locating, setLocating] = useState(false);
+  const blobUrlRef = useRef(null);
+  const fileUrl = localFileUrl;
+  const isPdf = sourceKind === "pdf";
+  const isImage = sourceKind === "image";
+  const isText = sourceKind === "text";
   const docSha =
     report?.audit?.sha256 ||
     documents.find((d) => d.id === documentId)?.sha256 ||
     null;
 
-  // Hosted bytes live with the report. Local/session file is only a same-browser shortcut.
+  function rememberBlobUrl(url) {
+    if (blobUrlRef.current && blobUrlRef.current !== url) {
+      URL.revokeObjectURL(blobUrlRef.current);
+    }
+    blobUrlRef.current = url;
+    setLocalFileUrl(url);
+  }
+
+  useEffect(() => () => {
+    if (blobUrlRef.current) URL.revokeObjectURL(blobUrlRef.current);
+  }, []);
+
   useEffect(() => {
-    let revoked = null;
     let cancelled = false;
     (async () => {
-      if (hosted && caseId && documentId) {
-        setSourceLoading(true);
-        setSourceMissing(false);
-        setLocalFileUrl(null);
-        try {
-          const { fetchMatterSource } = await import("./api");
-          const result = await fetchMatterSource(caseId, documentId);
-          if (cancelled) return;
-          if (result.missing) {
-            setSourceMissing(true);
-            return;
-          }
-          const kind = await previewKind(result.blob, result.type, report?.audit?.file_type);
-          const typed = result.blob.type
-            ? result.blob
-            : new Blob([result.blob], { type: result.type || "application/octet-stream" });
-          const url = URL.createObjectURL(typed);
-          revoked = url;
-          setSourceKind(kind);
-          setLocalFileUrl(url);
-        } catch {
-          if (!cancelled) setSourceMissing(true);
-        } finally {
-          if (!cancelled) setSourceLoading(false);
-        }
+      if (!docSha) {
+        setSourceMissing(true);
+        rememberBlobUrl(null);
         return;
       }
-      if (!docSha) return;
+      setSourceLoading(true);
+      setSourceMissing(false);
       try {
-        const { getSessionCachedFile, getFileHandle, sha256OfFile } = await import("./localFiles.js");
-        let file = getSessionCachedFile(docSha);
-        if (!file) {
-          const row = await getFileHandle(docSha).catch(() => null);
-          if (row?.handle) {
-            try {
-              const perm = await row.handle.queryPermission?.({ mode: "read" });
-              if (perm !== "granted") {
-                const next = await row.handle.requestPermission?.({ mode: "read" });
-                if (next !== "granted") return;
-              }
-              file = await row.handle.getFile();
-              const digest = await sha256OfFile(file);
-              if (digest.toLowerCase() !== String(docSha).toLowerCase()) file = null;
-            } catch {
-              file = null;
-            }
-          }
+        const { resolveExhibitFile } = await import("./storage/index.js");
+        const blob = await resolveExhibitFile(documentId, docSha);
+        if (cancelled) return;
+        if (!blob) {
+          setSourceMissing(true);
+          rememberBlobUrl(null);
+          return;
         }
-        if (!file || cancelled) return;
-        const kind = await previewKind(file, file.type, report?.audit?.file_type);
-        const url = URL.createObjectURL(file);
-        revoked = url;
+        const kind = await previewKind(blob, blob.type);
+        if (cancelled) return;
+        rememberBlobUrl(URL.createObjectURL(blob));
         setSourceKind(kind);
-        setLocalFileUrl(url);
+        setSourceMissing(false);
       } catch {
-        /* keep remote / none */
+        if (!cancelled) setSourceMissing(true);
+      } finally {
+        if (!cancelled) setSourceLoading(false);
       }
     })();
     return () => {
       cancelled = true;
-      if (revoked) URL.revokeObjectURL(revoked);
     };
-  }, [hosted, caseId, documentId, docSha, report?.audit?.file_type]);
+  }, [documentId, docSha]);
 
-  async function reattachSource(file) {
-    if (!file || !caseId || !documentId) return;
-    setSourceLoading(true);
-    try {
-      const { attachMatterSource, fetchMatterSource } = await import("./api");
-      await attachMatterSource(caseId, documentId, file);
-      const result = await fetchMatterSource(caseId, documentId);
-      if (result.missing) {
-        setSourceMissing(true);
-        onError?.("Original file is no longer available. Re-upload or re-fetch.");
-        return;
-      }
-      const kind = await previewKind(result.blob, result.type, report?.audit?.file_type);
-      const typed = result.blob.type
-        ? result.blob
-        : new Blob([result.blob], { type: result.type || "application/octet-stream" });
-      const url = URL.createObjectURL(typed);
-      setLocalFileUrl((prev) => {
-        if (prev && prev.startsWith("blob:")) URL.revokeObjectURL(prev);
-        return url;
+  function caseExhibits() {
+    const rows = (documents || [])
+      .map((doc) => ({
+        exhibitId: doc.id,
+        sha256: doc.sha256,
+        byteLength:
+          doc.file_size_bytes
+          || (doc.id === documentId ? report?.audit?.file_size_bytes : null),
+        name: doc.display_name || doc.original_filename || "",
+      }))
+      .filter((row) => row.sha256);
+    if (
+      docSha
+      && !rows.some((row) => String(row.sha256).toLowerCase() === String(docSha).toLowerCase())
+    ) {
+      rows.push({
+        exhibitId: documentId,
+        sha256: docSha,
+        byteLength: report?.audit?.file_size_bytes,
+        name: documentName || "",
       });
-      setSourceKind(kind);
-      setSourceMissing(false);
-      onError?.("");
+    }
+    return rows;
+  }
+
+  async function showResolvedBlob(blob) {
+    const kind = await previewKind(blob, blob.type);
+    rememberBlobUrl(URL.createObjectURL(blob));
+    setSourceKind(kind);
+    setSourceMissing(false);
+  }
+
+  async function locateFolder() {
+    setLocating(true);
+    setLocateNote("");
+    onError?.("");
+    try {
+      const { locateCaseFiles, resolveExhibitFile } = await import("./storage/index.js");
+      const result = await locateCaseFiles(caseExhibits(), {
+        onProgress: ({ scanned, found, total }) => {
+          setLocateNote(`Checking files… found ${found} of ${total} (${scanned} scanned).`);
+        },
+      });
+      if (result.cancelled) return;
+      setLocateNote(result.summary);
+      const blob = await resolveExhibitFile(documentId, docSha);
+      if (blob) await showResolvedBlob(blob);
+      else setSourceMissing(true);
     } catch (err) {
-      onError?.(err.message || "Could not re-attach that file.");
+      onError?.(err.message || "Could not locate files.");
     } finally {
-      setSourceLoading(false);
+      setLocating(false);
+    }
+  }
+
+  async function locateThisExhibit() {
+    if (!docSha) return;
+    setLocating(true);
+    onError?.("");
+    try {
+      const { locateOneExhibit } = await import("./storage/index.js");
+      const blob = await locateOneExhibit({
+        exhibitId: documentId,
+        sha256: docSha,
+        byteLength: report?.audit?.file_size_bytes,
+      });
+      if (!blob) return;
+      await showResolvedBlob(blob);
+      setLocateNote("");
+    } catch (err) {
+      onError?.(err.message || "That file does not match this exhibit.");
+    } finally {
+      setLocating(false);
     }
   }
 
@@ -3462,7 +3522,7 @@ function ReportViewer({
             >
               {showDoc ? "Hide document" : "View document"}
             </button>
-            {sourceMissing ? (
+            {sourceLoading || sourceMissing ? (
               <button className="btn secondary" type="button" disabled>
                 Open in new tab
               </button>
@@ -3494,7 +3554,7 @@ function ReportViewer({
                 Open local file
               </button>
             )}
-            {sourceMissing ? (
+            {sourceLoading || sourceMissing ? (
               <button className="btn secondary" type="button" disabled>
                 Download
               </button>
@@ -3547,35 +3607,22 @@ function ReportViewer({
               <p className="empty-copy">Loading source…</p>
             ) : sourceMissing ? (
               <div className="doc-fallback">
-                <p>Original file is no longer available. Re-upload or re-fetch.</p>
-                {hosted && (
-                  <>
-                    <button
-                      className="btn gold"
-                      type="button"
-                      onClick={() => reattachRef.current?.click()}
-                    >
-                      Re-attach source
-                    </button>
-                    <input
-                      ref={reattachRef}
-                      type="file"
-                      hidden
-                      accept=".pdf,.txt,.png,.jpg,.jpeg,.gif"
-                      onChange={(e) => {
-                        const file = e.target.files?.[0];
-                        e.target.value = "";
-                        if (file) reattachSource(file);
-                      }}
-                    />
-                  </>
-                )}
+                <p>This exhibit is stored on the computer it was uploaded from.</p>
+                <div className="row" style={{ gap: 8, marginTop: 10 }}>
+                  <button className="btn gold" type="button" disabled={locating} onClick={locateFolder}>
+                    Locate files
+                  </button>
+                  <button className="btn secondary" type="button" disabled={locating} onClick={locateThisExhibit}>
+                    Locate this exhibit
+                  </button>
+                </div>
+                {locateNote ? <p className="footnote" style={{ marginTop: 8 }}>{locateNote}</p> : null}
               </div>
             ) : fileUrl ? (
-              <DocumentPreview url={fileUrl} isPdf={isPdf} isImage={isImage} isText={isText} name={lowerName} />
+              <DocumentPreview url={fileUrl} isPdf={isPdf} isImage={isImage} isText={isText} name={documentName || ""} />
             ) : (
               <p className="empty-copy">
-                Source PDF is not kept on the hosted analysis service. Open the local file to view pages.
+                This exhibit is stored on the computer it was uploaded from.
               </p>
             )}
           </div>

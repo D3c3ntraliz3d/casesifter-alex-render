@@ -67,6 +67,8 @@ def cases_db_support_code() -> str | None:
 
 
 def _scrub_value(value: Any) -> Any:
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return "[redacted]"
     if isinstance(value, str):
         value = _PATH_RE.sub("[path]", value)
         value = _EMAIL_RE.sub("[email]", value)
@@ -91,10 +93,10 @@ def _scrub_event(event: dict[str, Any]) -> dict[str, Any]:
     # Drop request bodies entirely — may contain uploads / fact payloads.
     req = event.get("request")
     if isinstance(req, dict):
-        if "data" in req:
-            req["data"] = "[redacted]"
-        if "cookies" in req:
-            req["cookies"] = "[redacted]"
+        # Multipart upload bodies must not ride along on request.data, body, or files.
+        for key in ("data", "body", "files", "cookies"):
+            if key in req:
+                req[key] = "[redacted]"
         event["request"] = _scrub_value(req)
     for key in ("breadcrumbs", "extra", "contexts", "exception"):
         if key in event:

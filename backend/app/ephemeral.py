@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import shutil
 import threading
 import time
@@ -10,6 +11,8 @@ from pathlib import Path
 
 from app.config import settings
 from app.storage import job_dir, load_progress
+
+logger = logging.getLogger(__name__)
 
 _sweeper_started = False
 _sweeper_lock = threading.Lock()
@@ -42,6 +45,14 @@ def maybe_delete_after_terminal(job_id: str, *, retain_report: bool = False) -> 
             flag = job_dir(job_id) / "persist.flag"
             if not flag.exists():
                 flag.write_text("1", encoding="utf-8")
+
+
+def delete_ephemeral_source(job_id: str) -> None:
+    """Drop the uploaded bytes. Log the job id only — never a filename or content."""
+    if not settings.ephemeral_jobs:
+        return
+    _delete_source_bytes(job_id)
+    logger.info("deleted ephemeral source bytes job=%s", job_id)
 
 
 def _delete_source_bytes(job_id: str) -> None:

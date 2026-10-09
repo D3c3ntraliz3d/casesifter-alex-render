@@ -104,7 +104,8 @@ class Document(Base):
     snapshot_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Full report JSON for reopen without job TTL (encrypted).
     report_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Encrypted original bytes. Survives analysis restarts; job disk does not.
+    # Unused. Left in place so existing databases do not need a column drop.
+    # Exhibit bytes are not stored. A one-shot migration nulls any leftover value.
     source_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
     mime_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
     source_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -113,6 +114,15 @@ class Document(Base):
 
     matter: Mapped["Matter"] = relationship(back_populates="documents")
     facts: Mapped[list["Fact"]] = relationship(back_populates="document", cascade="all, delete-orphan")
+
+
+class SchemaMigration(Base):
+    """One row per applied data migration. Presence means do not run it again."""
+
+    __tablename__ = "schema_migrations"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    applied_at: Mapped[str] = mapped_column(String(40), nullable=False)
 
 
 class Entity(Base):
@@ -260,6 +270,46 @@ def init_db(url: str | None = None) -> None:
     engine = get_engine(url)
     Base.metadata.create_all(engine)
     ensure_source_columns(engine)
+    clear_source_enc_once(engine)
+
+
+def clear_source_enc_once(engine) -> int | None:
+    """Null leftover exhibit bytes once. Does not VACUUM FULL (that locks the table).
+
+    Returns the number of rows cleared, or None when the marker already exists.
+    """
+    import logging
+
+    from sqlalchemy import text
+    from sqlalchemy.exc import IntegrityError
+
+    log = logging.getLogger(__name__)
+    marker = "clear_source_enc"
+    try:
+        with engine.begin() as conn:
+            found = conn.execute(
+                text("SELECT id FROM schema_migrations WHERE id = :id"),
+                {"id": marker},
+            ).first()
+            if found:
+                return None
+            result = conn.execute(
+                text(
+                    "UPDATE documents SET source_enc = NULL, source_missing = :missing "
+                    "WHERE source_enc IS NOT NULL"
+                ),
+                {"missing": True},
+            )
+            count = int(result.rowcount or 0)
+            conn.execute(
+                text("INSERT INTO schema_migrations (id, applied_at) VALUES (:id, :ts)"),
+                {"id": marker, "ts": _utcnow().isoformat()},
+            )
+    except IntegrityError:
+        log.info("clear_source_enc already applied")
+        return None
+    log.info("clear_source_enc cleared %s document rows", count)
+    return count
 
 
 def ensure_source_columns(engine) -> None:

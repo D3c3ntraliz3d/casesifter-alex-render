@@ -6,7 +6,6 @@ compare_to_case stays the cross-doc engine.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import threading
@@ -318,12 +317,15 @@ class FactMemoryStore:
     def _document_dict(self, doc: Document, fernet: Fernet) -> dict[str, Any]:
         risk_level = None
         risk_score = None
+        file_size_bytes = None
         if doc.report_enc:
             try:
                 report = enc.decrypt_json(fernet, doc.report_enc) or {}
                 if isinstance(report, dict):
                     risk_level = report.get("risk_level")
                     risk_score = report.get("risk_score")
+                    audit = report.get("audit") if isinstance(report.get("audit"), dict) else {}
+                    file_size_bytes = audit.get("file_size_bytes")
             except Exception:
                 logger.debug("Could not decrypt report risk for doc %s", doc.id, exc_info=True)
         return {
@@ -348,6 +350,7 @@ class FactMemoryStore:
             "source_size": doc.source_size,
             "risk_level": risk_level,
             "risk_score": risk_score,
+            "file_size_bytes": file_size_bytes,
         }
 
     def list_prior_snapshots(
@@ -466,8 +469,17 @@ class FactMemoryStore:
         report: dict[str, Any] | None = None,
         source_bytes: bytes | None = None,
         mime_type: str | None = None,
+        source_size: int | None = None,
     ) -> dict[str, Any]:
-        """Persist document/entities/facts/run/findings and, when given, the source bytes."""
+        """Persist facts, findings, and exhibit metadata. Exhibit bytes are not stored."""
+        byte_length = None
+        if source_size is not None:
+            try:
+                byte_length = int(source_size)
+            except (TypeError, ValueError):
+                byte_length = None
+            if byte_length is not None and byte_length < 0:
+                byte_length = None
         with self.session() as s:
             firm = s.get(Firm, firm_id)
             if not firm:
@@ -494,7 +506,8 @@ class FactMemoryStore:
                 if report is not None:
                     existing.report_enc = enc.encrypt_json(fernet, report)
                     existing.last_job_id = job_id
-                _attach_source(existing, fernet, sha256, source_bytes, mime_type)
+                if byte_length is not None:
+                    existing.source_size = byte_length
                 run = Run(
                     id=_new_id(),
                     matter_id=matter_id,
@@ -534,9 +547,10 @@ class FactMemoryStore:
             doc.scanned_at = _utcnow()
             doc.extractor_version = extractor_version
             doc.last_job_id = job_id
+            if byte_length is not None:
+                doc.source_size = byte_length
             if report is not None:
                 doc.report_enc = enc.encrypt_json(fernet, report)
-            _attach_source(doc, fernet, sha256, source_bytes, mime_type)
 
             # Cap excerpt for vault-compat priors (encrypted). Prefer empty if firm opts out of snippets.
             excerpt = (text_excerpt or "")[:24000] if store_snippets else ""
@@ -806,33 +820,8 @@ class FactMemoryStore:
     def load_document_source(
         self, firm_id: str, matter_id: str, document_id: str
     ) -> dict[str, Any] | None:
-        """Decrypt source bytes and refuse them if the hash is not the scanned one."""
-        with self.session() as s:
-            doc = s.execute(
-                select(Document).where(
-                    Document.id == document_id,
-                    Document.firm_id == firm_id,
-                    Document.matter_id == matter_id,
-                )
-            ).scalar_one_or_none()
-            if doc is None or not doc.source_enc or doc.source_missing:
-                return None
-            fernet = self._fernet(s, firm_id)
-            data = enc.decrypt_bytes(fernet, doc.source_enc)
-            if not data:
-                return None
-            actual = hashlib.sha256(data).hexdigest()
-            if actual.lower() != doc.sha256.lower():
-                logger.error("Stored source sha256 does not match document %s", document_id)
-                return None
-            filename = enc.decrypt_text(fernet, doc.original_filename_enc) or "source"
-            return {
-                "bytes": data,
-                "mime_type": doc.mime_type or _mime_for_bytes(data, ""),
-                "filename": filename,
-                "sha256": doc.sha256,
-                "size": len(data),
-            }
+        """Exhibit bytes are not stored. Callers get nothing to decrypt."""
+        return None
 
     def save_document_source(
         self,
@@ -845,34 +834,8 @@ class FactMemoryStore:
         filename: str | None = None,
         user_id: str | None = None,
     ) -> dict[str, Any] | None:
-        """Re-attach bytes only when they match the fingerprint already on the report."""
-        with self.session() as s:
-            doc = s.execute(
-                select(Document).where(
-                    Document.id == document_id,
-                    Document.firm_id == firm_id,
-                    Document.matter_id == matter_id,
-                )
-            ).scalar_one_or_none()
-            if doc is None:
-                return None
-            fernet = self._fernet(s, firm_id)
-            _attach_source(doc, fernet, doc.sha256, source_bytes, mime_type)
-            if doc.source_missing or not doc.source_enc:
-                s.rollback()
-                return None
-            if filename:
-                doc.original_filename_enc = enc.encrypt_text(fernet, filename)
-            self._audit(s, firm_id, user_id, "document.source_attach", document_id)
-            s.commit()
-            return {
-                "id": doc.id,
-                "sha256": doc.sha256,
-                "mime_type": doc.mime_type,
-                "source_size": doc.source_size,
-                "has_source": True,
-                "source_missing": False,
-            }
+        """Exhibit bytes are not stored."""
+        return None
 
     def flag_missing_sources(self) -> int:
         """Mark reports whose original bytes were never stored."""
@@ -928,21 +891,9 @@ def _attach_source(
     source_bytes: bytes | None,
     mime_type: str | None,
 ) -> None:
-    """Store bytes only when they hash to the fingerprint that was analyzed."""
-    if not source_bytes:
-        if not doc.source_enc:
-            doc.source_missing = True
-        return
-    actual = hashlib.sha256(source_bytes).hexdigest()
-    if actual.lower() != str(sha256 or "").lower():
-        logger.warning("Refusing source bytes whose sha256 does not match the scan")
-        if not doc.source_enc:
-            doc.source_missing = True
-        return
-    doc.source_enc = enc.encrypt_bytes(fernet, source_bytes)
-    doc.mime_type = mime_type or _mime_for_bytes(source_bytes, "")
-    doc.source_size = len(source_bytes)
-    doc.source_missing = False
+    """Exhibit bytes are not stored. Leave source_enc untouched."""
+    if not doc.source_enc:
+        doc.source_missing = True
 
 
 def _mime_for_bytes(data: bytes, file_type: str) -> str:
