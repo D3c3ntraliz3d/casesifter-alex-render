@@ -7,7 +7,6 @@ import shutil
 import threading
 import time
 import uuid
-from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -92,47 +91,15 @@ async def health():
     return _health_payload()
 
 
-# #region agent log
-# Ephemeral ring buffer so the HTTPS SPA can report debug events (127.0.0.1 ingest is mixed-content blocked).
-_AGENT_DEBUG_LOGS: deque[dict[str, Any]] = deque(maxlen=200)
-_AGENT_DEBUG_LOCK = threading.Lock()
-
-
-@public_router.post("/agent-debug")
-async def agent_debug_ingest(payload: dict[str, Any]):
-    entry = dict(payload or {})
-    entry.setdefault("received_at", time.time())
-    with _AGENT_DEBUG_LOCK:
-        _AGENT_DEBUG_LOGS.append(entry)
-    return {"ok": True, "n": len(_AGENT_DEBUG_LOGS)}
-
-
-@public_router.get("/agent-debug")
-def agent_debug_dump():
-    with _AGENT_DEBUG_LOCK:
-        return {"ok": True, "logs": list(_AGENT_DEBUG_LOGS)}
-
-
-@public_router.delete("/agent-debug")
-def agent_debug_clear():
-    with _AGENT_DEBUG_LOCK:
-        _AGENT_DEBUG_LOGS.clear()
-    return {"ok": True}
-
-
-# #endregion
-
-
 # --- Entitlement / hybrid billing stubs -------------------------------------------------
 
 
-@public_router.get("/entitlement")
+# Vault-only: not mounted on public_router (analysis mode exposes /health only).
 @router.get("/entitlement")
 def get_entitlement():
     return entitlement_status()
 
 
-@public_router.post("/entitlement/license")
 @router.post("/entitlement/license")
 def post_license(body: LicenseBody):
     return save_license_key(body.license_key)

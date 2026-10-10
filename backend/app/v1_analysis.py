@@ -117,8 +117,12 @@ class FactConflictPacketBody(BaseModel):
     documents: list[FactConflictPacketDoc] = Field(default_factory=list, max_length=80)
 
 
+class ControlPlaneUnavailable(Exception):
+    """Control plane unreachable while refreshing entitlement."""
+
+
 def _probe_control_plane_session(token: str) -> dict | None:
-    """Return entitlement dict when the control-plane session is active; else None."""
+    """Fetch entitlement from control plane. Raises ControlPlaneUnavailable on network failure."""
     control = (settings.cloud_control_url or "").strip().rstrip("/")
     if not control or not token:
         return None
@@ -135,12 +139,11 @@ def _probe_control_plane_session(token: str) -> dict | None:
         with urllib.request.urlopen(req, timeout=8) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
-        logger.info("Control-plane session probe failed: %s", exc)
-        return None
-    if not isinstance(data, dict) or not data.get("active"):
+        logger.info("Control-plane entitlement probe failed: %s", exc)
+        raise ControlPlaneUnavailable(str(exc)) from exc
+    if not isinstance(data, dict):
         return None
     _SESSION_ENTITLEMENT_CACHE[token] = (now + _SESSION_CACHE_TTL_S, data)
-    # Opportunistic prune
     if len(_SESSION_ENTITLEMENT_CACHE) > 256:
         stale = [k for k, (exp, _) in _SESSION_ENTITLEMENT_CACHE.items() if exp <= now]
         for k in stale:
@@ -152,23 +155,68 @@ def _require_analysis_auth(
     authorization: str | None = Header(default=None),
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
 ) -> dict:
+    """Authenticate only — does not require an active paid/trial entitlement."""
     keys = settings.analysis_api_key_set()
     bearer = None
     if authorization and authorization.lower().startswith("bearer "):
         bearer = authorization[7:].strip()
     api_key = (x_api_key or "").strip() or None
-    # Prefer explicit API key header; bearer may also be an ops key.
     token_as_key = api_key or (bearer if bearer and bearer in keys else None)
 
     mode = settings.resolve_app_mode()
-    # Hosted analysis: ops API key OR active control-plane session (browser soft-launch).
     if mode == "analysis":
         if token_as_key and token_as_key in keys:
-            return {"auth": "api_key"}
+            return {"auth": "api_key", "authenticated": True, "entitled": True}
         if bearer:
-            remote = _probe_control_plane_session(bearer)
-            if remote:
-                return {"auth": "session", "email": remote.get("email"), "plan": remote.get("plan")}
+            from app.session_auth import (
+                SessionLookupUnavailable,
+                session_secret,
+                verify_bearer_locally,
+            )
+
+            # Fail closed: no SESSION_SECRET → reject all browser sessions.
+            # Never fall back to a default secret or probe-only identity.
+            if not session_secret():
+                raise HTTPException(
+                    401,
+                    "Valid analysis API key or active subscription session required.",
+                )
+            try:
+                local = verify_bearer_locally(bearer)
+            except SessionLookupUnavailable:
+                raise HTTPException(
+                    503,
+                    "Session store temporarily unavailable. Try again shortly.",
+                ) from None
+            if not local:
+                raise HTTPException(
+                    401,
+                    "Valid analysis API key or active subscription session required.",
+                )
+            remote = None
+            entitlement_unavailable = False
+            try:
+                remote = _probe_control_plane_session(bearer)
+            except ControlPlaneUnavailable:
+                cached = _SESSION_ENTITLEMENT_CACHE.get(bearer)
+                if cached:
+                    remote = cached[1]
+                else:
+                    entitlement_unavailable = True
+            email = local.get("email") or (remote or {}).get("email")
+            entitled = bool((remote or {}).get("active")) if remote is not None else False
+            if remote is None and entitlement_unavailable:
+                entitled = False
+            return {
+                "auth": "session",
+                "authenticated": True,
+                "entitled": entitled,
+                "email": email,
+                "user_id": local.get("user_id") or (remote or {}).get("user_id"),
+                "plan": (remote or {}).get("plan"),
+                "bearer": bearer,
+                "entitlement_unavailable": entitlement_unavailable and remote is None,
+            }
         raise HTTPException(
             401,
             "Valid analysis API key or active subscription session required.",
@@ -176,31 +224,81 @@ def _require_analysis_auth(
 
     if keys:
         if not token_as_key or token_as_key not in keys:
-            # Allow session bearer even when keys are configured (desktop hybrid).
             if bearer:
-                remote = _probe_control_plane_session(bearer)
-                if remote:
-                    return {"auth": "session", "email": remote.get("email"), "plan": remote.get("plan")}
-            raise HTTPException(401, "Valid analysis API key required.")
-        return {"auth": "api_key"}
+                from app.session_auth import verify_bearer_locally
 
-    # Local vault: fall back to product entitlement (cloud/license/open).
+                local = verify_bearer_locally(bearer)
+                if local:
+                    return {**local, "entitled": True}
+                try:
+                    remote = _probe_control_plane_session(bearer)
+                except ControlPlaneUnavailable:
+                    raise HTTPException(
+                        503,
+                        "Billing service temporarily unavailable. Try again shortly.",
+                    ) from None
+                if remote and remote.get("active"):
+                    return {
+                        "auth": "session",
+                        "email": remote.get("email"),
+                        "plan": remote.get("plan"),
+                        "authenticated": True,
+                        "entitled": True,
+                    }
+            raise HTTPException(401, "Valid analysis API key required.")
+        return {"auth": "api_key", "authenticated": True, "entitled": True}
+
     try:
-        return require_scan_allowed()
+        return {**require_scan_allowed(), "authenticated": True, "entitled": True}
     except PermissionError as exc:
         raise HTTPException(402, str(exc)) from exc
 
 
+def require_entitled(auth: dict) -> dict:
+    """Write-path gate: inactive trial/subscription → 402 (reads stay open)."""
+    if auth.get("auth") == "api_key" or auth.get("entitled"):
+        return auth
+    if auth.get("entitlement_unavailable"):
+        raise HTTPException(
+            503,
+            "Billing service temporarily unavailable. Try again shortly.",
+        )
+    raise HTTPException(
+        402,
+        "Active trial or subscription required to analyze files.",
+    )
+
+
 def resolve_firm_context(auth: dict) -> dict:
-    """Map session email (or API-key ops) → firm_id / user_id. 1:1 firm per account."""
+    """Map session user_id/email (or API-key ops) → firm_id / user_id."""
     from app.fact_memory.store import get_store
 
     store = get_store()
     email = (auth.get("email") or "").strip().lower()
+    provider_user_id = (auth.get("user_id") or "").strip() or None
     if email:
-        return store.ensure_firm_for_email(email)
+        return store.ensure_firm_for_email(email, auth_user_id=provider_user_id)
     # API-key / local open mode: shared ops firm (still firm-scoped rows).
     return store.ensure_firm_for_email("ops@casesifter.local", name="Ops / API key")
+
+
+def require_job_owner(job_id: str, auth: dict) -> dict:
+    """Validate job_id shape and firm ownership. Same 404 body for unknown/foreign."""
+    from app.fact_memory.store import get_store
+    from app.storage import JOB_ID_RE
+
+    if not JOB_ID_RE.fullmatch((job_id or "").strip()):
+        raise HTTPException(404, "Unknown or expired job.")
+    row = get_store().get_analysis_job(job_id)
+    if not row:
+        raise HTTPException(404, "Unknown or expired job.")
+    if auth.get("auth") == "api_key":
+        logger.info("auth=api_key job=%s", job_id[:8])
+        return {"job": row, "firm_ctx": resolve_firm_context(auth)}
+    firm_ctx = resolve_firm_context(auth)
+    if row.get("firm_id") != firm_ctx.get("firm_id"):
+        raise HTTPException(404, "Unknown or expired job.")
+    return {"job": row, "firm_ctx": firm_ctx}
 
 
 def _should_persist(auth: dict, firm_ctx: dict | None) -> bool:
@@ -303,6 +401,7 @@ async def create_ephemeral_job(
     filed_date: str | None = Form(default=None),
     _auth: dict = Depends(_require_analysis_auth),
 ):
+    require_entitled(_auth)
     ensure_sweeper()
     ensure_watchdog()
     if not file.filename:
@@ -574,15 +673,12 @@ def get_ephemeral_job(
     include_report: bool = Query(default=False),
     _auth: dict = Depends(_require_analysis_auth),
 ):
+    owned = require_job_owner(job_id, _auth)
+    firm_id = (owned.get("firm_ctx") or {}).get("firm_id")
     progress = load_progress(job_id)
     if progress is None:
-        try:
-            from app.fact_memory.store import get_store
-
-            row = get_store().get_analysis_job(job_id)
-        except Exception:
-            row = None
-        if row and row.get("status") == "interrupted":
+        row = owned.get("job") or {}
+        if row.get("status") == "interrupted":
             return _durable_interrupted_payload(row)
         raise HTTPException(404, "Unknown or expired job.")
     # Status polls must stay small. Embedding the report froze the worker on
@@ -590,8 +686,11 @@ def get_ephemeral_job(
     payload = progress.model_dump(mode="json")
     payload["report"] = None
     payload["ephemeral"] = True
-    persist_flag = job_dir(job_id) / "persist.flag"
-    if persist_flag.exists():
+    from app.storage import job_dir_existing
+
+    existing = job_dir_existing(job_id)
+    persist_flag = (existing / "persist.flag") if existing else None
+    if persist_flag is not None and persist_flag.exists():
         payload["ephemeral"] = False
         payload["persist_facts"] = True
         try:
@@ -600,13 +699,14 @@ def get_ephemeral_job(
             payload["matter_id"] = None
     # Timing + queue ETA for the hosted bulk UI.
     try:
-        timing_path = job_dir(job_id) / "timing.json"
-        if timing_path.is_file():
-            payload["timing"] = json.loads(timing_path.read_text(encoding="utf-8"))
-        else:
-            raw = json.loads((job_dir(job_id) / "progress.json").read_text(encoding="utf-8"))
-            if isinstance(raw.get("timing"), dict):
-                payload["timing"] = raw["timing"]
+        if existing is not None:
+            timing_path = existing / "timing.json"
+            if timing_path.is_file():
+                payload["timing"] = json.loads(timing_path.read_text(encoding="utf-8"))
+            else:
+                raw = json.loads((existing / "progress.json").read_text(encoding="utf-8"))
+                if isinstance(raw.get("timing"), dict):
+                    payload["timing"] = raw["timing"]
     except Exception:
         pass
     if progress.status in {"queued", "running", "local_done"}:
@@ -615,7 +715,8 @@ def get_ephemeral_job(
             from app.gemini_executor import estimate_eta_seconds
 
             active = get_store().list_analysis_jobs_by_status(
-                ["queued", "running", "local_done"]
+                ["queued", "running", "local_done"],
+                firm_id=firm_id,
             )
             position = 1
             for idx, row in enumerate(active, start=1):
@@ -635,9 +736,26 @@ def get_ephemeral_job(
 
 @v1.get("/jobs/{job_id}/report")
 def get_ephemeral_report(job_id: str, _auth: dict = Depends(_require_analysis_auth)):
+    owned = require_job_owner(job_id, _auth)
     report = load_report(job_id)
     if report is None:
+        # Persisted jobs delete disk reports at terminal; serve from Postgres.
+        row = owned.get("job") or {}
+        doc_id = row.get("document_id")
+        firm_id = (owned.get("firm_ctx") or {}).get("firm_id")
+        matter_id = row.get("matter_id")
+        if doc_id and firm_id and matter_id:
+            try:
+                from app.fact_memory.store import get_store
+
+                durable = get_store().get_document_report(firm_id, matter_id, doc_id)
+                if isinstance(durable, dict):
+                    return JSONResponse(durable)
+            except Exception:
+                logger.debug("durable report fallback failed job=%s", job_id[:8], exc_info=True)
         progress = load_progress(job_id)
+        if progress is None and not row:
+            raise HTTPException(404, "Unknown or expired job.")
         if progress is None:
             raise HTTPException(404, "Unknown or expired job.")
         raise HTTPException(409, "Report is not ready yet.")
@@ -646,6 +764,7 @@ def get_ephemeral_report(job_id: str, _auth: dict = Depends(_require_analysis_au
 
 @v1.delete("/jobs/{job_id}")
 def purge_ephemeral_job(job_id: str, _auth: dict = Depends(_require_analysis_auth)):
+    require_job_owner(job_id, _auth)
     ok = delete_job_files(job_id)
     if not ok:
         raise HTTPException(404, "Unknown or already purged job.")
@@ -706,4 +825,6 @@ def ephemeral_fact_conflicts(
 
 @v1.post("/sweep")
 def force_sweep(_auth: dict = Depends(_require_analysis_auth)):
+    if _auth.get("auth") != "api_key":
+        raise HTTPException(403, "API key required.")
     return {"removed": sweep_stale_jobs()}

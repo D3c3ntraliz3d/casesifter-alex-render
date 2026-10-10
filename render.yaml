@@ -1,17 +1,27 @@
 # CaseSifter hybrid — ephemeral analysis + control plane + hosted web app (no document vault)
+#
+# Shared secrets: both services pull SESSION_SECRET from envVarGroup casesifter-auth
+# so they always match (no manual copy). generateValue sets once; re-sync does not rotate.
+envVarGroups:
+  - name: casesifter-auth
+    envVars:
+      - key: SESSION_SECRET
+        generateValue: true
+
 services:
   - type: web
     name: casesifter-analysis
     runtime: docker
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
-    plan: starter
+    # Plan (Standard 2GB) is owned in the Render Dashboard — do not set `plan:` here.
     healthCheckPath: /api/health
     buildFilter:
       paths:
         - backend/**
         - render.yaml
     envVars:
+      - fromGroup: casesifter-auth
       - key: APP_MODE
         value: analysis
       - key: APP_ENV
@@ -27,17 +37,20 @@ services:
         value: immediate
       - key: PERSIST_FACTS
         value: "true"
+      # Internal Postgres URL — set in Dashboard (empty IP allow list; internal host only).
       - key: DATABASE_URL
         sync: false
       - key: FACT_MEMORY_MASTER_KEY
         sync: false
       - key: ENTITLEMENT_MODE
         value: cloud
-      # Control plane used to validate browser session bearers on /api/v1/*
       - key: CLOUD_CONTROL_URL
         value: https://casesifter-control.onrender.com
+      - key: SESSION_TTL_DAYS
+        value: "30"
       - key: ANALYSIS_API_KEYS
         sync: false
+      # Keys + model live only in Dashboard (sync:false) so blueprint sync cannot overwrite.
       - key: GEMINI_API_KEY
         sync: false
       - key: GEMINI_MODEL
@@ -46,17 +59,15 @@ services:
         value: "true"
       - key: OCR_MAX_PAGES
         value: "40"
-      # Local PDF/OCR stays serial. Gemini stage runs in the web process (parallel).
-      # Upgrade to Standard 2GB before beta firms.
+      # Concurrency / memory caps: Dashboard-owned after Standard upgrade.
       - key: SCAN_MAX_CONCURRENT
-        value: "1"
-      # 512 MB starter: keep Gemini small until plan is upgraded to 2 GB.
+        sync: false
       - key: GEMINI_MAX_CONCURRENT
-        value: "2"
+        sync: false
       - key: GEMINI_MAX_INFLIGHT_MB
-        value: "60"
+        sync: false
       - key: SCAN_MEMORY_GUARD_MB
-        value: "420"
+        sync: false
       - key: SCAN_JOB_TIMEOUT_S
         value: "600"
       - key: SCAN_JOB_TIMEOUT_BASE_S
@@ -67,14 +78,12 @@ services:
         value: "900"
       - key: GEMINI_ORPHAN_SOURCE_GRACE_S
         value: "60"
-      # Gotcha verifier: auto picks Claude when ANTHROPIC_API_KEY is set; Gemini stays multimodal.
       - key: GOTCHA_VERIFY_PROVIDER
         value: auto
       - key: ANTHROPIC_API_KEY
         sync: false
       - key: CLAUDE_MODEL
-        value: claude-sonnet-4-5-20250929
-      # Create a Python backend project in Sentry and put its DSN here (not the JS one).
+        sync: false
       - key: SENTRY_BACKEND_DSN
         sync: false
       - key: SENTRY_DSN
@@ -87,43 +96,44 @@ services:
     runtime: docker
     dockerfilePath: ./control_plane/Dockerfile
     dockerContext: ./control_plane
-    plan: starter
+    # Plan owned in Dashboard — do not set `plan:` here.
     healthCheckPath: /health
     buildFilter:
       paths:
         - control_plane/**
         - render.yaml
-    # Persist accounts across deploys (sessions are HMAC-signed; users live on disk).
+    # Disk keeps accounts.json for one-time migration + session_secret pin.
     disk:
       name: casesifter-control-data
       mountPath: /var/data
       sizeGB: 1
     envVars:
+      - fromGroup: casesifter-auth
       - key: CONTROL_DATA_DIR
         value: /var/data
-      # Fixed signing secret (Dashboard / MCP). Do NOT use generateValue — it rotates
-      # on blueprint sync and logs everyone out. Also pinned to disk at /var/data.
-      - key: SESSION_SECRET
-        sync: false
+      - key: APP_ENV
+        value: production
+      # Internal URL of casesifter-fact-memory (private network; IP allow list empty).
+      - key: DATABASE_URL
+        fromDatabase:
+          name: casesifter-fact-memory
+          property: connectionString
       - key: SESSION_TTL_DAYS
         value: "30"
-      # John sets these in Render Dashboard (or Blueprint sync:false secrets).
+      - key: CONTROL_CORS_ORIGINS
+        value: "https://app.casesifter.com,https://www.casesifter.com,https://casesifter.com,https://casesifter-app.onrender.com,https://casesifter-marketing.onrender.com"
       - key: STRIPE_SECRET_KEY
         sync: false
       - key: STRIPE_WEBHOOK_SECRET
         sync: false
-      # Soft-launch: price_1UMIUnD6sOleRtjBjVbHzMdP ($79/seat/mo). Secrets stay in Dashboard.
       - key: STRIPE_PRICE_ID
         sync: false
       - key: CONTROL_ADMIN_TOKEN
         sync: false
-      # Soft-launch return URL for Stripe Checkout (success/cancel).
-      # Switch to https://app.casesifter.com after app CNAME + Render custom domain.
       - key: CASESIFTER_PUBLIC_URL
         value: https://casesifter-app.onrender.com
       - key: CASESIFTER_TRIAL_DAYS
         value: "14"
-      # Soft-launch: invite optional (gate off).
       - key: CASESIFTER_INVITE_REQUIRED
         value: "false"
       - key: CASESIFTER_INVITE_CODES

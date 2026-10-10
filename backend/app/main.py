@@ -64,8 +64,18 @@ def _startup() -> None:
         os.environ["DATABASE_URL"] = settings.database_url
     if settings.fact_memory_master_key and not os.environ.get("FACT_MEMORY_MASTER_KEY"):
         os.environ["FACT_MEMORY_MASTER_KEY"] = settings.fact_memory_master_key
-    # Do not refuse boot when keys are missing — vault stays unmounted.
-    # Soft-launch: /api/v1 accepts ANALYSIS_API_KEYS or an active control-plane session.
+    # Analysis hosted mode: SESSION_SECRET is mandatory (no default / no probe-only auth).
+    if _mode == "analysis":
+        from app.session_auth import require_session_secret_configured, session_secret
+
+        if (settings.app_env or "").strip().lower() == "production":
+            require_session_secret_configured()
+        elif not session_secret():
+            logger.error(
+                "SESSION_SECRET is empty — browser sessions will be rejected "
+                "(fail closed; no default secret)."
+            )
+    # Soft-launch: /api/v1 accepts ANALYSIS_API_KEYS or a locally verified session.
     if _mode == "analysis" and not settings.analysis_api_key_set() and not settings.cloud_control_url:
         logger.warning(
             "APP_MODE=analysis but ANALYSIS_API_KEYS and CLOUD_CONTROL_URL are empty — "
@@ -97,6 +107,16 @@ def _startup() -> None:
             logger.warning("local_done recovery: %s", recovered)
     except Exception as exc:
         logger.warning("local_done recovery failed: %s", exc)
+    from app.config import gemini_model_is_valid
+
+    model_ok = gemini_model_is_valid(settings.gemini_model)
+    if not model_ok:
+        # Never echo a malformed/secret-shaped model string into logs.
+        logger.error(
+            "GEMINI_MODEL failed validation (expected ^gemini-[\\w.-]+$). "
+            "Multimodal Gemini path disabled. APP_MODE=%s",
+            _mode,
+        )
     if not settings.gemini_api_key:
         logger.warning(
             "GEMINI_API_KEY is not set — exhibit multimodal / historical fraud review is OFF. "
@@ -108,10 +128,15 @@ def _startup() -> None:
             "CONTEXTUAL_MULTIMODAL is false — Gemini will not receive native exhibit PDFs. "
             "Set CONTEXTUAL_MULTIMODAL=true to restore the scanned-exhibit pause and fraud path."
         )
+    elif not model_ok:
+        logger.error(
+            "Refusing multimodal Gemini calls: GEMINI_MODEL does not match "
+            "^gemini-[\\w.-]+$. Fix the env var before enabling CONTEXTUAL_MULTIMODAL."
+        )
     else:
         logger.info(
-            "Exhibit multimodal enabled (Gemini model=%s). APP_MODE=%s",
-            settings.gemini_model,
+            "Exhibit multimodal enabled (gemini_model_valid=%s). APP_MODE=%s",
+            True,
             _mode,
         )
     logger.info(

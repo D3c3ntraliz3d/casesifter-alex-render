@@ -29,6 +29,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import re
 import threading
 import time
@@ -46,6 +47,8 @@ from app.config import settings
 from app.engines import finding, timed_module
 from app.finding_policy import is_header_or_arrears_noise, is_recorded_instrument_math_noise
 from app.models import Finding, ModuleResult
+
+logger = logging.getLogger(__name__)
 
 ORG_SUFFIXES = (
     r"Inc|Incorporated|LLC|L\.L\.C|LLP|L\.L\.P|LP|PLLC|PC|P\.C|Corp|Corporation|"
@@ -480,7 +483,16 @@ def _run(
 
     try:
         # Tier 3 multimodal fraud review is for exhibits only.
-        if settings.contextual_multimodal and not court_filing:
+        from app.config import gemini_model_is_valid
+
+        if settings.contextual_multimodal and not court_filing and not gemini_model_is_valid(
+            settings.gemini_model
+        ):
+            logger.error(
+                "Refusing multimodal Gemini calls: GEMINI_MODEL failed ^gemini-[\\w.-]+$ validation"
+            )
+            extras["document_analysis"] = {"status": "refused", "reason": "invalid_model"}
+        elif settings.contextual_multimodal and not court_filing:
             import time as _time
 
             t_mm = _time.perf_counter()

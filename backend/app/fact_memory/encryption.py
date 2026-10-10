@@ -40,10 +40,23 @@ def _normalize_master_material(raw: str) -> bytes:
     return hashlib.sha256(text.encode("utf-8")).digest()
 
 
+def _is_production() -> bool:
+    env = (
+        os.environ.get("APP_ENV")
+        or os.environ.get("ENV")
+        or ""
+    ).strip().lower()
+    return env == "production"
+
+
 @lru_cache(maxsize=1)
 def master_fernet() -> Fernet:
     raw = (os.environ.get("FACT_MEMORY_MASTER_KEY") or "").strip()
     if not raw:
+        if _is_production():
+            raise RuntimeError(
+                "FACT_MEMORY_MASTER_KEY is required when APP_ENV=production"
+            )
         # Dev/test only — log once.
         logger.warning(
             "FACT_MEMORY_MASTER_KEY unset; using ephemeral-dev master key. "
