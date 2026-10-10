@@ -1,4 +1,13 @@
 # CaseSifter hybrid — ephemeral analysis + control plane + hosted web app (no document vault)
+#
+# Shared secrets: both services pull SESSION_SECRET from envVarGroup casesifter-auth
+# so they always match (no manual copy). generateValue sets once; re-sync does not rotate.
+envVarGroups:
+  - name: casesifter-auth
+    envVars:
+      - key: SESSION_SECRET
+        generateValue: true
+
 services:
   - type: web
     name: casesifter-analysis
@@ -12,6 +21,7 @@ services:
         - backend/**
         - render.yaml
     envVars:
+      - fromGroup: casesifter-auth
       - key: APP_MODE
         value: analysis
       - key: APP_ENV
@@ -36,9 +46,6 @@ services:
         value: cloud
       - key: CLOUD_CONTROL_URL
         value: https://casesifter-control.onrender.com
-      # Must match casesifter-control SESSION_SECRET (Dashboard). Never generateValue.
-      - key: SESSION_SECRET
-        sync: false
       - key: SESSION_TTL_DAYS
         value: "30"
       - key: ANALYSIS_API_KEYS
@@ -101,16 +108,16 @@ services:
       mountPath: /var/data
       sizeGB: 1
     envVars:
+      - fromGroup: casesifter-auth
       - key: CONTROL_DATA_DIR
         value: /var/data
       - key: APP_ENV
         value: production
-      # Same internal Postgres as analysis (cp_* auth tables). Set in Dashboard before deploy.
+      # Internal URL of casesifter-fact-memory (private network; IP allow list empty).
       - key: DATABASE_URL
-        sync: false
-      # Must match casesifter-analysis SESSION_SECRET. Do NOT use generateValue.
-      - key: SESSION_SECRET
-        sync: false
+        fromDatabase:
+          name: casesifter-fact-memory
+          property: connectionString
       - key: SESSION_TTL_DAYS
         value: "30"
       - key: CONTROL_CORS_ORIGINS

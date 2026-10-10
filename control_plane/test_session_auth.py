@@ -109,8 +109,22 @@ def test_signed_session_requires_active_server_row(client):
     assert c.get("/v1/entitlement", headers={"Authorization": f"Bearer {tok}"}).status_code == 401
 
 
-def test_disk_pinned_secret_survives_env_rotation(tmp_path, monkeypatch):
-    """Disk session_secret wins when env SESSION_SECRET is rotated (blueprint churn)."""
+def test_env_session_secret_wins_and_updates_disk_pin(tmp_path, monkeypatch):
+    """Shared Blueprint env group is source of truth; disk pin follows env."""
+    import main as mod
+
+    monkeypatch.setattr(mod, "DATA", tmp_path)
+    monkeypatch.setattr(mod, "STORE", tmp_path / "accounts.json")
+    secret_path = tmp_path / "session_secret"
+    monkeypatch.setattr(mod, "_SESSION_SECRET_PATH", secret_path)
+    secret_path.write_text("old-disk-pin", encoding="utf-8")
+    monkeypatch.setenv("SESSION_SECRET", "shared-env-group-secret")
+    resolved = mod._resolve_session_secret()
+    assert resolved == "shared-env-group-secret"
+    assert secret_path.read_text(encoding="utf-8").strip() == "shared-env-group-secret"
+
+
+def test_disk_pin_used_when_env_unset(tmp_path, monkeypatch):
     import main as mod
 
     monkeypatch.setattr(mod, "DATA", tmp_path)
@@ -118,9 +132,8 @@ def test_disk_pinned_secret_survives_env_rotation(tmp_path, monkeypatch):
     secret_path = tmp_path / "session_secret"
     monkeypatch.setattr(mod, "_SESSION_SECRET_PATH", secret_path)
     secret_path.write_text("pinned-disk-secret-value", encoding="utf-8")
-    monkeypatch.setenv("SESSION_SECRET", "rotated-env-secret-should-be-ignored")
-    resolved = mod._resolve_session_secret()
-    assert resolved == "pinned-disk-secret-value"
+    monkeypatch.delenv("SESSION_SECRET", raising=False)
+    assert mod._resolve_session_secret() == "pinned-disk-secret-value"
 
 
 def test_checkout_disables_managed_payments(client, monkeypatch):

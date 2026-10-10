@@ -39,7 +39,11 @@ _SESSION_SECRET_PATH = DATA / "session_secret"
 
 
 def _resolve_session_secret() -> str:
-    """Stable HMAC secret: disk pin wins over env so blueprint generateValue cannot rotate it."""
+    """Prefer env SESSION_SECRET (shared Blueprint env group) so analysis and control match.
+
+    Persist the env value to the disk pin so local restarts without env still work.
+    If env is unset, fall back to the disk pin (legacy), then generate once.
+    """
     env = (os.environ.get("SESSION_SECRET") or "").strip()
     disk = ""
     if _SESSION_SECRET_PATH.is_file():
@@ -47,17 +51,16 @@ def _resolve_session_secret() -> str:
             disk = _SESSION_SECRET_PATH.read_text(encoding="utf-8").strip()
         except OSError:
             disk = ""
-    if disk:
-        return disk
-    secret = env or secrets.token_urlsafe(48)
-    try:
-        _SESSION_SECRET_PATH.write_text(secret, encoding="utf-8")
+    secret = env or disk or secrets.token_urlsafe(48)
+    if secret and secret != disk:
         try:
-            os.chmod(_SESSION_SECRET_PATH, 0o600)
+            _SESSION_SECRET_PATH.write_text(secret, encoding="utf-8")
+            try:
+                os.chmod(_SESSION_SECRET_PATH, 0o600)
+            except OSError:
+                pass
         except OSError:
             pass
-    except OSError:
-        pass
     return secret
 
 
