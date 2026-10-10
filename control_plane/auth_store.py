@@ -251,7 +251,13 @@ def set_meta(s: Session, key: str, value: dict[str, Any]) -> None:
 
 
 def migrate_accounts_json(path: Path) -> int:
-    """One-time import from legacy accounts.json. Returns users imported."""
+    """Import missing users from legacy accounts.json into cp_users.
+
+    Preserves SHA-256 password_hash + salt (password_algo=sha256) so the next
+    successful login upgrades to argon2id via upgrade_password_if_needed.
+    Existing accounts are marked email_verified=True (grandfather).
+    Idempotent: skips emails already present in cp_users.
+    """
     if not path.is_file():
         return 0
     try:
@@ -263,16 +269,19 @@ def migrate_accounts_json(path: Path) -> int:
         return 0
     imported = 0
     with session_scope() as s:
-        existing = s.execute(select(CpUser.id).limit(1)).first()
-        if existing:
-            return 0
         for email, u in users.items():
             email_n = str(email).lower().strip()
             if not email_n:
                 continue
+            exists = s.execute(
+                select(CpUser).where(CpUser.email == email_n)
+            ).scalar_one_or_none()
+            if exists is not None:
+                continue
             uid = str(u.get("user_id") or uuid.uuid4().hex)
+            # Prefer stable control-plane user_id; fall back to hex.
             row = CpUser(
-                id=uid,
+                id=uid if len(uid) >= 8 else uuid.uuid4().hex,
                 email=email_n,
                 name=str(u.get("name") or ""),
                 password_hash=str(u.get("password_hash") or ""),
@@ -289,21 +298,19 @@ def migrate_accounts_json(path: Path) -> int:
             )
             s.add(row)
             imported += 1
-        set_meta(
-            s,
-            "trial_domains",
-            data.get("trial_domains") or {},
-        )
-        set_meta(
-            s,
-            "trial_emails",
-            data.get("trial_emails") or {},
-        )
-        # Rename legacy file so we do not re-import.
-        try:
-            path.rename(path.with_suffix(".json.migrated"))
-        except OSError:
-            pass
+        # Merge trial claim maps (do not wipe newer SQL state).
+        for key in ("trial_domains", "trial_emails"):
+            incoming = data.get(key) or {}
+            if not isinstance(incoming, dict) or not incoming:
+                continue
+            current = get_meta(s, key)
+            current.update(incoming)
+            set_meta(s, key, current)
+        if imported:
+            try:
+                path.rename(path.with_suffix(".json.migrated"))
+            except OSError:
+                pass
     return imported
 
 
