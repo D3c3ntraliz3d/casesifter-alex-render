@@ -94,13 +94,12 @@ async def health():
 # --- Entitlement / hybrid billing stubs -------------------------------------------------
 
 
-@public_router.get("/entitlement")
+# Vault-only: not mounted on public_router (analysis mode exposes /health only).
 @router.get("/entitlement")
 def get_entitlement():
     return entitlement_status()
 
 
-@public_router.post("/entitlement/license")
 @router.post("/entitlement/license")
 def post_license(body: LicenseBody):
     return save_license_key(body.license_key)
