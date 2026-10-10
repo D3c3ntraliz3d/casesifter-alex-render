@@ -71,10 +71,13 @@ def client(tmp_path, monkeypatch):
     auth_store.reset_auth_store_for_tests()
 
 
-def test_migrates_john_legacy_password_and_upgrades_on_login(client):
+def test_migrates_john_legacy_password_and_upgrades_on_login(client, tmp_path):
     c, password = client
     import auth_store
     from sqlalchemy import select
+
+    store_path = tmp_path / "accounts.json"
+    assert store_path.is_file(), "migration must leave accounts.json in place"
 
     with auth_store.session_scope() as s:
         row = s.execute(
@@ -86,6 +89,12 @@ def test_migrates_john_legacy_password_and_upgrades_on_login(client):
         assert row.legacy_salt
         assert row.email_verified is True
         assert row.id == "johnlegacyuserid01"
+
+    # Idempotent re-run: no second row, file still present.
+    n = auth_store.migrate_accounts_json(store_path)
+    assert n == 0
+    assert store_path.is_file()
+    assert not (tmp_path / "accounts.json.migrated").exists()
 
     login = c.post(
         "/v1/login",
@@ -102,3 +111,5 @@ def test_migrates_john_legacy_password_and_upgrades_on_login(client):
         ).scalar_one()
         assert row.password_algo == "argon2id"
         assert row.legacy_salt is None
+        count = len(s.execute(select(auth_store.CpUser)).scalars().all())
+        assert count == 1

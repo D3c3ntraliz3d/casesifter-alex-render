@@ -64,8 +64,18 @@ def _startup() -> None:
         os.environ["DATABASE_URL"] = settings.database_url
     if settings.fact_memory_master_key and not os.environ.get("FACT_MEMORY_MASTER_KEY"):
         os.environ["FACT_MEMORY_MASTER_KEY"] = settings.fact_memory_master_key
-    # Do not refuse boot when keys are missing — vault stays unmounted.
-    # Soft-launch: /api/v1 accepts ANALYSIS_API_KEYS or an active control-plane session.
+    # Analysis hosted mode: SESSION_SECRET is mandatory (no default / no probe-only auth).
+    if _mode == "analysis":
+        from app.session_auth import require_session_secret_configured, session_secret
+
+        if (settings.app_env or "").strip().lower() == "production":
+            require_session_secret_configured()
+        elif not session_secret():
+            logger.error(
+                "SESSION_SECRET is empty — browser sessions will be rejected "
+                "(fail closed; no default secret)."
+            )
+    # Soft-launch: /api/v1 accepts ANALYSIS_API_KEYS or a locally verified session.
     if _mode == "analysis" and not settings.analysis_api_key_set() and not settings.cloud_control_url:
         logger.warning(
             "APP_MODE=analysis but ANALYSIS_API_KEYS and CLOUD_CONTROL_URL are empty — "

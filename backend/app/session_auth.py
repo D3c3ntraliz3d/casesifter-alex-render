@@ -21,11 +21,24 @@ def _b64url_decode(text: str) -> bytes:
 
 
 def session_secret() -> str:
+    """Return configured SESSION_SECRET, or empty. Never invents a default."""
     return (os.environ.get("SESSION_SECRET") or "").strip()
+
+
+def require_session_secret_configured() -> str:
+    """Fail closed: missing/empty SESSION_SECRET is a hard error (no default)."""
+    secret = session_secret()
+    if not secret:
+        raise RuntimeError(
+            "SESSION_SECRET is required for APP_MODE=analysis and must not be empty. "
+            "Set the same value on casesifter-analysis as on casesifter-control."
+        )
+    return secret
 
 
 def parse_session_token(token: str) -> dict[str, Any] | None:
     secret = session_secret()
+    # Fail closed: no secret → no local session acceptance (never use a default).
     if not token or not secret:
         return None
     if token.startswith("cs2."):

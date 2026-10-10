@@ -306,11 +306,8 @@ def migrate_accounts_json(path: Path) -> int:
             current = get_meta(s, key)
             current.update(incoming)
             set_meta(s, key, current)
-        if imported:
-            try:
-                path.rename(path.with_suffix(".json.migrated"))
-            except OSError:
-                pass
+        # Keep accounts.json in place (never delete/rename) so a mid-deploy
+        # failure can re-run migration safely; existing emails are skipped.
     return imported
 
 

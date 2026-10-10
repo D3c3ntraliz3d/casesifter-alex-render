@@ -168,9 +168,21 @@ def _require_analysis_auth(
         if token_as_key and token_as_key in keys:
             return {"auth": "api_key", "authenticated": True, "entitled": True}
         if bearer:
-            from app.session_auth import verify_bearer_locally
+            from app.session_auth import session_secret, verify_bearer_locally
 
+            # Fail closed: no SESSION_SECRET → reject all browser sessions.
+            # Never fall back to a default secret or probe-only identity.
+            if not session_secret():
+                raise HTTPException(
+                    401,
+                    "Valid analysis API key or active subscription session required.",
+                )
             local = verify_bearer_locally(bearer)
+            if not local:
+                raise HTTPException(
+                    401,
+                    "Valid analysis API key or active subscription session required.",
+                )
             remote = None
             entitlement_unavailable = False
             try:
@@ -181,23 +193,16 @@ def _require_analysis_auth(
                     remote = cached[1]
                 else:
                     entitlement_unavailable = True
-            if not local and not remote:
-                raise HTTPException(
-                    401,
-                    "Valid analysis API key or active subscription session required.",
-                )
-            # Local HMAC is source of identity; CP probe supplies entitlement.
-            # Legacy tokens without SESSION_SECRET parse still work via probe.
-            email = (local or {}).get("email") or (remote or {}).get("email")
+            email = local.get("email") or (remote or {}).get("email")
             entitled = bool((remote or {}).get("active")) if remote is not None else False
-            if remote is None and local and entitlement_unavailable:
+            if remote is None and entitlement_unavailable:
                 entitled = False
             return {
                 "auth": "session",
                 "authenticated": True,
                 "entitled": entitled,
                 "email": email,
-                "user_id": (local or {}).get("user_id") or (remote or {}).get("user_id"),
+                "user_id": local.get("user_id") or (remote or {}).get("user_id"),
                 "plan": (remote or {}).get("plan"),
                 "bearer": bearer,
                 "entitlement_unavailable": entitlement_unavailable and remote is None,
