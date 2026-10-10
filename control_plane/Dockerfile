@@ -4,6 +4,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY main.py auth_store.py ./
 ENV PYTHONUNBUFFERED=1
+ENV APP_ENV=production
 ENV PORT=8010
 EXPOSE 8010
 # Render injects $PORT; default 8010 for local/compose.

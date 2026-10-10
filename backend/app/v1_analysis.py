@@ -168,7 +168,11 @@ def _require_analysis_auth(
         if token_as_key and token_as_key in keys:
             return {"auth": "api_key", "authenticated": True, "entitled": True}
         if bearer:
-            from app.session_auth import session_secret, verify_bearer_locally
+            from app.session_auth import (
+                SessionLookupUnavailable,
+                session_secret,
+                verify_bearer_locally,
+            )
 
             # Fail closed: no SESSION_SECRET → reject all browser sessions.
             # Never fall back to a default secret or probe-only identity.
@@ -177,7 +181,13 @@ def _require_analysis_auth(
                     401,
                     "Valid analysis API key or active subscription session required.",
                 )
-            local = verify_bearer_locally(bearer)
+            try:
+                local = verify_bearer_locally(bearer)
+            except SessionLookupUnavailable:
+                raise HTTPException(
+                    503,
+                    "Session store temporarily unavailable. Try again shortly.",
+                ) from None
             if not local:
                 raise HTTPException(
                     401,

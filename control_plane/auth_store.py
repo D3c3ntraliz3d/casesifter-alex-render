@@ -116,6 +116,11 @@ def _database_url() -> str:
         if url.startswith("postgres://"):
             url = "postgresql://" + url[len("postgres://") :]
         return url
+    if (os.environ.get("APP_ENV") or "").strip().lower() == "production":
+        raise RuntimeError(
+            "DATABASE_URL is required when APP_ENV=production "
+            "(no SQLite fallback). Refusing to boot."
+        )
     data_dir = (os.environ.get("CONTROL_DATA_DIR") or "").strip()
     root = Path(data_dir) if data_dir else (Path(__file__).resolve().parent / "data")
     root.mkdir(parents=True, exist_ok=True)

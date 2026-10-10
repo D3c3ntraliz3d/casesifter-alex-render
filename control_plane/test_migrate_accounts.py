@@ -25,6 +25,7 @@ def _sha256_hash(password: str, salt: str) -> str:
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("CONTROL_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("AUTH_DEV_TOKENS", "true")
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.delenv("RESEND_API_KEY", raising=False)
     monkeypatch.setenv("SESSION_SECRET", "unit-test-migrate-secret")

@@ -38,12 +38,18 @@ SESSION_TTL_S = int(float(os.environ.get("SESSION_TTL_DAYS", "30") or 30) * 8640
 _SESSION_SECRET_PATH = DATA / "session_secret"
 
 
-def _resolve_session_secret() -> str:
-    """Prefer env SESSION_SECRET (shared Blueprint env group) so analysis and control match.
+def _is_production() -> bool:
+    return (os.environ.get("APP_ENV") or "").strip().lower() == "production"
 
-    Persist the env value to the disk pin so local restarts without env still work.
-    If env is unset, fall back to the disk pin (legacy), then generate once.
+
+def _resolve_session_secret() -> str:
+    """Production: env SESSION_SECRET only (shared Blueprint group). Refuse if empty.
+
+    Non-production: env, then disk pin, then generate for local tests.
     """
+    import logging
+
+    log = logging.getLogger("uvicorn.error")
     env = (os.environ.get("SESSION_SECRET") or "").strip()
     disk = ""
     if _SESSION_SECRET_PATH.is_file():
@@ -51,6 +57,19 @@ def _resolve_session_secret() -> str:
             disk = _SESSION_SECRET_PATH.read_text(encoding="utf-8").strip()
         except OSError:
             disk = ""
+
+    if _is_production():
+        if not env:
+            raise RuntimeError(
+                "SESSION_SECRET is required when APP_ENV=production "
+                "(from envVarGroup casesifter-auth). Refusing to boot."
+            )
+        if disk and disk != env:
+            log.warning(
+                "Ignoring disk session_secret pin; using SESSION_SECRET from environment"
+            )
+        return env
+
     secret = env or disk or secrets.token_urlsafe(48)
     if secret and secret != disk:
         try:
@@ -64,8 +83,17 @@ def _resolve_session_secret() -> str:
     return secret
 
 
-# Fixed signing secret so control deploys do not invalidate browser sessions.
+# Resolved at import for handlers; production raises if SESSION_SECRET is empty.
 SESSION_SECRET = _resolve_session_secret()
+
+
+def _allow_dev_auth_tokens() -> bool:
+    """Dev verify/reset tokens in HTTP responses — opt-in only (default off)."""
+    return (os.environ.get("AUTH_DEV_TOKENS") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
 
 # Free consumer mail — trial limit is per email address, not per domain.
 FREE_EMAIL_DOMAINS = {
@@ -408,7 +436,24 @@ def _parse_session_token(token: str) -> dict[str, Any] | None:
             issued = int(issued_s)
         except Exception:
             return None
-        if SESSION_TTL_S > 0 and (time.time() - issued) > SESSION_TTL_S:
+        # Legacy cs1: max 7-day age + optional absolute cutoff (CS1_ACCEPT_UNTIL).
+        cs1_max = int(float(os.environ.get("CS1_MAX_AGE_DAYS", "7") or 7) * 86400)
+        now = time.time()
+        raw_cut = (os.environ.get("CS1_ACCEPT_UNTIL") or "").strip()
+        if raw_cut:
+            try:
+                cut = float(raw_cut) if raw_cut.replace(".", "", 1).isdigit() else None
+                if cut is None:
+                    from datetime import datetime
+
+                    cut = datetime.fromisoformat(raw_cut.replace("Z", "+00:00")).timestamp()
+                if now >= cut:
+                    return None
+            except Exception:
+                return None
+        if cs1_max > 0 and (now - issued) > cs1_max:
+            return None
+        if SESSION_TTL_S > 0 and (now - issued) > SESSION_TTL_S:
             return None
         return {"user_id": None, "email": email.lower(), "sid": None, "issued": issued, "legacy": True}
     # Opaque session id (dev / no secret)
@@ -679,6 +724,13 @@ def _rate_limit(key: str, *, limit: int = 10, window_s: float = 600.0) -> None:
 
 @app.on_event("startup")
 def _auth_startup() -> None:
+    global SESSION_SECRET
+    SESSION_SECRET = _resolve_session_secret()
+    if _is_production() and not (os.environ.get("DATABASE_URL") or "").strip():
+        raise RuntimeError(
+            "DATABASE_URL is required when APP_ENV=production "
+            "(fromDatabase casesifter-fact-memory). Refusing to boot."
+        )
     _ensure_auth_db()
 
 
@@ -739,10 +791,9 @@ def signup(body: SignupBody, request: Request):
         "email_verified": False,
         "message": "Check your email to verify your account before signing in.",
     }
-    # Dev/test: surface token when Resend is not configured (never in production).
-    if (os.environ.get("APP_ENV") or "").strip().lower() != "production":
-        if not (os.environ.get("RESEND_API_KEY") or "").strip():
-            payload["dev_verify_token"] = verify_raw
+    # Opt-in only — never return tokens unless AUTH_DEV_TOKENS=true.
+    if _allow_dev_auth_tokens():
+        payload["dev_verify_token"] = verify_raw
     return payload
 
 
@@ -828,9 +879,8 @@ def password_reset_request(body: ResetRequestBody, request: Request):
         row = s.execute(select(auth.CpUser).where(auth.CpUser.email == email)).scalar_one_or_none()
         if row is not None:
             raw = auth.create_email_token(s, row, purpose="reset", ttl_s=3600)
-            if (os.environ.get("APP_ENV") or "").strip().lower() != "production":
-                if not (os.environ.get("RESEND_API_KEY") or "").strip():
-                    out["dev_reset_token"] = raw
+            if _allow_dev_auth_tokens():
+                out["dev_reset_token"] = raw
     return out
 
 

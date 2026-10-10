@@ -1,4 +1,4 @@
-"""P0: auth + two-firm job isolation against an isolated Postgres test DB.
+"""P0: auth + two-firm isolation against an isolated Postgres test DB.
 
 Requires TEST_DATABASE_URL pointing at a *separate* database (not live data).
 Never falls back to DATABASE_URL so a Render Shell mistake cannot hit production.
@@ -43,7 +43,6 @@ def _pg_test_url() -> str | None:
         url = "postgresql://" + url[len("postgres://") :]
     if not url.startswith("postgresql"):
         return None
-    # Refuse obvious live DB names unless explicitly named as an eval DB.
     lower = url.lower()
     if "p0_eval" not in lower and "p0-eval" not in lower:
         pytest.skip(
@@ -74,7 +73,8 @@ def pg_url():
     return url
 
 
-def test_two_firm_job_isolation_on_postgres(pg_url, tmp_path, monkeypatch):
+@pytest.fixture()
+def pg_client(pg_url, tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", pg_url)
     monkeypatch.setenv("APP_MODE", "analysis")
     monkeypatch.setenv("APP_ENV", "development")
@@ -90,8 +90,10 @@ def test_two_firm_job_isolation_on_postgres(pg_url, tmp_path, monkeypatch):
     from app.fact_memory.store import reset_store
     from app.config import Settings
     import app.config as config_mod
+    import app.session_auth as session_auth
 
     reset_store()
+    session_auth.reset_cp_engine_for_tests()
     settings = Settings()
     monkeypatch.setattr(config_mod, "settings", settings)
     monkeypatch.setattr("app.config.settings", settings)
@@ -123,8 +125,13 @@ def test_two_firm_job_isolation_on_postgres(pg_url, tmp_path, monkeypatch):
 
     importlib.reload(main_mod)
     client = TestClient(main_mod.app)
-    ha = {"Authorization": f"Bearer {tok_a}"}
-    hb = {"Authorization": f"Bearer {tok_b}"}
+    yield client, {"Authorization": f"Bearer {tok_a}"}, {"Authorization": f"Bearer {tok_b}"}
+    reset_store()
+    session_auth.reset_cp_engine_for_tests()
+
+
+def test_two_firm_isolation_extended(pg_client):
+    client, ha, hb = pg_client
 
     matter = client.post("/api/v1/matters", headers=ha, json={"name": "pg-iso-a"}).json()
     mid = matter["id"]
@@ -138,17 +145,43 @@ def test_two_firm_job_isolation_on_postgres(pg_url, tmp_path, monkeypatch):
     assert job.status_code == 200, job.text
     jid = job.json()["job_id"]
 
+    # B: empty matter list; every cross-tenant path 404.
     list_b = client.get("/api/v1/matters", headers=hb)
     assert list_b.status_code == 200
     body_b = list_b.json()
     matters_b = body_b if isinstance(body_b, list) else body_b.get("matters") or []
     assert matters_b == []
-    assert client.get(f"/api/v1/matters/{mid}", headers=hb).status_code == 404
-    assert client.get(f"/api/v1/jobs/{jid}", headers=hb).status_code == 404
-    assert client.get(f"/api/v1/jobs/{jid}/report", headers=hb).status_code == 404
+
+    for path in (
+        f"/api/v1/matters/{mid}",
+        f"/api/v1/matters/{mid}/findings",
+        f"/api/v1/matters/{mid}/export",
+        f"/api/v1/matters/{mid}/retryable-jobs",
+        f"/api/v1/jobs/{jid}",
+        f"/api/v1/jobs/{jid}/report",
+    ):
+        assert client.get(path, headers=hb).status_code == 404, path
+
+    # Document report / patch / delete (unknown doc under A's matter) — B still 404.
+    fake_doc = uuid.uuid4().hex
+    assert client.get(
+        f"/api/v1/matters/{mid}/documents/{fake_doc}/report", headers=hb
+    ).status_code == 404
+    assert client.delete(
+        f"/api/v1/matters/{mid}/documents/{fake_doc}", headers=hb
+    ).status_code == 404
+
     assert client.delete(f"/api/v1/jobs/{jid}", headers=hb).status_code == 404
+    # Path traversal delete
+    assert client.request(
+        "DELETE", "/api/v1/jobs/%2e%2e", headers=hb
+    ).status_code == 404
+    assert client.delete("/api/v1/jobs/..", headers=hb).status_code == 404
+
+    # A still owns the job.
     assert client.get(f"/api/v1/jobs/{jid}", headers=ha).status_code == 200
-    reset_store()
+    assert client.get(f"/api/v1/matters/{mid}/findings", headers=ha).status_code == 200
+    assert client.get(f"/api/v1/matters/{mid}/export", headers=ha).status_code == 200
 
 
 def test_cp_auth_tables_on_postgres(pg_url, tmp_path, monkeypatch):

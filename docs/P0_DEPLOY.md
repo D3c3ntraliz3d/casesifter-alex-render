@@ -36,7 +36,9 @@ Defined in `render.yaml`:
 3. **`casesifter-analysis` `DATABASE_URL`**
    - Remains Dashboard `sync: false` (already set to the internal host). Not changed by this PR.
 
-**Note on existing control `SESSION_SECRET`:** Blueprint cannot “adopt” a service-level secret into a new env group. First sync of `casesifter-auth` mints a new `SESSION_SECRET` (`generateValue`). You will be signed out once. Control prefers the **env** value and rewrites `/var/data/session_secret` to match so analysis and control stay aligned.
+**Note on existing control `SESSION_SECRET`:** Blueprint cannot “adopt” a service-level secret into a new env group. First sync of `casesifter-auth` mints a new `SESSION_SECRET` (`generateValue`). You will be signed out once. In production, control uses **env only** (disk pin ignored if it differs).
+
+**Dockerfile:** `control_plane/Dockerfile` sets `ENV APP_ENV=production`. Dev verify/reset tokens are **never** returned unless `AUTH_DEV_TOKENS=true` (default off).
 
 ## Dashboard changes already made (do not overwrite)
 

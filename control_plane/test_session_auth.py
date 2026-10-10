@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("CONTROL_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("AUTH_DEV_TOKENS", "true")
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.delenv("RESEND_API_KEY", raising=False)
     monkeypatch.setenv("SESSION_SECRET", "unit-test-session-secret")
@@ -109,8 +110,7 @@ def test_signed_session_requires_active_server_row(client):
     assert c.get("/v1/entitlement", headers={"Authorization": f"Bearer {tok}"}).status_code == 401
 
 
-def test_env_session_secret_wins_and_updates_disk_pin(tmp_path, monkeypatch):
-    """Shared Blueprint env group is source of truth; disk pin follows env."""
+def test_env_wins_over_disk_in_production(tmp_path, monkeypatch):
     import main as mod
 
     monkeypatch.setattr(mod, "DATA", tmp_path)
@@ -118,22 +118,20 @@ def test_env_session_secret_wins_and_updates_disk_pin(tmp_path, monkeypatch):
     secret_path = tmp_path / "session_secret"
     monkeypatch.setattr(mod, "_SESSION_SECRET_PATH", secret_path)
     secret_path.write_text("old-disk-pin", encoding="utf-8")
+    monkeypatch.setenv("APP_ENV", "production")
     monkeypatch.setenv("SESSION_SECRET", "shared-env-group-secret")
-    resolved = mod._resolve_session_secret()
-    assert resolved == "shared-env-group-secret"
-    assert secret_path.read_text(encoding="utf-8").strip() == "shared-env-group-secret"
+    assert mod._resolve_session_secret() == "shared-env-group-secret"
 
 
-def test_disk_pin_used_when_env_unset(tmp_path, monkeypatch):
+def test_empty_session_secret_in_production_refuses_to_boot(tmp_path, monkeypatch):
     import main as mod
 
     monkeypatch.setattr(mod, "DATA", tmp_path)
-    monkeypatch.setattr(mod, "STORE", tmp_path / "accounts.json")
-    secret_path = tmp_path / "session_secret"
-    monkeypatch.setattr(mod, "_SESSION_SECRET_PATH", secret_path)
-    secret_path.write_text("pinned-disk-secret-value", encoding="utf-8")
+    monkeypatch.setattr(mod, "_SESSION_SECRET_PATH", tmp_path / "session_secret")
+    monkeypatch.setenv("APP_ENV", "production")
     monkeypatch.delenv("SESSION_SECRET", raising=False)
-    assert mod._resolve_session_secret() == "pinned-disk-secret-value"
+    with pytest.raises(RuntimeError, match="SESSION_SECRET"):
+        mod._resolve_session_secret()
 
 
 def test_checkout_disables_managed_payments(client, monkeypatch):
