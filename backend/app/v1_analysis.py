@@ -117,8 +117,12 @@ class FactConflictPacketBody(BaseModel):
     documents: list[FactConflictPacketDoc] = Field(default_factory=list, max_length=80)
 
 
+class ControlPlaneUnavailable(Exception):
+    """Control plane unreachable while refreshing entitlement."""
+
+
 def _probe_control_plane_session(token: str) -> dict | None:
-    """Return entitlement dict when the control-plane session is active; else None."""
+    """Fetch entitlement from control plane. Raises ControlPlaneUnavailable on network failure."""
     control = (settings.cloud_control_url or "").strip().rstrip("/")
     if not control or not token:
         return None
@@ -135,12 +139,11 @@ def _probe_control_plane_session(token: str) -> dict | None:
         with urllib.request.urlopen(req, timeout=8) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
-        logger.info("Control-plane session probe failed: %s", exc)
-        return None
-    if not isinstance(data, dict) or not data.get("active"):
+        logger.info("Control-plane entitlement probe failed: %s", exc)
+        raise ControlPlaneUnavailable(str(exc)) from exc
+    if not isinstance(data, dict):
         return None
     _SESSION_ENTITLEMENT_CACHE[token] = (now + _SESSION_CACHE_TTL_S, data)
-    # Opportunistic prune
     if len(_SESSION_ENTITLEMENT_CACHE) > 256:
         stale = [k for k, (exp, _) in _SESSION_ENTITLEMENT_CACHE.items() if exp <= now]
         for k in stale:
@@ -152,23 +155,53 @@ def _require_analysis_auth(
     authorization: str | None = Header(default=None),
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
 ) -> dict:
+    """Authenticate only — does not require an active paid/trial entitlement."""
     keys = settings.analysis_api_key_set()
     bearer = None
     if authorization and authorization.lower().startswith("bearer "):
         bearer = authorization[7:].strip()
     api_key = (x_api_key or "").strip() or None
-    # Prefer explicit API key header; bearer may also be an ops key.
     token_as_key = api_key or (bearer if bearer and bearer in keys else None)
 
     mode = settings.resolve_app_mode()
-    # Hosted analysis: ops API key OR active control-plane session (browser soft-launch).
     if mode == "analysis":
         if token_as_key and token_as_key in keys:
-            return {"auth": "api_key"}
+            return {"auth": "api_key", "authenticated": True, "entitled": True}
         if bearer:
-            remote = _probe_control_plane_session(bearer)
-            if remote:
-                return {"auth": "session", "email": remote.get("email"), "plan": remote.get("plan")}
+            from app.session_auth import verify_bearer_locally
+
+            local = verify_bearer_locally(bearer)
+            remote = None
+            entitlement_unavailable = False
+            try:
+                remote = _probe_control_plane_session(bearer)
+            except ControlPlaneUnavailable:
+                cached = _SESSION_ENTITLEMENT_CACHE.get(bearer)
+                if cached:
+                    remote = cached[1]
+                else:
+                    entitlement_unavailable = True
+            if not local and not remote:
+                raise HTTPException(
+                    401,
+                    "Valid analysis API key or active subscription session required.",
+                )
+            # Local HMAC is source of identity; CP probe supplies entitlement.
+            # Legacy tokens without SESSION_SECRET parse still work via probe.
+            email = (local or {}).get("email") or (remote or {}).get("email")
+            entitled = bool((remote or {}).get("active")) if remote is not None else False
+            if remote is None and local and entitlement_unavailable:
+                entitled = False
+            return {
+                "auth": "session",
+                "authenticated": True,
+                "entitled": entitled,
+                "email": email,
+                "user_id": (local or {}).get("user_id") or (remote or {}).get("user_id"),
+                "plan": (remote or {}).get("plan"),
+                "bearer": bearer,
+                "entitlement_unavailable": entitlement_unavailable and remote is None,
+            }
         raise HTTPException(
             401,
             "Valid analysis API key or active subscription session required.",
@@ -176,29 +209,60 @@ def _require_analysis_auth(
 
     if keys:
         if not token_as_key or token_as_key not in keys:
-            # Allow session bearer even when keys are configured (desktop hybrid).
             if bearer:
-                remote = _probe_control_plane_session(bearer)
-                if remote:
-                    return {"auth": "session", "email": remote.get("email"), "plan": remote.get("plan")}
-            raise HTTPException(401, "Valid analysis API key required.")
-        return {"auth": "api_key"}
+                from app.session_auth import verify_bearer_locally
 
-    # Local vault: fall back to product entitlement (cloud/license/open).
+                local = verify_bearer_locally(bearer)
+                if local:
+                    return {**local, "entitled": True}
+                try:
+                    remote = _probe_control_plane_session(bearer)
+                except ControlPlaneUnavailable:
+                    raise HTTPException(
+                        503,
+                        "Billing service temporarily unavailable. Try again shortly.",
+                    ) from None
+                if remote and remote.get("active"):
+                    return {
+                        "auth": "session",
+                        "email": remote.get("email"),
+                        "plan": remote.get("plan"),
+                        "authenticated": True,
+                        "entitled": True,
+                    }
+            raise HTTPException(401, "Valid analysis API key required.")
+        return {"auth": "api_key", "authenticated": True, "entitled": True}
+
     try:
-        return require_scan_allowed()
+        return {**require_scan_allowed(), "authenticated": True, "entitled": True}
     except PermissionError as exc:
         raise HTTPException(402, str(exc)) from exc
 
 
+def require_entitled(auth: dict) -> dict:
+    """Write-path gate: inactive trial/subscription → 402 (reads stay open)."""
+    if auth.get("auth") == "api_key" or auth.get("entitled"):
+        return auth
+    if auth.get("entitlement_unavailable"):
+        raise HTTPException(
+            503,
+            "Billing service temporarily unavailable. Try again shortly.",
+        )
+    raise HTTPException(
+        402,
+        "Active trial or subscription required to analyze files.",
+    )
+
+
 def resolve_firm_context(auth: dict) -> dict:
-    """Map session email (or API-key ops) → firm_id / user_id. 1:1 firm per account."""
+    """Map session user_id/email (or API-key ops) → firm_id / user_id."""
     from app.fact_memory.store import get_store
 
     store = get_store()
     email = (auth.get("email") or "").strip().lower()
+    provider_user_id = (auth.get("user_id") or "").strip() or None
     if email:
-        return store.ensure_firm_for_email(email)
+        return store.ensure_firm_for_email(email, auth_user_id=provider_user_id)
     # API-key / local open mode: shared ops firm (still firm-scoped rows).
     return store.ensure_firm_for_email("ops@casesifter.local", name="Ops / API key")
 
@@ -322,6 +386,7 @@ async def create_ephemeral_job(
     filed_date: str | None = Form(default=None),
     _auth: dict = Depends(_require_analysis_auth),
 ):
+    require_entitled(_auth)
     ensure_sweeper()
     ensure_watchdog()
     if not file.filename:

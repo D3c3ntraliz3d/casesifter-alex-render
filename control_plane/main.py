@@ -100,12 +100,12 @@ EMAIL_TRIAL_CONFLICT = (
 
 class LoginBody(BaseModel):
     email: EmailStr
-    password: str = Field(min_length=6)
+    password: str = Field(min_length=6, max_length=200)
 
 
 class SignupBody(BaseModel):
     email: EmailStr
-    password: str = Field(min_length=6)
+    password: str = Field(min_length=8, max_length=200)
     name: str | None = None
     accepted_terms: bool = False
     invite_code: str | None = None
@@ -132,22 +132,54 @@ class CheckoutBody(BaseModel):
     quantity: int = Field(default=1, ge=1, le=50)
 
 
+def _ensure_auth_db() -> None:
+    import auth_store as auth
+
+    auth.init_auth_store()
+    auth.migrate_accounts_json(STORE)
+
+
 def _load() -> dict[str, Any]:
-    if not STORE.exists():
-        return {"users": {}, "sessions": {}, "trials": {}, "trial_domains": {}, "trial_emails": {}}
-    data = json.loads(STORE.read_text(encoding="utf-8"))
-    data.setdefault("users", {})
-    data.setdefault("sessions", {})
-    data.setdefault("trials", {})
-    data.setdefault("trial_domains", {})
-    data.setdefault("trial_emails", {})
-    return data
+    """Compatibility facade over SQL auth store (atomic transactions)."""
+    import auth_store as auth
+    from sqlalchemy import select
+
+    _ensure_auth_db()
+    with auth.session_scope() as s:
+        users: dict[str, Any] = {}
+        for row in s.execute(select(auth.CpUser)).scalars().all():
+            users[row.email] = auth.user_to_dict(row)
+            # Keep password fields out of the facade dict used by Stripe paths.
+        return {
+            "users": users,
+            "sessions": {},
+            "trials": {},
+            "trial_domains": auth.get_meta(s, "trial_domains"),
+            "trial_emails": auth.get_meta(s, "trial_emails"),
+        }
 
 
 def _save(data: dict[str, Any]) -> None:
-    data.setdefault("trial_domains", {})
-    data.setdefault("trial_emails", {})
-    STORE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    """Persist user entitlement fields + trial claim maps (atomic)."""
+    import auth_store as auth
+    from sqlalchemy import select
+
+    _ensure_auth_db()
+    with auth.session_scope() as s:
+        for email, u in (data.get("users") or {}).items():
+            email_n = str(email).lower().strip()
+            row = s.execute(select(auth.CpUser).where(auth.CpUser.email == email_n)).scalar_one_or_none()
+            if row is None:
+                continue
+            auth.apply_user_dict(row, u)
+            if u.get("user_id"):
+                # identity already on row.id
+                pass
+            if u.get("support_code"):
+                row.support_code = u.get("support_code")
+            s.add(row)
+        auth.set_meta(s, "trial_domains", data.get("trial_domains") or {})
+        auth.set_meta(s, "trial_emails", data.get("trial_emails") or {})
 
 
 def _b64url_encode(raw: bytes) -> str:
@@ -300,9 +332,84 @@ def _record_trial_claim(data: dict[str, Any], user: dict[str, Any]) -> None:
 
 
 def _hash_password(password: str, salt: str | None = None) -> tuple[str, str]:
+    """Legacy helper retained for admin/dev paths; new accounts use argon2id via auth_store."""
     salt = salt or secrets.token_hex(8)
     digest = hashlib.sha256(f"{salt}:{password}".encode("utf-8")).hexdigest()
     return salt, digest
+
+
+def _issue_session_for_user(user_email: str) -> tuple[str, str]:
+    """Create a revocable server session and return (token, session_id)."""
+    import auth_store as auth
+    from sqlalchemy import select
+
+    _ensure_auth_db()
+    with auth.session_scope() as s:
+        row = s.execute(
+            select(auth.CpUser).where(auth.CpUser.email == user_email.lower().strip())
+        ).scalar_one_or_none()
+        if row is None:
+            raise HTTPException(401, "Invalid session.")
+        sess = auth.create_session(s, row, ttl_s=SESSION_TTL_S)
+        sid = sess.id
+        email_l = row.email
+        user_id = row.id
+    if not SESSION_SECRET:
+        # Opaque token = session id when no signing secret (dev only).
+        return sid, sid
+    issued = int(time.time())
+    payload = f"{user_id}|{email_l}|{sid}|{issued}".encode("utf-8")
+    sig = hmac.new(SESSION_SECRET.encode("utf-8"), payload, hashlib.sha256).digest()
+    token = f"cs2.{_b64url_encode(payload)}.{_b64url_encode(sig)}"
+    return token, sid
+
+
+def _parse_session_token(token: str) -> dict[str, Any] | None:
+    """Return {user_id,email,sid,issued} for cs2 tokens, or legacy cs1 email."""
+    if not token:
+        return None
+    if token.startswith("cs2.") and SESSION_SECRET:
+        parts = token.split(".")
+        if len(parts) != 3:
+            return None
+        try:
+            payload = _b64url_decode(parts[1])
+            sig = _b64url_decode(parts[2])
+        except Exception:
+            return None
+        expect = hmac.new(SESSION_SECRET.encode("utf-8"), payload, hashlib.sha256).digest()
+        if not hmac.compare_digest(sig, expect):
+            return None
+        try:
+            user_id, email, sid, issued_s = payload.decode("utf-8").split("|", 3)
+            issued = int(issued_s)
+        except Exception:
+            return None
+        if SESSION_TTL_S > 0 and (time.time() - issued) > SESSION_TTL_S:
+            return None
+        return {"user_id": user_id, "email": email.lower(), "sid": sid, "issued": issued}
+    if token.startswith("cs1.") and SESSION_SECRET:
+        parts = token.split(".")
+        if len(parts) != 3:
+            return None
+        try:
+            payload = _b64url_decode(parts[1])
+            sig = _b64url_decode(parts[2])
+        except Exception:
+            return None
+        expect = hmac.new(SESSION_SECRET.encode("utf-8"), payload, hashlib.sha256).digest()
+        if not hmac.compare_digest(sig, expect):
+            return None
+        try:
+            email, issued_s, _nonce = payload.decode("utf-8").split("|", 2)
+            issued = int(issued_s)
+        except Exception:
+            return None
+        if SESSION_TTL_S > 0 and (time.time() - issued) > SESSION_TTL_S:
+            return None
+        return {"user_id": None, "email": email.lower(), "sid": None, "issued": issued, "legacy": True}
+    # Opaque session id (dev / no secret)
+    return {"user_id": None, "email": None, "sid": token, "issued": 0, "opaque": True}
 
 
 def _support_code() -> str:
@@ -529,13 +636,47 @@ def _user_plan(user: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_CORS_ORIGINS = [
+    part.strip()
+    for part in (os.environ.get("CONTROL_CORS_ORIGINS") or "").split(",")
+    if part.strip()
+] or [
+    "https://app.casesifter.com",
+    "https://www.casesifter.com",
+    "https://casesifter.com",
+    "https://casesifter-app.onrender.com",
+    "https://casesifter-marketing.onrender.com",
+    "http://127.0.0.1:5173",
+    "http://localhost:5173",
+]
+
 app = FastAPI(title="CaseSifter Control Plane", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_CORS_ORIGINS,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# In-memory rate limits: key -> [timestamps]
+_RATE: dict[str, list[float]] = {}
+_RATE_LOCK = __import__("threading").Lock()
+
+
+def _rate_limit(key: str, *, limit: int = 10, window_s: float = 600.0) -> None:
+    now = time.time()
+    with _RATE_LOCK:
+        bucket = [t for t in _RATE.get(key, []) if now - t < window_s]
+        if len(bucket) >= limit:
+            raise HTTPException(429, "Too many attempts. Try again later.")
+        bucket.append(now)
+        _RATE[key] = bucket
+
+
+@app.on_event("startup")
+def _auth_startup() -> None:
+    _ensure_auth_db()
 
 
 @app.get("/health")
@@ -554,65 +695,241 @@ def health():
 
 
 @app.post("/v1/signup")
-def signup(body: SignupBody):
+def signup(body: SignupBody, request: Request):
     if not body.accepted_terms:
         raise HTTPException(422, "You must agree to the Terms of Service and Privacy Policy to continue.")
     if not _invite_ok(body.invite_code):
         raise HTTPException(403, "A valid invite code is required for beta signup.")
-    data = _load()
-    email = body.email.lower()
-    if email in data["users"]:
-        raise HTTPException(409, "Account already exists.")
-    salt, hashed = _hash_password(body.password)
-    cohort = "beta" if (body.invite_code or INVITE_REQUIRED) else "general"
-    data["users"][email] = {
+    import auth_store as auth
+    from sqlalchemy import select
+
+    email = body.email.lower().strip()
+    client = (request.client.host if request.client else "unknown") or "unknown"
+    _rate_limit(f"signup:{client}:{email}", limit=5, window_s=3600)
+    _ensure_auth_db()
+    with auth.session_scope() as s:
+        existing = s.execute(select(auth.CpUser).where(auth.CpUser.email == email)).scalar_one_or_none()
+        if existing:
+            raise HTTPException(409, "Account already exists.")
+        cohort = "beta" if (body.invite_code or INVITE_REQUIRED) else "general"
+        uid = uuid.uuid4().hex
+        user = auth.CpUser(
+            id=uid,
+            email=email,
+            name=body.name or "",
+            password_hash=auth.hash_password(body.password),
+            password_algo="argon2id",
+            email_verified=False,
+            created_at=time.time(),
+            accepted_terms_at=time.time(),
+            trial_until=0,
+            subscription_json="{}",
+            cohort=cohort,
+            support_code=_support_code(),
+        )
+        s.add(user)
+        verify_raw = auth.create_email_token(s, user, purpose="verify", ttl_s=86400)
+    # No session until email is verified.
+    payload = {
+        "ok": True,
         "email": email,
-        "name": body.name or "",
-        "salt": salt,
-        "password_hash": hashed,
-        "created_at": time.time(),
-        "accepted_terms_at": time.time(),
-        "trial_until": 0,
-        "subscription": {},
-        "cohort": cohort,
+        "email_verified": False,
+        "message": "Check your email to verify your account before signing in.",
     }
-    _ensure_user_identity(data["users"][email], cohort=cohort)
-    token = _issue_session_token(email, data)
-    _save(data)
-    return {"token": token, "entitlement": _entitlement_payload(data["users"][email])}
+    # Dev/test: surface token when Resend is not configured (never in production).
+    if (os.environ.get("APP_ENV") or "").strip().lower() != "production":
+        if not (os.environ.get("RESEND_API_KEY") or "").strip():
+            payload["dev_verify_token"] = verify_raw
+    return payload
 
 
 @app.post("/v1/login")
-def login(body: LoginBody):
-    data = _load()
-    email = body.email.lower()
-    user = data["users"].get(email)
-    if not user:
-        raise HTTPException(401, "Invalid email or password.")
-    _, hashed = _hash_password(body.password, user["salt"])
-    if not hmac.compare_digest(hashed, user["password_hash"]):
-        raise HTTPException(401, "Invalid email or password.")
-    _ensure_user_identity(user)
-    data["users"][email] = user
-    token = _issue_session_token(email, data)
-    _save(data)
-    return {"token": token, "entitlement": _entitlement_payload(user)}
+def login(body: LoginBody, request: Request):
+    import auth_store as auth
+    from sqlalchemy import select
+
+    email = body.email.lower().strip()
+    client = (request.client.host if request.client else "unknown") or "unknown"
+    _rate_limit(f"login:{client}:{email}", limit=20, window_s=600)
+    _ensure_auth_db()
+    with auth.session_scope() as s:
+        row = s.execute(select(auth.CpUser).where(auth.CpUser.email == email)).scalar_one_or_none()
+        if row is None or not auth.verify_password(row, body.password):
+            raise HTTPException(401, "Invalid email or password.")
+        if not row.email_verified:
+            raise HTTPException(403, "Verify your email before signing in.")
+        auth.upgrade_password_if_needed(s, row, body.password)
+        user_dict = auth.user_to_dict(row)
+    token, _sid = _issue_session_for_user(email)
+    return {"token": token, "entitlement": _entitlement_payload(user_dict)}
 
 
-def _session_user(authorization: str | None) -> tuple[dict[str, Any], str, dict[str, Any]]:
+@app.post("/v1/logout")
+def logout(authorization: str | None = Header(default=None)):
+    import auth_store as auth
+
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(401, "Bearer token required.")
     token = authorization[7:].strip()
-    data = _load()
-    signed_user = _verify_signed_session(token, data)
-    if signed_user is not None:
-        return signed_user, token, data
-    session = data["sessions"].get(token)
-    if not session:
+    parsed = _parse_session_token(token)
+    if not parsed or not parsed.get("sid"):
+        # Still clear client-side; treat unknown as logged out.
+        return {"ok": True}
+    _ensure_auth_db()
+    with auth.session_scope() as s:
+        auth.revoke_session(s, parsed["sid"])
+    return {"ok": True}
+
+
+class VerifyEmailBody(BaseModel):
+    token: str = Field(min_length=8, max_length=200)
+
+
+@app.post("/v1/verify-email")
+def verify_email(body: VerifyEmailBody):
+    import auth_store as auth
+
+    _ensure_auth_db()
+    with auth.session_scope() as s:
+        user = auth.consume_email_token(s, body.token, purpose="verify")
+        if user is None:
+            raise HTTPException(400, "Invalid or expired verification token.")
+        user.email_verified = True
+        s.add(user)
+        email = user.email
+        user_dict = auth.user_to_dict(user)
+    token, _sid = _issue_session_for_user(email)
+    return {"token": token, "entitlement": _entitlement_payload(user_dict)}
+
+
+class ResetRequestBody(BaseModel):
+    email: EmailStr
+
+
+class ResetConfirmBody(BaseModel):
+    token: str = Field(min_length=8, max_length=200)
+    password: str = Field(min_length=8, max_length=200)
+
+
+@app.post("/v1/password-reset/request")
+def password_reset_request(body: ResetRequestBody, request: Request):
+    import auth_store as auth
+    from sqlalchemy import select
+
+    email = str(body.email).lower().strip()
+    client = (request.client.host if request.client else "unknown") or "unknown"
+    _rate_limit(f"reset:{client}:{email}", limit=5, window_s=3600)
+    _ensure_auth_db()
+    out: dict[str, Any] = {"ok": True, "message": "If that account exists, a reset link was sent."}
+    with auth.session_scope() as s:
+        row = s.execute(select(auth.CpUser).where(auth.CpUser.email == email)).scalar_one_or_none()
+        if row is not None:
+            raw = auth.create_email_token(s, row, purpose="reset", ttl_s=3600)
+            if (os.environ.get("APP_ENV") or "").strip().lower() != "production":
+                if not (os.environ.get("RESEND_API_KEY") or "").strip():
+                    out["dev_reset_token"] = raw
+    return out
+
+
+@app.post("/v1/password-reset/confirm")
+def password_reset_confirm(body: ResetConfirmBody):
+    import auth_store as auth
+
+    _ensure_auth_db()
+    with auth.session_scope() as s:
+        user = auth.consume_email_token(s, body.token, purpose="reset")
+        if user is None:
+            raise HTTPException(400, "Invalid or expired reset token.")
+        user.password_hash = auth.hash_password(body.password)
+        user.password_algo = "argon2id"
+        user.legacy_salt = None
+        s.add(user)
+        # Revoke all sessions for this user.
+        from sqlalchemy import select
+
+        for sess in s.execute(select(auth.CpSession).where(auth.CpSession.user_id == user.id)).scalars():
+            if sess.revoked_at is None:
+                sess.revoked_at = time.time()
+                s.add(sess)
+    return {"ok": True}
+
+
+class ExchangeBody(BaseModel):
+    code: str = Field(min_length=8, max_length=200)
+
+
+@app.post("/v1/session/exchange")
+def exchange_session_code(body: ExchangeBody):
+    """One-time 60s code → session token (replaces ?cs_token= URL handoff)."""
+    import auth_store as auth
+
+    _ensure_auth_db()
+    with auth.session_scope() as s:
+        sess = auth.consume_exchange_code(s, body.code)
+        if sess is None:
+            raise HTTPException(400, "Invalid or expired exchange code.")
+        user = s.get(auth.CpUser, sess.user_id)
+        if user is None:
+            raise HTTPException(401, "Unknown user.")
+        user_dict = auth.user_to_dict(user)
+        sid = sess.id
+        email = sess.email
+        user_id = user.id
+    if SESSION_SECRET:
+        issued = int(time.time())
+        payload = f"{user_id}|{email}|{sid}|{issued}".encode("utf-8")
+        sig = hmac.new(SESSION_SECRET.encode("utf-8"), payload, hashlib.sha256).digest()
+        token = f"cs2.{_b64url_encode(payload)}.{_b64url_encode(sig)}"
+    else:
+        token = sid
+    return {"token": token, "entitlement": _entitlement_payload(user_dict)}
+
+
+@app.post("/v1/session/handoff-code")
+def create_handoff_code(authorization: str | None = Header(default=None)):
+    """Mint a one-time exchange code for the current session (marketing→app)."""
+    import auth_store as auth
+
+    user, token, _data = _session_user(authorization)
+    parsed = _parse_session_token(token)
+    sid = (parsed or {}).get("sid")
+    if not sid:
+        raise HTTPException(400, "Session cannot mint a handoff code.")
+    _ensure_auth_db()
+    with auth.session_scope() as s:
+        code = auth.create_exchange_code(s, sid, user["email"])
+    return {"code": code, "expires_in": 60}
+
+
+def _session_user(authorization: str | None) -> tuple[dict[str, Any], str, dict[str, Any]]:
+    import auth_store as auth
+    from sqlalchemy import select
+
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(401, "Bearer token required.")
+    token = authorization[7:].strip()
+    parsed = _parse_session_token(token)
+    if not parsed:
         raise HTTPException(401, "Invalid session.")
-    user = data["users"].get(session["email"])
-    if not user:
-        raise HTTPException(401, "Unknown user.")
+    _ensure_auth_db()
+    data = _load()
+    with auth.session_scope() as s:
+        sid = parsed.get("sid")
+        if sid:
+            sess = auth.get_active_session(s, sid)
+            if sess is None:
+                raise HTTPException(401, "Invalid session.")
+            row = s.get(auth.CpUser, sess.user_id)
+        elif parsed.get("email"):
+            # Legacy cs1: require email still exists; no revoke sid.
+            row = s.execute(
+                select(auth.CpUser).where(auth.CpUser.email == parsed["email"])
+            ).scalar_one_or_none()
+        else:
+            row = None
+        if row is None:
+            raise HTTPException(401, "Unknown user.")
+        user = auth.user_to_dict(row)
     return user, token, data
 
 
@@ -629,26 +946,41 @@ def entitlement(authorization: str | None = Header(default=None)):
 @app.post("/v1/trial")
 def grant_trial(body: TrialBody):
     """Sales/admin: mint or extend a trial. Requires CONTROL_ADMIN_TOKEN."""
+    import auth_store as auth
+    from sqlalchemy import select
+
     admin = os.environ.get("CONTROL_ADMIN_TOKEN", "")
     if not admin or body.admin_token != admin:
         raise HTTPException(403, "Admin token required.")
+    email = body.email.lower().strip()
+    _ensure_auth_db()
+    with auth.session_scope() as s:
+        row = s.execute(select(auth.CpUser).where(auth.CpUser.email == email)).scalar_one_or_none()
+        if row is None:
+            row = auth.CpUser(
+                id=uuid.uuid4().hex,
+                email=email,
+                name="",
+                password_hash=auth.hash_password(secrets.token_urlsafe(16)),
+                password_algo="argon2id",
+                email_verified=True,
+                created_at=time.time(),
+                trial_until=0,
+                subscription_json="{}",
+                cohort=body.cohort or "beta",
+                support_code=_support_code(),
+            )
+            s.add(row)
+        else:
+            row.email_verified = True
+            row.cohort = body.cohort or row.cohort or "beta"
+            s.add(row)
+        user = auth.user_to_dict(row)
     data = _load()
-    email = body.email.lower()
-    user = data["users"].get(email)
-    if not user:
-        salt, hashed = _hash_password(secrets.token_urlsafe(12))
-        user = {
-            "email": email,
-            "name": "",
-            "salt": salt,
-            "password_hash": hashed,
-            "created_at": time.time(),
-            "subscription": {},
-        }
-        data["users"][email] = user
     _ensure_user_identity(user, cohort=body.cohort or "beta")
     _assert_trial_available(data, user)
     user["trial_until"] = time.time() + TRIAL_DAYS * 86400
+    data["users"][email] = user
     _record_trial_claim(data, user)
     _save(data)
     return {

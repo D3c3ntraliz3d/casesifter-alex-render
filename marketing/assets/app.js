@@ -39,12 +39,12 @@ function showFormStatus(el, message, { error = false } = {}) {
   }
 }
 
-async function preferAppDomainWhenLive(openApp, { checkoutTrial = false, token = "", email = "" } = {}) {
+async function preferAppDomainWhenLive(openApp, { checkoutTrial = false, code = "" } = {}) {
   if (!openApp) return;
   const params = new URLSearchParams();
   if (checkoutTrial) params.set("checkout", "trial");
-  if (token) params.set("cs_token", token);
-  if (email) params.set("cs_email", email);
+  // One-time 60s exchange code — never put session tokens in the URL.
+  if (code) params.set("cs_code", code);
   const qs = params.toString();
   const suffix = qs ? `/?${qs}` : "";
   openApp.href = `${APP_URL_DEFAULT}${suffix}`;
@@ -131,18 +131,29 @@ async function wireSignup() {
             ? data.detail.map((d) => d.msg || JSON.stringify(d)).join(" ")
             : "";
         if (res.ok && data?.token) {
+          // Rare: immediate session (legacy). Mint a short-lived handoff code.
           try {
-            localStorage.setItem("casesifter_session_token", data.token);
-            localStorage.setItem("casesifter_email", email);
+            const handoff = await fetch(`${CONTROL_PLANE_URL}/v1/session/handoff-code`, {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${data.token}`,
+                Accept: "application/json",
+              },
+            });
+            const hb = await handoff.json();
+            await preferAppDomainWhenLive(openApp, {
+              checkoutTrial: true,
+              code: hb?.code || "",
+            });
           } catch {
-            /* private mode */
+            await preferAppDomainWhenLive(openApp, { checkoutTrial: true });
           }
-          // Pass token to the app origin (different localStorage) so Checkout works without re-login.
-          await preferAppDomainWhenLive(openApp, {
-            checkoutTrial: true,
-            token: data.token,
-            email,
-          });
+        } else if (res.ok) {
+          // Verify-first: no session until the email link is used.
+          showFormStatus(
+            status,
+            data?.message || "Check your email to verify your account, then open the app to sign in.",
+          );
         }
       } catch {
         /* non-JSON error body */
@@ -159,10 +170,8 @@ async function wireSignup() {
       }
 
       form.hidden = true;
-      showFormStatus(status, "");
       if (success) success.hidden = false;
-      // Default CTA already set above when token present; ensure checkout URL otherwise.
-      if (!openApp?.href?.includes("cs_token=")) {
+      if (!openApp?.href?.includes("cs_code=")) {
         await preferAppDomainWhenLive(openApp, { checkoutTrial: true });
       }
     } catch {

@@ -12,13 +12,48 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import main as mod  # noqa: E402
 
-client = TestClient(mod.app)
+@pytest.fixture()
+def client(tmp_path, monkeypatch):
+    monkeypatch.setenv("CONTROL_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("RESEND_API_KEY", raising=False)
+    monkeypatch.setenv("SESSION_SECRET", "unit-test-session-secret")
+    monkeypatch.setenv("CASESIFTER_INVITE_REQUIRED", "false")
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "")
+    monkeypatch.setenv("STRIPE_PRICE_ID", "")
+
+    import auth_store
+
+    auth_store.reset_auth_store_for_tests()
+    import importlib
+    import main as mod
+
+    importlib.reload(mod)
+    mod.SESSION_SECRET = "unit-test-session-secret"
+    mod.STRIPE_SECRET = ""
+    mod.STRIPE_PRICE_ID = ""
+    mod.STORE = tmp_path / "accounts.json"
+    mod.DATA = tmp_path
+    yield TestClient(mod.app), mod
+    auth_store.reset_auth_store_for_tests()
 
 
-def test_checkout_rejects_bad_session():
-    res = client.post(
+def _verified_token(client, email: str, password: str = "correct-horse") -> str:
+    su = client.post(
+        "/v1/signup",
+        json={"email": email, "password": password, "accepted_terms": True},
+    )
+    assert su.status_code == 200, su.text
+    v = client.post("/v1/verify-email", json={"token": su.json()["dev_verify_token"]})
+    assert v.status_code == 200, v.text
+    return v.json()["token"]
+
+
+def test_checkout_rejects_bad_session(client):
+    c, _mod = client
+    res = c.post(
         "/v1/checkout",
         headers={"Authorization": "Bearer not-a-real-session"},
         json={"trial": True, "quantity": 1},
@@ -27,8 +62,9 @@ def test_checkout_rejects_bad_session():
     assert res.json()["detail"] == "Invalid session."
 
 
-def test_entitlement_rejects_bad_session():
-    res = client.get(
+def test_entitlement_rejects_bad_session(client):
+    c, _mod = client
+    res = c.get(
         "/v1/entitlement",
         headers={"Authorization": "Bearer not-a-real-session"},
     )
@@ -36,7 +72,8 @@ def test_entitlement_rejects_bad_session():
     assert res.json()["detail"] == "Invalid session."
 
 
-def test_entitlement_payload_share_always_on():
+def test_entitlement_payload_share_always_on(client):
+    _c, mod = client
     user = {
         "email": "smoke@example.com",
         "subscription": {},
@@ -47,34 +84,12 @@ def test_entitlement_payload_share_always_on():
     assert payload["email"] == "smoke@example.com"
 
 
-def test_valid_session_checkout_dev_without_stripe(tmp_path, monkeypatch):
-    store = tmp_path / "accounts.json"
-    monkeypatch.setattr(mod, "STORE", store)
-    monkeypatch.setattr(mod, "DATA", tmp_path)
-    monkeypatch.setattr(mod, "STRIPE_SECRET", "")
-    monkeypatch.setattr(mod, "STRIPE_PRICE_ID", "")
-    data = {
-        "users": {},
-        "sessions": {"tok_ok": {"email": "trial@example.com", "created_at": 1}},
-        "trials": {},
-        "trial_domains": {},
-        "trial_emails": {},
-    }
-    data["users"]["trial@example.com"] = {
-        "email": "trial@example.com",
-        "name": "",
-        "salt": "x",
-        "password_hash": "y",
-        "created_at": 1,
-        "subscription": {},
-        "trial_until": 0,
-    }
-    mod._ensure_user_identity(data["users"]["trial@example.com"])
-    store.write_text(__import__("json").dumps(data), encoding="utf-8")
-
-    res = client.post(
+def test_valid_session_checkout_dev_without_stripe(client):
+    c, _mod = client
+    tok = _verified_token(c, "trial@example.com")
+    res = c.post(
         "/v1/checkout",
-        headers={"Authorization": "Bearer tok_ok"},
+        headers={"Authorization": f"Bearer {tok}"},
         json={"trial": True, "quantity": 1},
     )
     assert res.status_code == 200, res.text
@@ -84,49 +99,20 @@ def test_valid_session_checkout_dev_without_stripe(tmp_path, monkeypatch):
     assert body.get("entitlement", {}).get("share_anonymized_outcomes") is True
 
 
-def test_signed_session_survives_sessions_wipe(tmp_path, monkeypatch):
-    """SESSION_SECRET tokens remain valid even if accounts.json sessions are cleared."""
-    store = tmp_path / "accounts.json"
-    monkeypatch.setattr(mod, "STORE", store)
-    monkeypatch.setattr(mod, "DATA", tmp_path)
-    monkeypatch.setattr(mod, "_SESSION_SECRET_PATH", tmp_path / "session_secret")
-    monkeypatch.setattr(mod, "SESSION_SECRET", "unit-test-session-secret")
-    monkeypatch.setattr(mod, "STRIPE_SECRET", "")
-    monkeypatch.setattr(mod, "STRIPE_PRICE_ID", "")
-
-    data = {
-        "users": {},
-        "sessions": {},
-        "trials": {},
-        "trial_domains": {},
-        "trial_emails": {},
-    }
-    data["users"]["signed@example.com"] = {
-        "email": "signed@example.com",
-        "name": "",
-        "salt": "x",
-        "password_hash": "y",
-        "created_at": 1,
-        "subscription": {},
-        "trial_until": 0,
-    }
-    mod._ensure_user_identity(data["users"]["signed@example.com"])
-    token = mod._issue_session_token("signed@example.com", data)
-    assert token.startswith("cs1.")
-    # Simulate deploy wipe of opaque sessions only.
-    data["sessions"] = {}
-    store.write_text(__import__("json").dumps(data), encoding="utf-8")
-
-    res = client.get(
-        "/v1/entitlement",
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    assert res.status_code == 200, res.text
-    assert res.json().get("email") == "signed@example.com"
+def test_signed_session_requires_active_server_row(client):
+    """cs2 tokens are revoked when the server session row is deleted."""
+    c, _mod = client
+    tok = _verified_token(c, "signed@example.com")
+    assert tok.startswith("cs2.")
+    assert c.get("/v1/entitlement", headers={"Authorization": f"Bearer {tok}"}).status_code == 200
+    assert c.post("/v1/logout", headers={"Authorization": f"Bearer {tok}"}).status_code == 200
+    assert c.get("/v1/entitlement", headers={"Authorization": f"Bearer {tok}"}).status_code == 401
 
 
 def test_disk_pinned_secret_survives_env_rotation(tmp_path, monkeypatch):
     """Disk session_secret wins when env SESSION_SECRET is rotated (blueprint churn)."""
+    import main as mod
+
     monkeypatch.setattr(mod, "DATA", tmp_path)
     monkeypatch.setattr(mod, "STORE", tmp_path / "accounts.json")
     secret_path = tmp_path / "session_secret"
@@ -137,31 +123,11 @@ def test_disk_pinned_secret_survives_env_rotation(tmp_path, monkeypatch):
     assert resolved == "pinned-disk-secret-value"
 
 
-def test_checkout_disables_managed_payments(tmp_path, monkeypatch):
-    store = tmp_path / "accounts.json"
-    monkeypatch.setattr(mod, "STORE", store)
-    monkeypatch.setattr(mod, "DATA", tmp_path)
+def test_checkout_disables_managed_payments(client, monkeypatch):
+    c, mod = client
     monkeypatch.setattr(mod, "STRIPE_SECRET", "sk_test_dummy")
     monkeypatch.setattr(mod, "STRIPE_PRICE_ID", "price_test_dummy")
-
-    data = {
-        "users": {},
-        "sessions": {"tok_ok": {"email": "pay@example.com", "created_at": 1}},
-        "trials": {},
-        "trial_domains": {},
-        "trial_emails": {},
-    }
-    data["users"]["pay@example.com"] = {
-        "email": "pay@example.com",
-        "name": "",
-        "salt": "x",
-        "password_hash": "y",
-        "created_at": 1,
-        "subscription": {},
-        "trial_until": 0,
-    }
-    mod._ensure_user_identity(data["users"]["pay@example.com"])
-    store.write_text(__import__("json").dumps(data), encoding="utf-8")
+    tok = _verified_token(c, "pay@example.com")
 
     captured: dict = {}
 
@@ -183,9 +149,9 @@ def test_checkout_disables_managed_payments(tmp_path, monkeypatch):
 
     monkeypatch.setitem(__import__("sys").modules, "stripe", _FakeStripe)
 
-    res = client.post(
+    res = c.post(
         "/v1/checkout",
-        headers={"Authorization": "Bearer tok_ok"},
+        headers={"Authorization": f"Bearer {tok}"},
         json={"trial": True, "quantity": 1},
     )
     assert res.status_code == 200, res.text

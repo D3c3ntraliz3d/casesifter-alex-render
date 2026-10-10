@@ -55,36 +55,50 @@ function sessionExpiredError() {
 }
 
 /**
- * Absorb marketing→app session handoff (?cs_token= / #cs_token=).
- * Signup stores the token on casesifter.com; the app is a different origin.
+ * Absorb marketing→app session handoff via one-time ?cs_code= (60s exchange).
+ * Legacy ?cs_token= is ignored (tokens must not land in history/logs).
  */
 export function absorbSessionHandoff() {
   if (typeof window === "undefined") return false;
-  let token = "";
-  let email = "";
   try {
     const params = new URLSearchParams(window.location.search || "");
-    token = (params.get("cs_token") || params.get("token") || "").trim();
-    email = (params.get("cs_email") || params.get("email") || "").trim();
+    let code = (params.get("cs_code") || "").trim();
     const hash = (window.location.hash || "").replace(/^#/, "");
-    if (hash) {
+    if (!code && hash) {
       const hp = new URLSearchParams(hash);
-      if (!token) token = (hp.get("cs_token") || hp.get("token") || "").trim();
-      if (!email) email = (hp.get("cs_email") || hp.get("email") || "").trim();
+      code = (hp.get("cs_code") || "").trim();
     }
-    if (!token) return false;
-    setSession(token, email || undefined);
+    // Strip any legacy token params from the URL without accepting them.
     params.delete("cs_token");
     params.delete("token");
     params.delete("cs_email");
     params.delete("email");
+    params.delete("cs_code");
     const qs = params.toString();
-    const next = `${window.location.pathname}${qs ? `?${qs}` : ""}${window.location.hash && !hash.includes("cs_token") && !hash.includes("token=") ? window.location.hash : ""}`;
-    window.history.replaceState({}, "", next || window.location.pathname);
-    return true;
+    const next = `${window.location.pathname}${qs ? `?${qs}` : ""}`;
+    if (code) {
+      // Fire-and-forget exchange; caller may also await exchangeSessionCode.
+      exchangeSessionCode(code).catch(() => {});
+    }
+    if (window.location.search || (hash && hash.includes("cs_"))) {
+      window.history.replaceState({}, "", next || window.location.pathname);
+    }
+    return Boolean(code);
   } catch {
     return false;
   }
+}
+
+export async function exchangeSessionCode(code) {
+  const res = await fetch(controlUrl("/v1/session/exchange"), {
+    method: "POST",
+    headers: { ...jsonHeaders, "Content-Type": "application/json" },
+    body: JSON.stringify({ code }),
+  });
+  const data = await readJson(res);
+  if (!data?.token) throw new Error("Session exchange failed.");
+  setSession(data.token, data.entitlement?.email);
+  return data;
 }
 
 /** Open Stripe Checkout / Customer Portal URL in this tab (reliable after await). */
@@ -1182,8 +1196,8 @@ export async function signupCloud(email, password, name, acceptedTerms, inviteCo
   if (!acceptedTerms) {
     throw new Error("Agree to the Terms of Service and Privacy Policy to continue.");
   }
-  if (!password || password.length < 6) {
-    throw new Error("Password must be at least 6 characters.");
+  if (!password || password.length < 8) {
+    throw new Error("Password must be at least 8 characters.");
   }
   let res;
   try {
@@ -1202,8 +1216,35 @@ export async function signupCloud(email, password, name, acceptedTerms, inviteCo
     throw controlUnreachableError(err);
   }
   const data = await readJson(res);
-  if (!data?.token) throw new Error("Signup returned no session token.");
-  setSession(data.token, email);
+  // Session is issued only after email verification.
+  if (data?.token) {
+    setSession(data.token, email);
+    return getEntitlement();
+  }
+  return {
+    active: false,
+    mode: "cloud",
+    plan: null,
+    hasSession: false,
+    email,
+    email_verified: false,
+    message: data?.message || "Check your email to verify your account before signing in.",
+    dev_verify_token: data?.dev_verify_token,
+    billing_state: "none",
+    trial_days_left: null,
+    share_anonymized_outcomes: true,
+  };
+}
+
+export async function verifyEmailCloud(token) {
+  const res = await fetch(controlUrl("/v1/verify-email"), {
+    method: "POST",
+    headers: { ...jsonHeaders, "Content-Type": "application/json" },
+    body: JSON.stringify({ token }),
+  });
+  const data = await readJson(res);
+  if (!data?.token) throw new Error("Email verification failed.");
+  setSession(data.token, data.entitlement?.email);
   return getEntitlement();
 }
 
@@ -1220,6 +1261,17 @@ export async function logoutCloud() {
   if (cs) {
     await callDesktop(cs.setConfig({ sessionToken: "" }));
     return { active: false, mode: "cloud", message: "Signed out." };
+  }
+  const token = getSessionToken();
+  if (token) {
+    try {
+      await fetch(controlUrl("/v1/logout"), {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+      });
+    } catch {
+      /* still clear local session */
+    }
   }
   clearSession();
   return {

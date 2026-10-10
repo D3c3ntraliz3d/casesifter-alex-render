@@ -65,14 +65,30 @@ class FactMemoryStore:
 
     # ── Firms / users ────────────────────────────────────────────────────
 
-    def ensure_firm_for_email(self, email: str, *, name: str | None = None) -> dict[str, Any]:
-        """1:1 firm per account email (soft-launch). Returns firm + user ids."""
+    def ensure_firm_for_email(
+        self,
+        email: str,
+        *,
+        name: str | None = None,
+        auth_user_id: str | None = None,
+    ) -> dict[str, Any]:
+        """1:1 firm per account. Prefer stable auth_user_id when provided."""
         email_n = (email or "").strip().lower()
         if not email_n:
             raise ValueError("email required")
+        auth_id = (auth_user_id or "").strip() or None
         with self.session() as s:
-            user = s.execute(select(User).where(User.email == email_n)).scalar_one_or_none()
+            user = None
+            if auth_id:
+                user = s.get(User, auth_id)
+            if user is None:
+                user = s.execute(select(User).where(User.email == email_n)).scalar_one_or_none()
             if user:
+                # Re-bind email if the verified auth account changed email casing/domain later.
+                if user.email != email_n:
+                    user.email = email_n
+                    s.add(user)
+                    s.commit()
                 firm = s.get(Firm, user.firm_id)
                 assert firm is not None
                 return {
@@ -91,7 +107,12 @@ class FactMemoryStore:
                 persist_facts=True,
                 store_snippets=True,
             )
-            user = User(id=_new_id(), firm_id=firm.id, email=email_n, role="owner")
+            user = User(
+                id=auth_id or _new_id(),
+                firm_id=firm.id,
+                email=email_n,
+                role="owner",
+            )
             s.add(firm)
             s.add(user)
             s.commit()

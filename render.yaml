@@ -33,9 +33,13 @@ services:
         sync: false
       - key: ENTITLEMENT_MODE
         value: cloud
-      # Control plane used to validate browser session bearers on /api/v1/*
+      # Control plane used to refresh entitlement; sessions verify locally via SESSION_SECRET.
       - key: CLOUD_CONTROL_URL
         value: https://casesifter-control.onrender.com
+      - key: SESSION_SECRET
+        sync: false
+      - key: SESSION_TTL_DAYS
+        value: "30"
       - key: ANALYSIS_API_KEYS
         sync: false
       - key: GEMINI_API_KEY
@@ -101,12 +105,20 @@ services:
     envVars:
       - key: CONTROL_DATA_DIR
         value: /var/data
+      - key: APP_ENV
+        value: production
+      # Same Postgres as analysis (cp_* auth tables). Optional; falls back to disk SQLite.
+      - key: DATABASE_URL
+        sync: false
       # Fixed signing secret (Dashboard / MCP). Do NOT use generateValue — it rotates
       # on blueprint sync and logs everyone out. Also pinned to disk at /var/data.
+      # Must match casesifter-analysis SESSION_SECRET for local session verify.
       - key: SESSION_SECRET
         sync: false
       - key: SESSION_TTL_DAYS
         value: "30"
+      - key: CONTROL_CORS_ORIGINS
+        value: "https://app.casesifter.com,https://www.casesifter.com,https://casesifter.com,https://casesifter-app.onrender.com,https://casesifter-marketing.onrender.com"
       # John sets these in Render Dashboard (or Blueprint sync:false secrets).
       - key: STRIPE_SECRET_KEY
         sync: false

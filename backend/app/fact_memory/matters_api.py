@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 
 from app.fact_memory.store import get_store
 from app.recompute_jobs import get_recompute_job, start_recompute_job
-from app.v1_analysis import _require_analysis_auth, resolve_firm_context
+from app.v1_analysis import _require_analysis_auth, require_entitled, resolve_firm_context
 
 matters_router = APIRouter(prefix="/v1/matters", tags=["matters"])
 
@@ -198,6 +198,7 @@ def list_retryable_jobs(matter_id: str, auth: dict = Depends(_require_analysis_a
 @matters_router.post("/{matter_id}/recompute-facts")
 def recompute_matter_facts(matter_id: str, auth: dict = Depends(_require_analysis_auth)):
     """Start async recompute from stored text excerpts. Returns 202 + job_id."""
+    require_entitled(auth)
     ctx = _ctx(auth)
     store = get_store()
     if not store.get_matter(ctx["firm_id"], matter_id):
