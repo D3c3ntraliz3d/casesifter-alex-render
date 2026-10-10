@@ -42,11 +42,14 @@ def maybe_delete_after_terminal(job_id: str, *, retain_report: bool = False) -> 
         # SOURCE_FILE_RETENTION=immediate (product rule: never keep PDFs).
         _delete_source_bytes(job_id)
         if retain_report:
-            # Persist firms: facts/report live in DB; keep report.json for reopen
-            # until explicitly purged — skip TTL sweep via persist.flag.
+            # Persist firms: facts/report live encrypted in Postgres. Do not keep
+            # report.json on disk (even encrypted) past terminal — DB is source of truth.
+            from app.storage import delete_disk_reports
+
             flag = job_dir(job_id) / "persist.flag"
             if not flag.exists():
                 flag.write_text("1", encoding="utf-8")
+            delete_disk_reports(job_id)
 
 
 def delete_ephemeral_source(job_id: str) -> None:
@@ -77,8 +80,8 @@ def _delete_source_bytes(job_id: str) -> None:
 def sweep_stale_jobs() -> int:
     """Delete job dirs older than TTL (complete/failed or abandoned).
 
-    Jobs with persist.flag are skipped — report TTL is dropped for persist firms;
-    source PDFs were already deleted immediately after the run.
+    Persist-flag dirs are also swept: durable reports live in Postgres, so disk
+    is only a short-lived handoff (same TTL as ephemeral jobs).
     """
     removed = 0
     root = settings.jobs_dir
@@ -88,8 +91,6 @@ def sweep_stale_jobs() -> int:
     now = time.time()
     for child in root.iterdir():
         if not child.is_dir():
-            continue
-        if (child / "persist.flag").exists():
             continue
         try:
             age = now - child.stat().st_mtime

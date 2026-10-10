@@ -3473,7 +3473,7 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
             {" "}
             {isDesktopApp()
               ? "Files stay on this PC; analysis runs remotely and source files are deleted from our servers immediately after each scan."
-              : "We never keep your documents. Files are analyzed and deleted immediately. An encrypted fact index per matter (dates, names, amounts, page refs) stays so new filings can be checked against older ones — only your firm can see it."}
+              : "Your PDFs are processed and deleted after analysis; we don't keep the files. We store an encrypted case index (key facts, short quotes and page references, and text excerpts used to compare documents) so your firm can find contradictions across filings. AI analysis is performed by Google Gemini under paid API terms (no training on your data; limited-period abuse logging). Only signed-in members of your firm can access your index."}
           </p>
         </div>
       )}
@@ -3578,7 +3578,7 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
           <p className="footnote">
             {isDesktopApp()
               ? "Files stay on this PC. Analysis runs remotely; source files are deleted from our servers immediately after each scan. Start trial opens Stripe Checkout (card required)."
-              : "We never keep your documents. An encrypted fact index per matter lets new filings be checked against older ones. Start trial opens Stripe Checkout (card required). CaseSifter never sees your card number."}
+              : "Your PDFs are processed and deleted after analysis; we don't keep the files. We store an encrypted case index so your firm can find contradictions across filings. AI analysis uses Google Gemini under paid API terms. Start trial opens Stripe Checkout (card required). CaseSifter never sees your card number."}
           </p>
         </form>
       )}
@@ -3618,12 +3618,12 @@ function TermsModal({ onClose }) {
           </p>
           <h4>2. Files and data</h4>
           <p>
-            We never keep your documents. Files are analyzed and deleted from our servers immediately after each
-            scan. CaseSifter keeps an encrypted index of facts for each matter (dates, names, amounts, and page
-            references) so it can catch contradictions as new filings come in. Only your firm can see that index,
-            and you can delete a document, a matter, or your entire account at any time. Database backups may retain
-            encrypted copies for a limited window after deletion — exact backup retention will be stated in ops docs
-            once confirmed.
+            Your PDFs are processed and deleted after analysis; we don&apos;t keep the files. We store an encrypted
+            case index (key facts, short quotes and page references, and text excerpts used to compare documents)
+            so your firm can find contradictions across filings. AI analysis is performed by Google Gemini under
+            paid API terms (no training on your data; limited-period abuse logging). Only signed-in members of your
+            firm can access your index. You can delete a document, a matter, or your entire account at any time.
+            Database backups may retain encrypted copies for a limited window after deletion.
           </p>
           <h4>3. Billing and trials</h4>
           <p>

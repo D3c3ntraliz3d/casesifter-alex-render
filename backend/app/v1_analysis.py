@@ -656,10 +656,26 @@ def get_ephemeral_job(
 
 @v1.get("/jobs/{job_id}/report")
 def get_ephemeral_report(job_id: str, _auth: dict = Depends(_require_analysis_auth)):
-    require_job_owner(job_id, _auth)
+    owned = require_job_owner(job_id, _auth)
     report = load_report(job_id)
     if report is None:
+        # Persisted jobs delete disk reports at terminal; serve from Postgres.
+        row = owned.get("job") or {}
+        doc_id = row.get("document_id")
+        firm_id = (owned.get("firm_ctx") or {}).get("firm_id")
+        matter_id = row.get("matter_id")
+        if doc_id and firm_id and matter_id:
+            try:
+                from app.fact_memory.store import get_store
+
+                durable = get_store().get_document_report(firm_id, matter_id, doc_id)
+                if isinstance(durable, dict):
+                    return JSONResponse(durable)
+            except Exception:
+                logger.debug("durable report fallback failed job=%s", job_id[:8], exc_info=True)
         progress = load_progress(job_id)
+        if progress is None and not row:
+            raise HTTPException(404, "Unknown or expired job.")
         if progress is None:
             raise HTTPException(404, "Unknown or expired job.")
         raise HTTPException(409, "Report is not ready yet.")
