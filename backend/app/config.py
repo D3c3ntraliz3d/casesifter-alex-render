@@ -1,7 +1,14 @@
 from pathlib import Path
 import os
+import re
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+GEMINI_MODEL_RE = re.compile(r"^gemini-[\w.-]+$")
+
+
+def gemini_model_is_valid(model: str | None) -> bool:
+    return bool(model and GEMINI_MODEL_RE.match(str(model).strip()))
 
 
 class Settings(BaseSettings):

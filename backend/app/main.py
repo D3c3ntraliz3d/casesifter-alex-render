@@ -97,6 +97,16 @@ def _startup() -> None:
             logger.warning("local_done recovery: %s", recovered)
     except Exception as exc:
         logger.warning("local_done recovery failed: %s", exc)
+    from app.config import gemini_model_is_valid
+
+    model_ok = gemini_model_is_valid(settings.gemini_model)
+    if not model_ok:
+        # Never echo a malformed/secret-shaped model string into logs.
+        logger.error(
+            "GEMINI_MODEL failed validation (expected ^gemini-[\\w.-]+$). "
+            "Multimodal Gemini path disabled. APP_MODE=%s",
+            _mode,
+        )
     if not settings.gemini_api_key:
         logger.warning(
             "GEMINI_API_KEY is not set — exhibit multimodal / historical fraud review is OFF. "
@@ -108,10 +118,15 @@ def _startup() -> None:
             "CONTEXTUAL_MULTIMODAL is false — Gemini will not receive native exhibit PDFs. "
             "Set CONTEXTUAL_MULTIMODAL=true to restore the scanned-exhibit pause and fraud path."
         )
+    elif not model_ok:
+        logger.error(
+            "Refusing multimodal Gemini calls: GEMINI_MODEL does not match "
+            "^gemini-[\\w.-]+$. Fix the env var before enabling CONTEXTUAL_MULTIMODAL."
+        )
     else:
         logger.info(
-            "Exhibit multimodal enabled (Gemini model=%s). APP_MODE=%s",
-            settings.gemini_model,
+            "Exhibit multimodal enabled (gemini_model_valid=%s). APP_MODE=%s",
+            True,
             _mode,
         )
     logger.info(
