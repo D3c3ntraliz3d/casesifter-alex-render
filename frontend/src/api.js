@@ -501,50 +501,10 @@ export async function uploadCaseDocument(
   if (isHostedAnalysis()) {
     // Hosted path: scan via /v1/jobs with matter_id; facts persist, PDF deleted server-side.
     // Bulk callers pass waitForComplete:false so one slow/failed job cannot wipe the batch.
-    // #region agent log
-    const _dbg = (message, data, hypothesisId) => {
-      const payload = {
-        sessionId: "de3dd9",
-        runId: "post-fix",
-        hypothesisId,
-        location: "api.js:uploadCaseDocument",
-        message,
-        data,
-        timestamp: Date.now(),
-      };
-      // Local Cursor ingest (works on http://localhost only; mixed-content blocked on HTTPS).
-      fetch("http://127.0.0.1:7576/ingest/14fa87bc-56ce-47bf-bc32-89e0afe8ad7c", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "de3dd9" },
-        body: JSON.stringify(payload),
-      }).catch(() => {});
-      // HTTPS-safe sink on analysis (readable via GET /api/agent-debug).
-      if (ANALYSIS_API_URL) {
-        fetch(`${ANALYSIS_API_URL}/api/agent-debug`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Accept: "application/json" },
-          body: JSON.stringify(payload),
-        }).catch(() => {});
-      }
-    };
-    _dbg(
-      "hosted upload enter (static localFiles import)",
-      {
-        fileName: file?.name || "",
-        hosted: true,
-        hasRemember: typeof rememberScanFile === "function",
-        hasSha: typeof sha256OfFile === "function",
-      },
-      "D"
-    );
-    // #endregion
     onProgress?.("hashing");
     const sha = await sha256OfFile(file);
     onProgress?.("caching");
     await rememberScanFile(file, sha);
-    // #region agent log
-    _dbg("sha ready, calling createAnalysisJob", { shaPrefix: String(sha || "").slice(0, 12) }, "D");
-    // #endregion
     onProgress?.("uploading");
     const labels = resolveHostedUploadLabels(file, {
       displayName: displayName || file.name,
