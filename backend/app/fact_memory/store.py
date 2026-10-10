@@ -1554,19 +1554,20 @@ class FactMemoryStore:
             s.commit()
             return len(rows)
 
-    def list_analysis_jobs_by_status(self, statuses: list[str]) -> list[dict[str, Any]]:
+    def list_analysis_jobs_by_status(
+        self, statuses: list[str], *, firm_id: str | None = None
+    ) -> list[dict[str, Any]]:
         if not statuses:
             return []
         with self.session() as s:
-            rows = (
-                s.execute(
-                    select(AnalysisJob)
-                    .where(AnalysisJob.status.in_(tuple(statuses)))
-                    .order_by(AnalysisJob.created_at.asc())
-                )
-                .scalars()
-                .all()
+            q = (
+                select(AnalysisJob)
+                .where(AnalysisJob.status.in_(tuple(statuses)))
+                .order_by(AnalysisJob.created_at.asc())
             )
+            if firm_id:
+                q = q.where(AnalysisJob.firm_id == firm_id)
+            rows = s.execute(q).scalars().all()
             return [self._analysis_job_dict(row) for row in rows]
 
     def set_restart_interruptions(self, job_id: str, count: int) -> dict[str, Any] | None:

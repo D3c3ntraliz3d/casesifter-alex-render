@@ -20,8 +20,10 @@ _sweeper_lock = threading.Lock()
 
 def delete_job_files(job_id: str) -> bool:
     """Remove job directory from disk. Progress/report are gone after this."""
-    path = job_dir(job_id)
-    if not path.exists():
+    from app.storage import job_dir_existing
+
+    path = job_dir_existing(job_id)
+    if path is None or not path.exists():
         return False
     shutil.rmtree(path, ignore_errors=True)
     return True

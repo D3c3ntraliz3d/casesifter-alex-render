@@ -203,6 +203,25 @@ def resolve_firm_context(auth: dict) -> dict:
     return store.ensure_firm_for_email("ops@casesifter.local", name="Ops / API key")
 
 
+def require_job_owner(job_id: str, auth: dict) -> dict:
+    """Validate job_id shape and firm ownership. Same 404 body for unknown/foreign."""
+    from app.fact_memory.store import get_store
+    from app.storage import JOB_ID_RE
+
+    if not JOB_ID_RE.fullmatch((job_id or "").strip()):
+        raise HTTPException(404, "Unknown or expired job.")
+    row = get_store().get_analysis_job(job_id)
+    if not row:
+        raise HTTPException(404, "Unknown or expired job.")
+    if auth.get("auth") == "api_key":
+        logger.info("auth=api_key job=%s", job_id[:8])
+        return {"job": row, "firm_ctx": resolve_firm_context(auth)}
+    firm_ctx = resolve_firm_context(auth)
+    if row.get("firm_id") != firm_ctx.get("firm_id"):
+        raise HTTPException(404, "Unknown or expired job.")
+    return {"job": row, "firm_ctx": firm_ctx}
+
+
 def _should_persist(auth: dict, firm_ctx: dict | None) -> bool:
     if not settings.persist_facts_enabled():
         return False
@@ -574,15 +593,12 @@ def get_ephemeral_job(
     include_report: bool = Query(default=False),
     _auth: dict = Depends(_require_analysis_auth),
 ):
+    owned = require_job_owner(job_id, _auth)
+    firm_id = (owned.get("firm_ctx") or {}).get("firm_id")
     progress = load_progress(job_id)
     if progress is None:
-        try:
-            from app.fact_memory.store import get_store
-
-            row = get_store().get_analysis_job(job_id)
-        except Exception:
-            row = None
-        if row and row.get("status") == "interrupted":
+        row = owned.get("job") or {}
+        if row.get("status") == "interrupted":
             return _durable_interrupted_payload(row)
         raise HTTPException(404, "Unknown or expired job.")
     # Status polls must stay small. Embedding the report froze the worker on
@@ -590,8 +606,11 @@ def get_ephemeral_job(
     payload = progress.model_dump(mode="json")
     payload["report"] = None
     payload["ephemeral"] = True
-    persist_flag = job_dir(job_id) / "persist.flag"
-    if persist_flag.exists():
+    from app.storage import job_dir_existing
+
+    existing = job_dir_existing(job_id)
+    persist_flag = (existing / "persist.flag") if existing else None
+    if persist_flag is not None and persist_flag.exists():
         payload["ephemeral"] = False
         payload["persist_facts"] = True
         try:
@@ -600,13 +619,14 @@ def get_ephemeral_job(
             payload["matter_id"] = None
     # Timing + queue ETA for the hosted bulk UI.
     try:
-        timing_path = job_dir(job_id) / "timing.json"
-        if timing_path.is_file():
-            payload["timing"] = json.loads(timing_path.read_text(encoding="utf-8"))
-        else:
-            raw = json.loads((job_dir(job_id) / "progress.json").read_text(encoding="utf-8"))
-            if isinstance(raw.get("timing"), dict):
-                payload["timing"] = raw["timing"]
+        if existing is not None:
+            timing_path = existing / "timing.json"
+            if timing_path.is_file():
+                payload["timing"] = json.loads(timing_path.read_text(encoding="utf-8"))
+            else:
+                raw = json.loads((existing / "progress.json").read_text(encoding="utf-8"))
+                if isinstance(raw.get("timing"), dict):
+                    payload["timing"] = raw["timing"]
     except Exception:
         pass
     if progress.status in {"queued", "running", "local_done"}:
@@ -615,7 +635,8 @@ def get_ephemeral_job(
             from app.gemini_executor import estimate_eta_seconds
 
             active = get_store().list_analysis_jobs_by_status(
-                ["queued", "running", "local_done"]
+                ["queued", "running", "local_done"],
+                firm_id=firm_id,
             )
             position = 1
             for idx, row in enumerate(active, start=1):
@@ -635,6 +656,7 @@ def get_ephemeral_job(
 
 @v1.get("/jobs/{job_id}/report")
 def get_ephemeral_report(job_id: str, _auth: dict = Depends(_require_analysis_auth)):
+    require_job_owner(job_id, _auth)
     report = load_report(job_id)
     if report is None:
         progress = load_progress(job_id)
@@ -646,6 +668,7 @@ def get_ephemeral_report(job_id: str, _auth: dict = Depends(_require_analysis_au
 
 @v1.delete("/jobs/{job_id}")
 def purge_ephemeral_job(job_id: str, _auth: dict = Depends(_require_analysis_auth)):
+    require_job_owner(job_id, _auth)
     ok = delete_job_files(job_id)
     if not ok:
         raise HTTPException(404, "Unknown or already purged job.")
@@ -706,4 +729,6 @@ def ephemeral_fact_conflicts(
 
 @v1.post("/sweep")
 def force_sweep(_auth: dict = Depends(_require_analysis_auth)):
+    if _auth.get("auth") != "api_key":
+        raise HTTPException(403, "API key required.")
     return {"removed": sweep_stale_jobs()}
