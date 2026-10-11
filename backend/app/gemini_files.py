@@ -54,6 +54,7 @@ def _urlopen_with_retries(
 
     job_prefix = _job_prefix()
     last_err: Exception | None = None
+    last_reason = "error"
     for attempt in range(_MAX_ATTEMPTS):
         try:
             return urllib.request.urlopen(request, timeout=timeout)
@@ -78,9 +79,10 @@ def _urlopen_with_retries(
                 if note_failures:
                     note_ai_review_failure(reason)
                 raise RuntimeError(f"Gemini Files HTTP {exc.code}: {detail}") from exc
-            if exc.code == 429 and attempt + 1 < _MAX_ATTEMPTS:
+            if exc.code in (429, 500, 502, 503, 504) and attempt + 1 < _MAX_ATTEMPTS:
                 time.sleep(_retry_delay(attempt, exc.headers))
-                last_err = RuntimeError(f"Gemini Files HTTP 429: {detail}")
+                last_err = RuntimeError(f"Gemini Files HTTP {exc.code}: {detail}")
+                last_reason = reason
                 continue
             if note_failures:
                 note_ai_review_failure(reason)
@@ -91,7 +93,7 @@ def _urlopen_with_retries(
             raise RuntimeError(f"Could not reach Gemini Files API: {exc.reason}") from exc
     if last_err is not None:
         if note_failures:
-            note_ai_review_failure("rate_limited")
+            note_ai_review_failure(last_reason)
         raise last_err
     if note_failures:
         note_ai_review_failure("error")

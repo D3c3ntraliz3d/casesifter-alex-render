@@ -1392,6 +1392,9 @@ def _encode_source_file(source_file: Path | None) -> tuple[str | None, str | Non
         return None, None, f"Could not read the file for upload: {exc}"
 
 
+RETRYABLE_GEMINI_STATUSES = frozenset({429, 500, 502, 503, 504})
+
+
 def _post_gemini(payload: dict[str, Any], timeout: int | None = None) -> dict[str, Any]:
     from app.gemini_cancel import CancelledError, current_job_id, is_cancelled
     from app.gemini_review_state import note_ai_review_failure, reason_for_http_status
@@ -1404,6 +1407,7 @@ def _post_gemini(payload: dict[str, Any], timeout: int | None = None) -> dict[st
     body_bytes = json.dumps(payload).encode("utf-8")
     max_attempts = 5
     last_err: Exception | None = None
+    last_reason = "error"
     # Prefer document timeout when caller omits; never hang unbounded.
     http_timeout = timeout if timeout is not None else settings.gemini_timeout_s
     job = current_job_id() or ""
@@ -1446,16 +1450,20 @@ def _post_gemini(payload: dict[str, Any], timeout: int | None = None) -> dict[st
                     )
                     note_ai_review_failure(reason)
                     raise RuntimeError(f"Gemini returned HTTP {exc.code}: {detail}") from exc
-                if exc.code == 429 and attempt + 1 < max_attempts:
+                # 429 = our quota; 500/502/503/504 = Google overloaded or hiccuping.
+                # Both are transient: back off and retry instead of failing the review.
+                if exc.code in RETRYABLE_GEMINI_STATUSES and attempt + 1 < max_attempts:
                     # Honor Retry-After when present; otherwise exponential backoff.
                     retry_after = exc.headers.get("Retry-After") if exc.headers else None
+                    base = 1.5 if exc.code == 429 else 2.0
                     try:
-                        delay = float(retry_after) if retry_after else (1.5 * (2**attempt))
+                        delay = float(retry_after) if retry_after else (base * (2**attempt))
                     except (TypeError, ValueError):
-                        delay = 1.5 * (2**attempt)
+                        delay = base * (2**attempt)
                     delay = min(60.0, max(0.5, delay))
                     time.sleep(delay)
-                    last_err = RuntimeError(f"Gemini returned HTTP 429: {detail}")
+                    last_err = RuntimeError(f"Gemini returned HTTP {exc.code}: {detail}")
+                    last_reason = reason
                     continue
                 note_ai_review_failure(reason)
                 raise RuntimeError(f"Gemini returned HTTP {exc.code}: {detail}") from exc
@@ -1463,7 +1471,7 @@ def _post_gemini(payload: dict[str, Any], timeout: int | None = None) -> dict[st
                 note_ai_review_failure("error")
                 raise RuntimeError(f"Could not reach Gemini: {exc.reason}") from exc
     if last_err is not None:
-        note_ai_review_failure("rate_limited")
+        note_ai_review_failure(last_reason)
         raise last_err
     note_ai_review_failure("error")
     raise RuntimeError("Gemini request failed after retries.")
