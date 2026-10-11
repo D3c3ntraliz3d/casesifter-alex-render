@@ -369,6 +369,11 @@ class FactMemoryStore:
             try:
                 report = enc.decrypt_json(fernet, doc.report_enc) or {}
                 if isinstance(report, dict):
+                    # Document list risk follows the same CASE_FACT_CONFLICTS
+                    # setting as the board (re-scored at read time).
+                    from app.case_conflict_toggle import strip_report
+
+                    report = strip_report(report)
                     risk_level = report.get("risk_level")
                     risk_score = report.get("risk_score")
                     audit = report.get("audit") if isinstance(report.get("audit"), dict) else {}
