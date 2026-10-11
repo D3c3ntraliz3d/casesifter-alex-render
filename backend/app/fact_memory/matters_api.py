@@ -111,13 +111,16 @@ def get_matter(matter_id: str, auth: dict = Depends(_require_analysis_auth)):
     matter = store.get_matter(ctx["firm_id"], matter_id)
     if not matter:
         raise HTTPException(404, "Matter not found.")
+    from app.case_conflict_toggle import case_fact_conflicts_enabled, filter_findings
     from app.case_consistency import aggregate_fact_conflicts
 
     docs = store.list_documents(ctx["firm_id"], matter_id)
-    snaps = store.list_prior_snapshots(ctx["firm_id"], matter_id)
-    conflicts = aggregate_fact_conflicts(snaps)
+    conflicts: list[dict] = []
+    if case_fact_conflicts_enabled():
+        snaps = store.list_prior_snapshots(ctx["firm_id"], matter_id)
+        conflicts = aggregate_fact_conflicts(snaps)
     docs = _elevate_docs_for_conflicts(docs, conflicts)
-    findings = store.list_findings(ctx["firm_id"], matter_id)
+    findings = filter_findings(store.list_findings(ctx["firm_id"], matter_id))
     store.audit(ctx["firm_id"], ctx.get("user_id"), "matter.view", matter_id)
     return {
         **matter,
@@ -232,13 +235,14 @@ def list_findings(matter_id: str, auth: dict = Depends(_require_analysis_auth)):
     store = get_store()
     if not store.get_matter(ctx["firm_id"], matter_id):
         raise HTTPException(404, "Matter not found.")
+    from app.case_conflict_toggle import case_fact_conflicts_enabled, filter_findings
     from app.case_consistency import (
         aggregate_fact_conflicts,
         dedupe_gotchas,
         scrub_misattributed_employment_copy,
     )
 
-    raw = store.list_findings(ctx["firm_id"], matter_id)
+    raw = filter_findings(store.list_findings(ctx["firm_id"], matter_id))
     store.audit(ctx["firm_id"], ctx.get("user_id"), "findings.view", matter_id)
 
     # One card per fact pair — persist can re-emit the same interrupt on every scan.
@@ -249,12 +253,15 @@ def list_findings(matter_id: str, auth: dict = Depends(_require_analysis_auth)):
 
     # Case-level aggregate cards (one per attribute cluster). Prefer these for
     # documentary fact conflicts so the board does not also list pairwise gotchas.
-    snaps = store.list_prior_snapshots(ctx["firm_id"], matter_id)
-    fact_conflicts = [
-        scrub_misattributed_employment_copy(fc)
-        for fc in aggregate_fact_conflicts(snaps)
-        if str(fc.get("severity") or "") in {"high", "medium", "critical"}
-    ]
+    # Hidden (and not computed) unless CASE_FACT_CONFLICTS=true.
+    fact_conflicts: list[dict] = []
+    if case_fact_conflicts_enabled():
+        snaps = store.list_prior_snapshots(ctx["firm_id"], matter_id)
+        fact_conflicts = [
+            scrub_misattributed_employment_copy(fc)
+            for fc in aggregate_fact_conflicts(snaps)
+            if str(fc.get("severity") or "") in {"high", "medium", "critical"}
+        ]
     conflict_fields = {
         str(fc.get("field") or "").strip().lower()
         for fc in fact_conflicts
@@ -318,11 +325,13 @@ def get_document_report(
 ):
     ctx = _ctx(auth)
     store = get_store()
+    from app.case_conflict_toggle import strip_report
+
     report = store.get_document_report(ctx["firm_id"], matter_id, document_id)
     if report is None:
         raise HTTPException(404, "Report not found.")
     store.audit(ctx["firm_id"], ctx.get("user_id"), "report.view", document_id)
-    return report
+    return strip_report(report)
 
 
 @matters_router.get("/{matter_id}/documents/{document_id}/file")

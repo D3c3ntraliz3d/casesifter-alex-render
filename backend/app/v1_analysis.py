@@ -730,7 +730,9 @@ def get_ephemeral_job(
             logger.debug("queue eta failed job=%s", job_id[:8], exc_info=True)
     if include_report and progress.status == "complete":
         report = load_report(job_id)
-        payload["report"] = report.model_dump(mode="json") if report else None
+        from app.case_conflict_toggle import strip_report
+
+        payload["report"] = strip_report(report.model_dump(mode="json")) if report else None
     return payload
 
 
@@ -750,7 +752,9 @@ def get_ephemeral_report(job_id: str, _auth: dict = Depends(_require_analysis_au
 
                 durable = get_store().get_document_report(firm_id, matter_id, doc_id)
                 if isinstance(durable, dict):
-                    return JSONResponse(durable)
+                    from app.case_conflict_toggle import strip_report
+
+                    return JSONResponse(strip_report(durable))
             except Exception:
                 logger.debug("durable report fallback failed job=%s", job_id[:8], exc_info=True)
         progress = load_progress(job_id)
@@ -759,7 +763,9 @@ def get_ephemeral_report(job_id: str, _auth: dict = Depends(_require_analysis_au
         if progress is None:
             raise HTTPException(404, "Unknown or expired job.")
         raise HTTPException(409, "Report is not ready yet.")
-    return JSONResponse(report.model_dump(mode="json"))
+    from app.case_conflict_toggle import strip_report
+
+    return JSONResponse(strip_report(report.model_dump(mode="json")))
 
 
 @v1.delete("/jobs/{job_id}")

@@ -88,6 +88,11 @@ class Settings(BaseSettings):
     # SOURCE_FILE_RETENTION=immediate keeps current delete-after-run behavior.
     source_file_retention: str = "immediate"
     persist_facts: bool = True  # global default; per-firm firms.persist_facts can opt out
+    # Case-wide "fact conflict" cards (same fact, different values across or inside
+    # documents). Off by default: they were mostly false positives (recording vs.
+    # execution dates, CEMA components, default vs. note rate). Per-document forensic
+    # findings are unaffected. Set CASE_FACT_CONFLICTS=true to show them again.
+    case_fact_conflicts: bool = False
     database_url: str | None = None  # Postgres in prod; SQLite fallback when unset
     fact_memory_master_key: str | None = None  # wraps per-firm Fernet keys
 
