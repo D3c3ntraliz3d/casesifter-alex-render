@@ -3527,7 +3527,7 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
             {" "}
             {isDesktopApp()
               ? "Files stay on this PC; analysis runs remotely and source files are deleted from our servers immediately after each scan."
-              : "Your PDFs are processed and deleted after analysis; we don't keep the files. We store an encrypted case index (key facts, short quotes and page references, and text excerpts used to compare documents) so your firm can find contradictions across filings. AI analysis is performed by Google Gemini under paid API terms (no training on your data; limited-period abuse logging). Only signed-in members of your firm can access your index."}
+              : "Your PDFs are processed and deleted after analysis; we don't keep the files. We store an encrypted case index (key facts, short quotes and page references, and text excerpts used to compare documents) so your firm can find contradictions across filings. AI analysis is performed by Google Gemini under paid API terms (no training on your data; limited-period abuse logging). Large files are sent to Google’s Gemini file service for analysis and deleted immediately after; at most 48 hours if deletion fails. Only signed-in members of your firm can access your index."}
           </p>
         </div>
       )}
@@ -3675,8 +3675,10 @@ function TermsModal({ onClose }) {
             Your PDFs are processed and deleted after analysis; we don&apos;t keep the files. We store an encrypted
             case index (key facts, short quotes and page references, and text excerpts used to compare documents)
             so your firm can find contradictions across filings. AI analysis is performed by Google Gemini under
-            paid API terms (no training on your data; limited-period abuse logging). Only signed-in members of your
-            firm can access your index. You can delete a document, a matter, or your entire account at any time.
+            paid API terms (no training on your data; limited-period abuse logging). Large files are sent to
+            Google&apos;s Gemini file service for analysis and deleted immediately after; at most 48 hours if
+            deletion fails. Only signed-in members of your firm can access your index. You can delete a document,
+            a matter, or your entire account at any time.
             Database backups may retain encrypted copies for a limited window after deletion.
           </p>
           <h4>3. Billing and trials</h4>
@@ -3976,7 +3978,18 @@ function ReportViewer({
                   <p className="footnote">
                     Gemini did not finish (
                     {report.ai_review_reason || report.comparison?.ai_review_reason || "error"}
-                    ). Re-uploads the file from this computer’s cache and runs the full scan again.
+                    ).
+                    {(report.comparison?.ai_review_failed_page_ranges || []).length
+                      ? ` Failed page ranges: ${(report.comparison.ai_review_failed_page_ranges || [])
+                          .slice(0, 6)
+                          .map((r) => `pp. ${r[0]}-${r[1]}`)
+                          .join(", ")}${
+                          (report.comparison.ai_review_failed_page_ranges || []).length > 6
+                            ? "…"
+                            : ""
+                        }.`
+                      : ""}{" "}
+                    Re-uploads the file from this computer’s cache and runs the full scan again.
                   </p>
                 </div>
                 <button

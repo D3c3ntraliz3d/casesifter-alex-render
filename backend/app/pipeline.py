@@ -57,14 +57,17 @@ LOCAL_STAGE_NAME = "local_stage.json"
 
 
 def _source_for_contextual(source: Path, profile: str) -> Path | None:
-    """Native file upload for tier-3 Gemini fraud review — forensic lane only."""
+    """Native file upload for tier-3 Gemini fraud review — forensic lane only.
+
+    Large PDFs use the Gemini Files API / chunking path in contextual_logic; keep the
+    source available up to the product upload cap (MAX_FILE_MB).
+    """
     if profile == PROFILE_COURT_FILING:
         return None
     if not (settings.contextual_multimodal and settings.gemini_api_key):
         return None
     try:
-        # Match contextual_logic inline limit (default 15 MB), not a tighter hardcode.
-        limit = settings.contextual_max_upload_mb * 1024 * 1024
+        limit = settings.max_file_mb * 1024 * 1024
         if source.stat().st_size > limit:
             return None
     except OSError:
@@ -316,7 +319,11 @@ def run_gemini_stage(
     peak_rss_mb: float | None = None,
 ) -> Report:
     """Multimodal / claims / AI facts / gotchas / report. Reads local_stage.json."""
-    from app.gemini_review_state import get_ai_review_failure, reset_ai_review_state
+    from app.gemini_review_state import (
+        get_ai_review_failure,
+        get_failed_page_ranges,
+        reset_ai_review_state,
+    )
 
     reset_ai_review_state()
     gemini_timing.reset()
@@ -597,6 +604,11 @@ def run_gemini_stage(
     }
 
     fail_reason = get_ai_review_failure()
+    failed_ranges = get_failed_page_ranges()
+    # Prefer ranges recorded on the contextual module when TLS was reset elsewhere.
+    ctx_ranges = (contextual.extras or {}).get("document_analysis_failed_page_ranges")
+    if isinstance(ctx_ranges, list) and ctx_ranges and not failed_ranges:
+        failed_ranges = ctx_ranges
     if fail_reason:
         ai_review = "incomplete"
         ai_review_reason = fail_reason
@@ -605,6 +617,8 @@ def run_gemini_stage(
         ai_review_reason = None
     comparison["ai_review"] = ai_review
     comparison["ai_review_reason"] = ai_review_reason
+    if failed_ranges:
+        comparison["ai_review_failed_page_ranges"] = failed_ranges
 
     risk_level, risk_score, score_drivers = score_risk_details(findings)
     comparison["score_drivers"] = score_drivers
@@ -670,9 +684,15 @@ def run_gemini_stage(
     comparison["timing"] = timing
 
     if ai_review == "incomplete":
+        range_note = ""
+        if failed_ranges:
+            bits = ", ".join(f"pp. {a}-{b}" for a, b in failed_ranges[:8])
+            if len(failed_ranges) > 8:
+                bits += f" (+{len(failed_ranges) - 8} more)"
+            range_note = f" Failed page ranges: {bits}."
         complete_msg = (
-            f"Scan finished but AI review is incomplete ({ai_review_reason or 'error'}). "
-            "Re-run AI review (full re-scan from your local file)."
+            f"Scan finished but AI review is incomplete ({ai_review_reason or 'error'})."
+            f"{range_note} Re-run AI review (full re-scan from your local file)."
         )
     else:
         complete_msg = (
