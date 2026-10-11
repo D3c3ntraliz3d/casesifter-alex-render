@@ -22,9 +22,10 @@ logger = logging.getLogger("worker")
 
 def main() -> None:
     from app.config import settings
+    from app.gemini_tasks import startup_validate_and_probe
     from worker.pool import run_worker_pool
     from app.worker_auth import require_worker_token_configured
-    
+
     if (settings.scan_backend or "inline").strip().lower() not in {"worker", "local_worker", "cloudrun"}:
         logger.warning(
             "SCAN_BACKEND=%s — worker will still poll the queue when started.",
@@ -36,6 +37,8 @@ def main() -> None:
     from app.storage import use_ephemeral_report_key
 
     use_ephemeral_report_key()
+    # Same models.get / TASK_* validation as analysis — this process runs Gemini.
+    startup_validate_and_probe()
     logger.info(
         "scan worker starting callback=%s blob=%s queue=%s max_attempts=%s concurrency=%s",
         settings.worker_callback_base_url,
