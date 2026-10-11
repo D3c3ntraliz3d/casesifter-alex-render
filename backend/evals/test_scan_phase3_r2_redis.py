@@ -329,6 +329,6 @@ def test_worker_main_enables_ephemeral_report_key(monkeypatch):
     def stop_loop(*a, **k):
         raise KeyboardInterrupt
 
-    monkeypatch.setattr("app.job_queue.run_local_worker_loop", stop_loop)
+    monkeypatch.setattr("worker.pool.run_worker_pool", stop_loop)
     wm.main()
     assert storage_mod._report_fernet_override is not None

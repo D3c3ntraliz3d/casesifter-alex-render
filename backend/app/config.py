@@ -118,6 +118,11 @@ class Settings(BaseSettings):
     worker_service_token: str | None = None  # shared secret for internal worker callbacks
     worker_callback_base_url: str = "http://127.0.0.1:8000"
     worker_max_attempts: int = 3
+    # Jobs one worker instance runs at once, each in its own child process.
+    # Scans are mostly waiting on Gemini, so >1 uses an otherwise idle CPU.
+    worker_concurrency: int = 3
+    # Hard wall-clock cap per job; a hung child is killed and the job retried.
+    worker_job_timeout_s: int = 1800
     # Public base used for local signed upload URLs (Phase 2).
     public_analysis_base_url: str = "http://127.0.0.1:8000"
     blob_ttl_hours: int = 24
