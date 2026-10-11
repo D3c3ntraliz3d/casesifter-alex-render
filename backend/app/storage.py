@@ -214,21 +214,40 @@ def update_job(
         return progress
 
 
-def _encrypt_report_text(plaintext: str) -> str:
-    """Encrypt report JSON for disk. Fail closed if master key unavailable in production."""
+# Scan workers never hold FACT_MEMORY_MASTER_KEY (no tenant data access by design).
+# Their on-disk reports live only in a per-job temp dir that is deleted after the
+# result is POSTed, so they are encrypted with a random key that exists only in
+# that worker process's memory.
+_report_fernet_override = None
+
+
+def use_ephemeral_report_key() -> None:
+    """Encrypt this process's on-disk reports with a random in-memory key (workers)."""
+    global _report_fernet_override
+    from cryptography.fernet import Fernet
+
+    _report_fernet_override = Fernet(Fernet.generate_key())
+
+
+def _report_fernet():
+    if _report_fernet_override is not None:
+        return _report_fernet_override
     from app.fact_memory.encryption import master_fernet
 
-    token = master_fernet().encrypt(plaintext.encode("utf-8")).decode("ascii")
+    return master_fernet()
+
+
+def _encrypt_report_text(plaintext: str) -> str:
+    """Encrypt report JSON for disk. Fail closed if master key unavailable in production."""
+    token = _report_fernet().encrypt(plaintext.encode("utf-8")).decode("ascii")
     return _REPORT_ENC_PREFIX + token
 
 
 def _decrypt_report_text(raw: str) -> str:
     text = (raw or "").strip()
     if text.startswith(_REPORT_ENC_PREFIX):
-        from app.fact_memory.encryption import master_fernet
-
         token = text[len(_REPORT_ENC_PREFIX) :]
-        return master_fernet().decrypt(token.encode("ascii")).decode("utf-8")
+        return _report_fernet().decrypt(token.encode("ascii")).decode("utf-8")
     # Legacy plaintext on disk — still readable once, callers should rewrite encrypted.
     return text
 
