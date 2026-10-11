@@ -99,6 +99,18 @@ class Settings(BaseSettings):
     database_url: str | None = None  # Postgres in prod; SQLite fallback when unset
     fact_memory_master_key: str | None = None  # wraps per-firm Fernet keys
 
+    # Scale Phase 1: scan dispatch. inline = today's in-process path (default).
+    # worker = enqueue to local queue + blob store; cloudrun = Phase 3.
+    scan_backend: str = "inline"
+    blob_backend: str = "local"  # local | gcs (gcs Phase 3)
+    queue_backend: str = "local"  # local | cloudtasks (cloudtasks Phase 3)
+    worker_service_token: str | None = None  # shared secret for internal worker callbacks
+    worker_callback_base_url: str = "http://127.0.0.1:8000"
+    worker_max_attempts: int = 3
+    # Public base used for local signed upload URLs (Phase 2).
+    public_analysis_base_url: str = "http://127.0.0.1:8000"
+    blob_ttl_hours: int = 24
+
     # Scan watchdog: fail + release slot when a *running* job goes silent or runs too long.
     # Queued jobs are never failed for age (concurrency 1 makes long queues expected).
     scan_stall_seconds: int = 420  # 7 minutes with no progress update
@@ -151,6 +163,14 @@ class Settings(BaseSettings):
     def cases_dir(self) -> Path:
         return self.data_dir / "cases"
 
+    @property
+    def blob_dir(self) -> Path:
+        return self.data_dir / "blobs"
+
+    @property
+    def queue_dir(self) -> Path:
+        return self.data_dir / "queue"
+
     def analysis_api_key_set(self) -> set[str]:
         return {part.strip() for part in (self.analysis_api_keys or "").split(",") if part.strip()}
 
@@ -177,3 +197,5 @@ settings = Settings()
 settings.data_dir.mkdir(parents=True, exist_ok=True)
 settings.jobs_dir.mkdir(parents=True, exist_ok=True)
 settings.cases_dir.mkdir(parents=True, exist_ok=True)
+settings.blob_dir.mkdir(parents=True, exist_ok=True)
+settings.queue_dir.mkdir(parents=True, exist_ok=True)

@@ -15,9 +15,42 @@ services:
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.6-flash}
       CONTEXTUAL_MULTIMODAL: ${CONTEXTUAL_MULTIMODAL:-false}
       CONTEXTUAL_MAX_UPLOAD_MB: ${CONTEXTUAL_MAX_UPLOAD_MB:-15}
+      # Phase 1: default inline keeps today's behavior. Set SCAN_BACKEND=worker to use the worker.
+      SCAN_BACKEND: ${SCAN_BACKEND:-inline}
+      BLOB_BACKEND: local
+      QUEUE_BACKEND: local
+      WORKER_SERVICE_TOKEN: ${WORKER_SERVICE_TOKEN:-dev-worker-token}
+      WORKER_CALLBACK_BASE_URL: http://backend:8000
+      PUBLIC_ANALYSIS_BASE_URL: http://127.0.0.1:8000
     volumes:
       - exhibit-data:/app/data
     restart: unless-stopped
+
+  worker:
+    build: ./backend
+    command: ["python", "-m", "worker.main"]
+    env_file:
+      - .env
+    environment:
+      APP_MODE: analysis
+      APP_ENV: ${APP_ENV:-development}
+      SCAN_BACKEND: worker
+      BLOB_BACKEND: local
+      QUEUE_BACKEND: local
+      WORKER_SERVICE_TOKEN: ${WORKER_SERVICE_TOKEN:-dev-worker-token}
+      WORKER_CALLBACK_BASE_URL: http://backend:8000
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.6-flash}
+      CONTEXTUAL_MULTIMODAL: ${CONTEXTUAL_MULTIMODAL:-false}
+      FACT_MEMORY_MASTER_KEY: ${FACT_MEMORY_MASTER_KEY:-}
+      DATABASE_URL: ${DATABASE_URL:-}
+    volumes:
+      - exhibit-data:/app/data
+    depends_on:
+      - backend
+    restart: unless-stopped
+    profiles:
+      - worker
 
   frontend:
     build: ./frontend
