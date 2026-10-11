@@ -16,7 +16,12 @@ logger = logging.getLogger(__name__)
 
 
 def _base() -> str:
-    return (settings.worker_callback_base_url or "http://127.0.0.1:8000").rstrip("/")
+    base = (settings.worker_callback_base_url or "http://127.0.0.1:8000").strip().rstrip("/")
+    # Render's blueprint `fromService ... property: hostport` yields "name:port"
+    # (private network, no scheme). Internal traffic is plain HTTP.
+    if "://" not in base:
+        base = f"http://{base}"
+    return base
 
 
 def _post(job_id: str, path: str, payload: dict[str, Any]) -> dict[str, Any]:
