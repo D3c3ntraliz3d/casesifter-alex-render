@@ -200,72 +200,7 @@ services:
       # Pipeline settings (same values as the analysis service).
       - key: GEMINI_API_KEY
         sync: false
-      - key: GEMINI_MODEL
-        sync: false
-      - key: GEMINI_MAX_CONCURRENT
-        sync: false
-      - key: GEMINI_MAX_INFLIGHT_MB
-        sync: false
-      - key: ANTHROPIC_API_KEY
-        sync: false
-      - key: CLAUDE_MODEL
-        sync: false
-      - key: GOTCHA_VERIFY_PROVIDER
-        value: auto
-      - key: CONTEXTUAL_MULTIMODAL
-        value: "true"
-      - key: OCR_MAX_PAGES
-        value: "40"
-      - key: SCAN_JOB_TIMEOUT_S
-        value: "600"
-      - key: SCAN_JOB_TIMEOUT_BASE_S
-        value: "120"
-      - key: SCAN_JOB_TIMEOUT_PER_PAGE_S
-        value: "10"
-      - key: GEMINI_STAGE_TIMEOUT_S
-        value: "900"
-      - key: SENTRY_DSN
-        sync: false
-      - key: SENTRY_BACKEND_DSN
-        sync: false
-      - key: SENTRY_ENVIRONMENT
-        value: production
-
-  # Portable scan worker (Phase 1). Gemini runs here when SCAN_BACKEND=worker on analysis.
-  # Until that flag is set, casesifter-analysis still executes Gemini inline.
-  - type: worker
-    name: casesifter-worker
-    runtime: docker
-    dockerfilePath: ./backend/Dockerfile
-    dockerContext: ./backend
-    dockerCommand: python -m worker.main
-    buildFilter:
-      paths:
-        - backend/**
-        - render.yaml
-    envVars:
-      - fromGroup: casesifter-auth
-      - key: APP_MODE
-        value: analysis
-      - key: APP_ENV
-        value: production
-      - key: SCAN_BACKEND
-        value: worker
-      - key: BLOB_BACKEND
-        value: local
-      - key: QUEUE_BACKEND
-        value: local
-      - key: WORKER_SERVICE_TOKEN
-        sync: false
-      - key: WORKER_CALLBACK_BASE_URL
-        value: https://casesifter-analysis.onrender.com
-      - key: GEMINI_API_KEY
-        sync: false
-      - key: CONTEXTUAL_MULTIMODAL
-        value: "true"
-      - key: OCR_MAX_PAGES
-        value: "40"
-      # Same per-task Gemini models as casesifter-analysis (no gemini-2.0-flash).
+      # Per-task Gemini models (no gemini-2.0-flash). Same as casesifter-analysis.
       - key: TASK_A_EXTRACT_PRIMARY
         value: "gemini-3.6-flash"
       - key: TASK_A_EXTRACT_BACKUP
@@ -296,13 +231,25 @@ services:
         sync: false
       - key: GEMINI_MAX_INFLIGHT_MB
         sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: CLAUDE_MODEL
+        sync: false
+      - key: GOTCHA_VERIFY_PROVIDER
+        value: auto
+      - key: CONTEXTUAL_MULTIMODAL
+        value: "true"
+      - key: OCR_MAX_PAGES
+        value: "40"
+      - key: SCAN_JOB_TIMEOUT_S
+        value: "600"
+      - key: SCAN_JOB_TIMEOUT_BASE_S
+        value: "120"
+      - key: SCAN_JOB_TIMEOUT_PER_PAGE_S
+        value: "10"
       - key: GEMINI_STAGE_TIMEOUT_S
         value: "900"
-      - key: GEMINI_ORPHAN_SOURCE_GRACE_S
-        value: "60"
-      - key: DATABASE_URL
-        sync: false
-      - key: FACT_MEMORY_MASTER_KEY
+      - key: SENTRY_DSN
         sync: false
       - key: SENTRY_BACKEND_DSN
         sync: false
