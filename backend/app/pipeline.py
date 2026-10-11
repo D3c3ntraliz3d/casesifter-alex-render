@@ -671,26 +671,15 @@ def run_gemini_stage(
 
     if ai_review == "incomplete":
         complete_msg = (
-            f"Scan finished but AI review is incomplete ({ai_review_reason or 'error'}). Re-run AI review."
+            f"Scan finished but AI review is incomplete ({ai_review_reason or 'error'}). "
+            "Re-run AI review (full re-scan from your local file)."
         )
-        try:
-            (job_dir(job_id) / "retain_local_stage.flag").write_text(
-                ai_review_reason or "error", encoding="utf-8"
-            )
-        except OSError:
-            logger.debug("retain_local_stage flag write failed job=%s", job_id[:8], exc_info=True)
     else:
         complete_msg = (
             "Court-filing scan complete (content + case comparison)."
             if court_filing
             else "Exhibit forensic scan complete."
         )
-        flag = job_dir(job_id) / "retain_local_stage.flag"
-        if flag.exists():
-            try:
-                flag.unlink()
-            except OSError:
-                pass
     update_job(
         job_id,
         status="complete",

@@ -10,9 +10,14 @@ from __future__ import annotations
 import threading
 from typing import Literal
 
-AiReviewReason = Literal["rate_limited", "billing", "error"]
+AiReviewReason = Literal["rate_limited", "billing", "error", "file_not_sent"]
 
-_PRIORITY: dict[str, int] = {"billing": 3, "rate_limited": 2, "error": 1}
+_PRIORITY: dict[str, int] = {
+    "billing": 4,
+    "rate_limited": 3,
+    "file_not_sent": 2,
+    "error": 1,
+}
 _tls = threading.local()
 
 

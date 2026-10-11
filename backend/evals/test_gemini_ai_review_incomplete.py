@@ -51,7 +51,7 @@ def test_post_gemini_429_then_402_marks_billing(monkeypatch):
 
 
 def test_pipeline_records_incomplete_ai_review_not_clean_complete(tmp_path, monkeypatch):
-    """Gemini ultimate failure must land on the report (and retain local stage)."""
+    """Gemini ultimate failure must land on the report (no silent complete)."""
     from app.config import Settings
     import app.config as config_mod
     import app.storage as storage
@@ -142,11 +142,67 @@ def test_pipeline_records_incomplete_ai_review_not_clean_complete(tmp_path, monk
     assert report.comparison.get("ai_review") == "incomplete"
     # Must not look like a clean complete AI review.
     assert report.ai_review != "complete"
-    assert (storage.job_dir(job_id) / "retain_local_stage.flag").is_file()
+    assert not (storage.job_dir(job_id) / "retain_local_stage.flag").exists()
     progress = storage.load_progress(job_id)
     assert progress is not None
     assert progress.status == "complete"
     assert "incomplete" in (progress.message or "").lower()
+
+
+def test_forensic_file_not_sent_marks_incomplete(tmp_path, monkeypatch):
+    """Skipped Gemini upload on forensic exhibits → ai_review incomplete / file_not_sent."""
+    from app.engines import contextual_logic as cl
+    from app.gemini_review_state import get_ai_review_failure, reset_ai_review_state
+
+    reset_ai_review_state()
+    source = tmp_path / "exhibit.pdf"
+    source.write_bytes(b"%PDF-1.4 fake exhibit")
+
+    monkeypatch.setattr(cl.settings, "gemini_api_key", "test-key", raising=False)
+    monkeypatch.setattr(cl.settings, "contextual_multimodal", True, raising=False)
+    monkeypatch.setattr(cl.settings, "logo_chrome_pass", False, raising=False)
+    monkeypatch.setattr(
+        cl,
+        "_encode_source_file",
+        lambda _p: (None, None, "File is over the inline upload limit; analyzed text only."),
+    )
+
+    def fake_analyze(text, file_base64, mime_type, extras=None):
+        assert file_base64 is None
+        return {
+            "findings": [],
+            "overall_note": "text only",
+            "file_sent": None,
+            "model": "gemini-test",
+        }
+
+    monkeypatch.setattr(cl, "analyze_document", fake_analyze)
+    monkeypatch.setattr(
+        "app.gemini_inflight.acquire",
+        lambda *_a, **_k: True,
+    )
+    monkeypatch.setattr("app.gemini_inflight.release", lambda *_a, **_k: None)
+
+    result = cl.analyze_contextual(
+        "Sample bank statement text with $100.",
+        {"filename": "exhibit.pdf", "doc_kind": "exhibit"},
+        source_file=source,
+        scan_profile="forensic",
+    )
+    extras = result.extras or {}
+    assert extras.get("document_analysis_result", {}).get("file_sent") in (None, False, "")
+    assert get_ai_review_failure() == "file_not_sent"
+
+    # Court filings skip multimodal upload and must not be marked incomplete for this reason.
+    reset_ai_review_state()
+    result2 = cl.analyze_contextual(
+        "SUMMONS AND COMPLAINT",
+        {"filename": "summons.pdf", "doc_kind": "pleading"},
+        source_file=source,
+        scan_profile="court_filing",
+    )
+    assert (result2.extras or {}).get("document_analysis") == "skipped_court_filing"
+    assert get_ai_review_failure() is None
 
 
 def test_reason_for_http_status_mapping():

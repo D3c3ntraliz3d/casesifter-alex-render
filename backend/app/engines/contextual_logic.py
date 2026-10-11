@@ -495,11 +495,17 @@ def _run(
         elif settings.contextual_multimodal and not court_filing:
             import time as _time
 
+            from app.gemini_review_state import note_ai_review_failure
+
             t_mm = _time.perf_counter()
             document_findings, status = _run_document_analysis(text, source_file, extras)
             extras["multimodal_ms"] = int((_time.perf_counter() - t_mm) * 1000)
             findings.extend(document_findings)
             extras["document_analysis"] = status
+            # Forensic exhibits: skipped / failed native upload must not look like a full AI review.
+            dar = extras.get("document_analysis_result")
+            if isinstance(dar, dict) and not dar.get("file_sent"):
+                note_ai_review_failure("file_not_sent")
             extras["logo_chrome_ms"] = 0
             if settings.logo_chrome_pass:
                 try:

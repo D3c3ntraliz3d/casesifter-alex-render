@@ -758,60 +758,6 @@ def get_ephemeral_job(
 
 
 
-@v1.post("/jobs/{job_id}/rerun-ai-review")
-def rerun_ai_review(job_id: str, _auth: dict = Depends(_require_analysis_auth)):
-    """Re-run only the Gemini stage from retained local_stage.json — no re-upload."""
-    owned = require_job_owner(job_id, _auth)
-    from app.gemini_executor import gemini_payload_path, local_stage_path, submit_gemini_stage
-    from app.storage import job_dir
-
-    stage = local_stage_path(job_id)
-    payload_path = gemini_payload_path(job_id)
-    if not stage.is_file():
-        raise HTTPException(
-            409,
-            "Local scan results are no longer available for AI re-run. Re-scan the document.",
-        )
-    payload: dict = {}
-    if payload_path.is_file():
-        try:
-            payload = json.loads(payload_path.read_text(encoding="utf-8"))
-        except Exception:
-            payload = {}
-    payload["job_id"] = job_id
-    if not payload.get("dest"):
-        # Stub dest; execute_gemini_stage resolves a name from local_stage when missing.
-        payload["dest"] = str(job_dir(job_id) / "document.pdf")
-
-    update_job(
-        job_id,
-        status="local_done",
-        stage="local_done",
-        percent=82,
-        message="Re-running AI review from stored local results…",
-        error=None,
-        allow_rerun=True,
-    )
-    _update_durable_job(
-        job_id,
-        status="local_done",
-        message="Re-running AI review from stored local results.",
-        error=None,
-        allow_rerun=True,
-        ai_review="",
-        ai_review_reason="",
-    )
-    submit_gemini_stage(payload)
-    row = owned.get("job") or {}
-    return {
-        "job_id": job_id,
-        "status": "local_done",
-        "message": "AI review re-run queued.",
-        "matter_id": row.get("matter_id"),
-        "document_id": row.get("document_id"),
-    }
-
-
 @v1.get("/jobs/{job_id}/report")
 def get_ephemeral_report(job_id: str, _auth: dict = Depends(_require_analysis_auth)):
     owned = require_job_owner(job_id, _auth)
