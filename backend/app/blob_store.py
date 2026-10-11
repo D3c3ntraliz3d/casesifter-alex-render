@@ -1,4 +1,4 @@
-"""Object storage for scan job bundles (local disk now; GCS in Phase 3)."""
+"""Object storage for scan job bundles (local disk, or S3-compatible: R2 / AWS S3)."""
 
 from __future__ import annotations
 
@@ -132,11 +132,117 @@ class LocalBlobStore(BlobStore):
         return self.signed_upload_url(key, content_type="application/octet-stream", expires_s=expires_s)
 
 
-class GcsBlobStore(BlobStore):
-    """Placeholder for Phase 3 — not used until SCAN_BACKEND=cloudrun."""
+class S3BlobStore(BlobStore):
+    """S3-compatible object storage. Cloudflare R2 by default; AWS S3 by config only.
 
-    def __init__(self, *args, **kwargs):
-        raise NotImplementedError("GCS blob store lands in Phase 3 (deploy/gcp).")
+    Switching providers is environment-only: set S3_ENDPOINT_URL (R2) or leave it
+    unset with a real S3_REGION (AWS). Same API, same code path.
+    """
+
+    def __init__(self, client=None, bucket: str | None = None) -> None:
+        self.bucket = (bucket or settings.s3_bucket or "").strip()
+        if not self.bucket:
+            raise RuntimeError("S3_BUCKET is required when BLOB_BACKEND=s3")
+        if client is None:
+            import boto3
+            from botocore.config import Config
+
+            client = boto3.client(
+                "s3",
+                endpoint_url=(settings.s3_endpoint_url or None),
+                region_name=(settings.s3_region or "auto"),
+                aws_access_key_id=settings.s3_access_key_id or None,
+                aws_secret_access_key=settings.s3_secret_access_key or None,
+                config=Config(
+                    signature_version="s3v4",
+                    retries={"max_attempts": 5, "mode": "standard"},
+                ),
+            )
+        self.client = client
+
+    @staticmethod
+    def _key(key: str) -> str:
+        clean = key.replace("\\", "/").lstrip("/")
+        if not clean or ".." in clean.split("/"):
+            raise ValueError("invalid blob key")
+        return clean
+
+    def put(self, key: str, data: bytes | BinaryIO, *, content_type: str = "application/octet-stream") -> str:
+        k = self._key(key)
+        if isinstance(data, (bytes, bytearray)):
+            self.client.put_object(Bucket=self.bucket, Key=k, Body=bytes(data), ContentType=content_type)
+        else:
+            # Streams + multipart for large exhibit bundles.
+            self.client.upload_fileobj(data, self.bucket, k, ExtraArgs={"ContentType": content_type})
+        return key
+
+    def _is_missing(self, exc: Exception) -> bool:
+        code = str(getattr(exc, "response", {}).get("Error", {}).get("Code", ""))
+        return code in {"404", "NoSuchKey", "NotFound"}
+
+    def get(self, key: str) -> bytes:
+        try:
+            resp = self.client.get_object(Bucket=self.bucket, Key=self._key(key))
+        except Exception as exc:
+            if self._is_missing(exc):
+                raise FileNotFoundError(key) from exc
+            raise
+        return resp["Body"].read()
+
+    def get_file(self, key: str, dest: Path) -> Path:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.client.download_file(self.bucket, self._key(key), str(dest))
+        except Exception as exc:
+            if self._is_missing(exc):
+                raise FileNotFoundError(key) from exc
+            raise
+        return dest
+
+    def delete(self, key: str) -> bool:
+        try:
+            self.client.delete_object(Bucket=self.bucket, Key=self._key(key))
+        except Exception as exc:
+            if self._is_missing(exc):
+                return True
+            logger.warning("s3 delete failed key=%s", key, exc_info=True)
+            return False
+        return True
+
+    def delete_prefix(self, prefix: str) -> int:
+        p = self._key(prefix.rstrip("/")) + "/"
+        removed = 0
+        paginator = self.client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=self.bucket, Prefix=p):
+            objs = [{"Key": o["Key"]} for o in page.get("Contents", []) or []]
+            if not objs:
+                continue
+            self.client.delete_objects(Bucket=self.bucket, Delete={"Objects": objs, "Quiet": True})
+            removed += len(objs)
+        return removed
+
+    def exists(self, key: str) -> bool:
+        try:
+            self.client.head_object(Bucket=self.bucket, Key=self._key(key))
+            return True
+        except Exception as exc:
+            if self._is_missing(exc):
+                return False
+            raise
+
+    def signed_upload_url(self, key: str, *, content_type: str, expires_s: int = 3600) -> str:
+        return self.client.generate_presigned_url(
+            "put_object",
+            Params={"Bucket": self.bucket, "Key": self._key(key), "ContentType": content_type},
+            ExpiresIn=max(60, int(expires_s)),
+        )
+
+    def signed_download_url(self, key: str, *, expires_s: int = 3600) -> str:
+        return self.client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": self.bucket, "Key": self._key(key)},
+            ExpiresIn=max(60, int(expires_s)),
+        )
 
 
 _store: BlobStore | None = None
@@ -147,8 +253,8 @@ def get_blob_store() -> BlobStore:
     if _store is not None:
         return _store
     backend = (settings.blob_backend or "local").strip().lower()
-    if backend == "gcs":
-        _store = GcsBlobStore()
+    if backend in {"s3", "r2"}:
+        _store = S3BlobStore()
     else:
         _store = LocalBlobStore()
     return _store

@@ -1,9 +1,10 @@
-"""Worker entrypoint: poll local queue (or handle one Cloud Tasks HTTP request later)."""
+"""Worker entrypoint: poll the job queue (local folder or shared Redis)."""
 
 from __future__ import annotations
 
 import logging
 import os
+import signal
 import sys
 import threading
 
@@ -27,7 +28,7 @@ def main() -> None:
 
     if (settings.scan_backend or "inline").strip().lower() not in {"worker", "local_worker", "cloudrun"}:
         logger.warning(
-            "SCAN_BACKEND=%s — worker will still poll the local queue when started.",
+            "SCAN_BACKEND=%s — worker will still poll the queue when started.",
             settings.scan_backend,
         )
     require_worker_token_configured()
@@ -47,6 +48,14 @@ def main() -> None:
             raise
 
     stop = threading.Event()
+
+    def _on_term(signum, _frame):
+        # Render sends SIGTERM on deploy/scale-down: stop claiming new jobs. A job
+        # cut off mid-run is re-claimed by another worker once its heartbeat lapses.
+        logger.info("signal %s — draining, no new claims", signum)
+        stop.set()
+
+    signal.signal(signal.SIGTERM, _on_term)
     try:
         run_local_worker_loop(_handler, idle_sleep_s=0.5, stop_event=stop)
     except KeyboardInterrupt:
