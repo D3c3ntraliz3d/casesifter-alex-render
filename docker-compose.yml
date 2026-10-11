@@ -10,7 +10,7 @@ services:
       APP_MODE: ${APP_MODE:-vault}
       APP_ENV: ${APP_ENV:-development}
       CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-*}
-      MAX_FILE_MB: "100"
+      MAX_FILE_MB: "250"
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.6-flash}
       CONTEXTUAL_MULTIMODAL: ${CONTEXTUAL_MULTIMODAL:-false}
