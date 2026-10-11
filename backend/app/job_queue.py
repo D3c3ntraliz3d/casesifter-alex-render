@@ -63,6 +63,10 @@ class JobQueue(ABC):
     def fail(self, message: QueueMessage, *, reason: str) -> None:
         """Dead-letter / abandon after max attempts."""
 
+    def heartbeat(self, message: QueueMessage) -> bool:
+        """Extend the claim on an in-flight message. Returns False if no longer held."""
+        return True
+
 
 class LocalJobQueue(JobQueue):
     """Directory queue under ``settings.queue_dir`` (ready / inflight / dead)."""
@@ -78,6 +82,13 @@ class LocalJobQueue(JobQueue):
 
     def _msg_path(self, folder: Path, message: QueueMessage) -> Path:
         return folder / f"{message.job_id}.json"
+
+    @staticmethod
+    def _write_stamp(stamp: Path) -> None:
+        """Atomically write a claim stamp (a reader must never see an empty file)."""
+        tmp = stamp.with_suffix(f".{uuid.uuid4().hex}.tmp")
+        tmp.write_text(str(time.time()), encoding="utf-8")
+        tmp.replace(stamp)
 
     def enqueue(self, message: QueueMessage) -> None:
         if not message.enqueued_at:
@@ -107,13 +118,14 @@ class LocalJobQueue(JobQueue):
                     path.unlink(missing_ok=True)
                     continue
                 dest = self._msg_path(self.inflight, msg)
+                stamp = dest.with_suffix(".claimed")
+                # Stamp before the move so an in-flight message is never stampless.
+                self._write_stamp(stamp)
                 try:
                     path.replace(dest)
                 except OSError:
+                    stamp.unlink(missing_ok=True)
                     continue
-                # Stamp claim time for visibility timeout.
-                meta = dest.with_suffix(".claimed")
-                meta.write_text(str(time.time()), encoding="utf-8")
                 return msg
         return None
 
@@ -136,21 +148,38 @@ class LocalJobQueue(JobQueue):
             path.replace(self._msg_path(self.ready, msg))
             stamp.unlink(missing_ok=True)
 
+    def heartbeat(self, message: QueueMessage) -> bool:
+        """Refresh the claim stamp so long jobs are not requeued mid-run."""
+        with self._lock:
+            path = self._msg_path(self.inflight, message)
+            if not path.is_file():
+                return False
+            self._write_stamp(path.with_suffix(".claimed"))
+            return True
+
     def complete(self, message: QueueMessage) -> None:
         path = self._msg_path(self.inflight, message)
         path.unlink(missing_ok=True)
         path.with_suffix(".claimed").unlink(missing_ok=True)
 
     def release(self, message: QueueMessage, *, delay_s: float = 0) -> None:
-        path = self._msg_path(self.inflight, message)
-        path.with_suffix(".claimed").unlink(missing_ok=True)
-        message.attempt = int(message.attempt) + 1
-        # Always rewrite JSON so the bumped attempt is persisted (move alone keeps stale body).
-        ready = self._msg_path(self.ready, message)
-        ready.write_text(message.to_json(), encoding="utf-8")
-        if delay_s > 0:
-            (ready.with_suffix(".delay")).write_text(str(time.time() + delay_s), encoding="utf-8")
-        path.unlink(missing_ok=True)
+        with self._lock:
+            path = self._msg_path(self.inflight, message)
+            path.with_suffix(".claimed").unlink(missing_ok=True)
+            message.attempt = int(message.attempt) + 1
+            ready = self._msg_path(self.ready, message)
+            # Write the delay sidecar BEFORE the message becomes visible so a
+            # concurrent claim can never pick it up without backoff.
+            delay = ready.with_suffix(".delay")
+            if delay_s > 0:
+                delay.write_text(str(time.time() + delay_s), encoding="utf-8")
+            else:
+                delay.unlink(missing_ok=True)
+            # Atomic write: always rewrite JSON so the bumped attempt is persisted.
+            tmp = ready.with_suffix(f".{uuid.uuid4().hex}.tmp")
+            tmp.write_text(message.to_json(), encoding="utf-8")
+            tmp.replace(ready)
+            path.unlink(missing_ok=True)
 
     def fail(self, message: QueueMessage, *, reason: str) -> None:
         path = self._msg_path(self.inflight, message)
@@ -205,6 +234,26 @@ def reset_job_queue_for_tests(queue: JobQueue | None = None) -> None:
 # One in-flight job per worker process (local loop is sequential; lock is the guard).
 _process_job_lock = threading.Lock()
 
+# Renew the claim well inside the visibility timeout (default 900s) so a long
+# scan is never handed to a second worker while the first is still running.
+HEARTBEAT_INTERVAL_S = 60.0
+
+
+def _start_heartbeat(q: JobQueue, msg: QueueMessage) -> threading.Event:
+    done = threading.Event()
+
+    def _beat() -> None:
+        while not done.wait(HEARTBEAT_INTERVAL_S):
+            try:
+                if not q.heartbeat(msg):
+                    logger.warning("heartbeat lost claim job=%s", msg.job_id[:8])
+                    return
+            except Exception:
+                logger.warning("heartbeat failed job=%s", msg.job_id[:8], exc_info=True)
+
+    threading.Thread(target=_beat, daemon=True, name=f"hb-{msg.job_id[:8]}").start()
+    return done
+
 
 def run_local_worker_loop(
     handler: Callable[[QueueMessage], None],
@@ -227,10 +276,13 @@ def run_local_worker_loop(
             )
             q.release(msg, delay_s=1.0)
             continue
+        beat = _start_heartbeat(q, msg)
         try:
             handler(msg)
+            beat.set()
             q.complete(msg)
         except Exception as exc:
+            beat.set()
             logger.exception("worker handler failed job=%s", msg.job_id[:8])
             max_attempts = max(1, int(settings.worker_max_attempts or 3))
             if msg.attempt >= max_attempts:
@@ -238,4 +290,5 @@ def run_local_worker_loop(
             else:
                 q.release(msg, delay_s=min(60.0, 2.0 ** msg.attempt))
         finally:
+            beat.set()
             _process_job_lock.release()

@@ -10,7 +10,7 @@ import urllib.request
 from typing import Any
 
 from app.config import settings
-from app.worker_auth import sign_worker_request, worker_service_token
+from app.worker_auth import sign_worker_request
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,6 @@ def _post(job_id: str, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         method="POST",
         headers={
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {worker_service_token()}",
             "X-CS-Timestamp": ts,
             "X-CS-Signature": sig,
         },
@@ -48,5 +47,34 @@ def post_progress(job_id: str, **fields: Any) -> None:
     _post(job_id, f"/api/internal/v1/jobs/{job_id}/progress", fields)
 
 
+RESULT_RETRY_DELAYS_S = (2.0, 5.0, 15.0)
+
+
+def _is_transient(exc: Exception) -> bool:
+    if isinstance(exc, urllib.error.URLError) or isinstance(exc, (TimeoutError, ConnectionError)):
+        return True
+    msg = str(exc)
+    return msg.startswith("callback HTTP 5") or msg.startswith("callback HTTP 429")
+
+
 def post_result(job_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-    return _post(job_id, f"/api/internal/v1/jobs/{job_id}/result", payload)
+    """POST the terminal result, retrying transient failures.
+
+    The result endpoint is idempotent on terminal status, so a retry after a
+    lost response is safe. 4xx (auth/validation) errors are not retried.
+    """
+    path = f"/api/internal/v1/jobs/{job_id}/result"
+    for delay in (*RESULT_RETRY_DELAYS_S, None):
+        try:
+            return _post(job_id, path, payload)
+        except Exception as exc:
+            if delay is None or not _is_transient(exc):
+                raise
+            logger.warning(
+                "result POST transient failure job=%s retry_in=%ss: %s",
+                job_id[:8],
+                delay,
+                str(exc)[:200],
+            )
+            time.sleep(delay)
+    raise RuntimeError("unreachable")

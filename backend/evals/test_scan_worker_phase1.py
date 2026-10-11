@@ -574,3 +574,199 @@ def test_dispatch_writes_bundle_and_enqueues(worker_env, monkeypatch):
     assert worker_env["store"].exists(job_source_key(job_id, dest.name))
     assert worker_env["queue"].ready_count() == 1
     assert not job_dest.exists()
+
+
+def _seed_bundle(env, job_id: str, source_name: str = "doc.pdf", max_attempts: int = 3) -> None:
+    from app.blob_store import job_meta_key, job_source_key
+
+    src = env["tmp"] / source_name
+    _tiny_pdf(src)
+    meta = {
+        "job_id": job_id,
+        "persist": False,
+        "source_name": source_name,
+        "prior_snapshots": [],
+        "submitted_by": "test",
+        "attempt": 1,
+        "max_attempts": max_attempts,
+    }
+    env["store"].put(job_source_key(job_id, source_name), src.read_bytes())
+    env["store"].put(job_meta_key(job_id), json.dumps(meta).encode("utf-8"))
+
+
+def test_final_attempt_failure_posts_single_terminal_result(worker_env, monkeypatch):
+    """Real worker on its last attempt: exactly one 'failed' result, bundle deleted."""
+    from app.blob_store import job_meta_key
+    from app.job_queue import QueueMessage
+    from app.storage import load_progress
+    from worker import client as worker_client
+    from worker.run_job import WorkerJobError, process_queue_message
+
+    env = worker_env
+    job_id = "f" * 32
+    _seed_bundle(env, job_id, max_attempts=3)
+
+    def always_fail(*a, **k):
+        raise RuntimeError("pipeline exploded")
+
+    monkeypatch.setattr("worker.run_job.run_local_stage", always_fail)
+
+    from app.main import app
+
+    client = TestClient(app)
+    result_posts: list[dict] = []
+
+    def fake_post(job_id_arg, path, payload):
+        if path.endswith("/result"):
+            result_posts.append(payload)
+        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        res = client.post(path, content=body, headers=_hmac_headers(job_id_arg, body, token=env["token"]))
+        assert res.status_code < 400, res.text
+        return res.json()
+
+    monkeypatch.setattr(worker_client, "_post", fake_post)
+
+    # Attempts 1 and 2: retryable, no terminal POST, bundle kept.
+    for attempt in (1, 2):
+        with pytest.raises(WorkerJobError):
+            process_queue_message(QueueMessage(job_id=job_id, bundle_prefix=f"jobs/{job_id}", attempt=attempt))
+        assert result_posts == []
+        assert env["store"].exists(job_meta_key(job_id))
+
+    # Attempt 3 (final): exactly one terminal failed result, bundle deleted.
+    with pytest.raises(WorkerJobError):
+        process_queue_message(QueueMessage(job_id=job_id, bundle_prefix=f"jobs/{job_id}", attempt=3))
+    assert len(result_posts) == 1
+    assert result_posts[0]["status"] == "failed"
+    assert "pipeline exploded" in result_posts[0]["error"]
+    assert result_posts[0]["attempt"] == 3
+    assert load_progress(job_id).status == "failed"
+    assert not env["store"].exists(job_meta_key(job_id))
+
+
+def test_heartbeat_prevents_requeue_of_long_job(worker_env, monkeypatch):
+    """A job running longer than the visibility timeout must not be re-claimed."""
+    import app.job_queue as queue_mod
+    from app.job_queue import QueueMessage, get_job_queue, run_local_worker_loop
+
+    monkeypatch.setattr(queue_mod, "HEARTBEAT_INTERVAL_S", 0.05)
+    q = get_job_queue()
+    job_id = "e" * 32
+    q.enqueue(QueueMessage(job_id=job_id, bundle_prefix=f"jobs/{job_id}"))
+
+    stolen: list = []
+    handled = threading.Event()
+    stop = threading.Event()
+
+    def slow_handler(msg):
+        # Run well past a 0.3s visibility timeout while a second worker polls.
+        deadline = time.time() + 0.8
+        while time.time() < deadline:
+            other = q.claim(visibility_timeout_s=0.3)
+            if other is not None:
+                stolen.append(other)
+            time.sleep(0.05)
+        handled.set()
+
+    t = threading.Thread(
+        target=run_local_worker_loop,
+        args=(slow_handler,),
+        kwargs={"idle_sleep_s": 0.02, "stop_event": stop},
+        daemon=True,
+    )
+    t.start()
+    assert handled.wait(5)
+    stop.set()
+    t.join(timeout=2)
+    assert stolen == []
+    inflight = list((worker_env["settings"].queue_dir / "inflight").glob("*.json"))
+    assert inflight == []
+
+
+def test_heartbeat_returns_false_after_claim_lost(worker_env):
+    from app.job_queue import QueueMessage, get_job_queue
+
+    q = get_job_queue()
+    job_id = "d" * 32
+    q.enqueue(QueueMessage(job_id=job_id, bundle_prefix=f"jobs/{job_id}"))
+    msg = q.claim()
+    assert q.heartbeat(msg) is True
+    q.complete(msg)
+    assert q.heartbeat(msg) is False
+    assert not (worker_env["settings"].queue_dir / "inflight" / f"{job_id}.claimed").exists()
+
+
+def test_delayed_release_is_never_claimable_early(worker_env):
+    from app.job_queue import QueueMessage, get_job_queue
+
+    q = get_job_queue()
+    job_id = "c" * 32
+    q.enqueue(QueueMessage(job_id=job_id, bundle_prefix=f"jobs/{job_id}"))
+    msg = q.claim()
+    q.release(msg, delay_s=30)
+    assert q.claim() is None
+    ready = worker_env["settings"].queue_dir / "ready" / f"{job_id}.json"
+    assert json.loads(ready.read_text())["attempt"] == 2
+    assert not list((worker_env["settings"].queue_dir / "ready").glob("*.tmp"))
+
+
+def test_worker_client_sends_no_bearer_secret(worker_env, monkeypatch):
+    import urllib.request
+    from worker import client as worker_client
+
+    seen: dict = {}
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b'{"ok": true}'
+
+    def fake_urlopen(req, timeout=None):
+        seen["headers"] = {k.lower(): v for k, v in req.header_items()}
+        return _Resp()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    worker_client.post_progress("a" * 32, status="running")
+    headers = seen["headers"]
+    assert "authorization" not in headers
+    assert "test-worker-secret" not in json.dumps(headers)
+    assert headers.get("x-cs-signature")
+    assert headers.get("x-cs-timestamp")
+
+
+def test_post_result_retries_transient_then_succeeds(worker_env, monkeypatch):
+    from worker import client as worker_client
+
+    monkeypatch.setattr(worker_client, "RESULT_RETRY_DELAYS_S", (0.0, 0.0, 0.0))
+    calls = {"n": 0}
+
+    def flaky(job_id, path, payload):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise RuntimeError("callback HTTP 503: unavailable")
+        return {"ok": True}
+
+    monkeypatch.setattr(worker_client, "_post", flaky)
+    assert worker_client.post_result("b" * 32, {"status": "failed"}) == {"ok": True}
+    assert calls["n"] == 3
+
+
+def test_post_result_does_not_retry_auth_errors(worker_env, monkeypatch):
+    from worker import client as worker_client
+
+    monkeypatch.setattr(worker_client, "RESULT_RETRY_DELAYS_S", (0.0, 0.0, 0.0))
+    calls = {"n": 0}
+
+    def unauthorized(job_id, path, payload):
+        calls["n"] += 1
+        raise RuntimeError("callback HTTP 401: Invalid worker signature.")
+
+    monkeypatch.setattr(worker_client, "_post", unauthorized)
+    with pytest.raises(RuntimeError, match="401"):
+        worker_client.post_result("b" * 32, {"status": "failed"})
+    assert calls["n"] == 1
