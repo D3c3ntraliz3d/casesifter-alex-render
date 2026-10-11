@@ -1,7 +1,8 @@
 """Per-thread AI review completeness for a Gemini stage.
 
 ``_post_gemini`` records ultimate call failures (after retries / non-retryable
-codes). ``run_gemini_stage`` reads the result into the report and job row so a
+codes). Chunked Files API analysis records ``partial`` with failed page ranges.
+``run_gemini_stage`` reads the result into the report and job row so a
 partial Gemini failure cannot look like a clean complete review.
 """
 
@@ -10,11 +11,12 @@ from __future__ import annotations
 import threading
 from typing import Literal
 
-AiReviewReason = Literal["rate_limited", "billing", "error", "file_not_sent"]
+AiReviewReason = Literal["rate_limited", "billing", "error", "file_not_sent", "partial"]
 
 _PRIORITY: dict[str, int] = {
-    "billing": 4,
-    "rate_limited": 3,
+    "billing": 5,
+    "rate_limited": 4,
+    "partial": 3,
     "file_not_sent": 2,
     "error": 1,
 }
@@ -23,6 +25,7 @@ _tls = threading.local()
 
 def reset_ai_review_state() -> None:
     _tls.reason = None
+    _tls.failed_page_ranges = None
 
 
 def note_ai_review_failure(reason: AiReviewReason | str) -> None:
@@ -35,8 +38,28 @@ def note_ai_review_failure(reason: AiReviewReason | str) -> None:
         _tls.reason = key
 
 
+def note_partial_failure(page_ranges: list[tuple[int, int]] | list[list[int]]) -> None:
+    """Mark AI review incomplete because one or more chunks failed."""
+    note_ai_review_failure("partial")
+    cleaned: list[list[int]] = []
+    for item in page_ranges or []:
+        if not item or len(item) < 2:
+            continue
+        start, end = int(item[0]), int(item[1])
+        if start < 1 or end < start:
+            continue
+        cleaned.append([start, end])
+    existing = list(getattr(_tls, "failed_page_ranges", None) or [])
+    existing.extend(cleaned)
+    _tls.failed_page_ranges = existing
+
+
 def get_ai_review_failure() -> str | None:
     return getattr(_tls, "reason", None)
+
+
+def get_failed_page_ranges() -> list[list[int]]:
+    return list(getattr(_tls, "failed_page_ranges", None) or [])
 
 
 def reason_for_http_status(code: int) -> AiReviewReason:

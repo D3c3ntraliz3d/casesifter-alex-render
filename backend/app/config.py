@@ -25,7 +25,9 @@ class Settings(BaseSettings):
     app_env: str = "development"
     # Comma-separated origins. Use * only for local vault; analysis mode rejects *.
     cors_allow_origins: str = "*"
-    max_file_mb: int = 100
+    # Raised to 250 after P1-11 memory probe (local peak ~746 MB, web stream ~548 MB
+    # on a 250 MB PDF — both under the ~1.5 GB safety budget).
+    max_file_mb: int = 250
     data_dir: Path = Path(__file__).resolve().parent.parent / "data"
     allowed_extensions: set[str] = {
         ".pdf",
@@ -57,7 +59,8 @@ class Settings(BaseSettings):
     # opt-in because it uploads the original file and extracted text to Google.
     # Leave false for sealed, privileged, or otherwise restricted evidence.
     contextual_multimodal: bool = False
-    # Inline request bodies are capped by the API; a larger exhibit degrades to text-only.
+    # Inline base64 path for small exhibits. Larger PDFs use the Gemini Files API
+    # (and chunking above 50 MB / 1000 pages) — see contextual_logic / pdf_chunks.
     contextual_max_upload_mb: int = 15
     contextual_max_ai_findings: int = 12
     gemini_document_timeout_s: int = 90

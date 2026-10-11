@@ -39,7 +39,9 @@
         We don't keep the files. We store an encrypted case index (key facts, short quotes and page
         references, and text excerpts used to compare documents) so your firm can find contradictions
         across filings. AI analysis is performed by Google Gemini under paid API terms (no training on
-        your data; limited-period abuse logging). Only signed-in members of your firm can access your index.
+        your data; limited-period abuse logging). Large files are sent to Google’s Gemini file service for
+        analysis and deleted immediately after; at most 48 hours if deletion fails. Only signed-in members of
+        your firm can access your index.
       </p>
     </div>
 
@@ -83,7 +85,7 @@
           <tr>
             <td class="module">Tier 3 — Contextual document analysis</td>
             <td>Comprehensive cross-document reasoning over the full exhibit text and layout.</td>
-            <td>The exhibit file itself, for that one analysis call, then deleted.</td>
+            <td>The exhibit file itself (inline for small files; Google’s Gemini file service for large PDFs), then deleted immediately after; at most 48 hours if deletion fails.</td>
           </tr>
         </tbody>
       </table>

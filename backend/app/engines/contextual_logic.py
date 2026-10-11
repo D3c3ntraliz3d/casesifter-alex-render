@@ -939,17 +939,26 @@ def analyze_document(
     file_base64: str | None,
     mime_type: str | None,
     extras: dict[str, Any] | None = None,
+    *,
+    file_ref: dict[str, Any] | None = None,
+    page_offset: int = 0,
 ) -> dict[str, Any]:
     """Tier 3: send the original file and extracted text to Gemini for alteration review.
 
-    This transmits the exhibit's content to a third party. The caller is responsible for
-    checking settings.contextual_multimodal before calling.
+    ``file_ref`` is a Gemini Files API ``file_data`` part (preferred for large PDFs).
+    ``page_offset`` is added to every finding page (chunk page 1 → original page
+    ``1 + page_offset``).
     """
     parts: list[dict[str, Any]] = [
         {"text": FRAUD_PROMPT.format(text=(text or "")[: settings.contextual_max_chars])}
     ]
-    if file_base64 and mime_type:
+    file_sent: str | None = None
+    if file_ref is not None:
+        parts.append(file_ref)
+        file_sent = (file_ref.get("file_data") or {}).get("mime_type") or mime_type or "application/pdf"
+    elif file_base64 and mime_type:
         parts.append({"inline_data": {"mime_type": mime_type, "data": file_base64}})
+        file_sent = mime_type
 
     body = _post_gemini(
         {
@@ -965,10 +974,21 @@ def analyze_document(
     raw_findings = parsed.get("findings")
     if not isinstance(raw_findings, list):
         raw_findings = []
+    if page_offset:
+        for item in raw_findings:
+            if not isinstance(item, dict):
+                continue
+            page = item.get("page")
+            try:
+                page_no = int(page) if page is not None else None
+            except (TypeError, ValueError):
+                page_no = None
+            if page_no is not None and page_no >= 1:
+                item["page"] = page_no + int(page_offset)
     return {
         "findings": raw_findings,
         "overall_note": str(parsed.get("overall_note", ""))[:500],
-        "file_sent": mime_type if file_base64 else None,
+        "file_sent": file_sent,
         "model": settings.gemini_model,
     }
 
@@ -976,64 +996,368 @@ def analyze_document(
 def _run_document_analysis(
     text: str, source_file: Path | None, extras: dict[str, Any]
 ) -> tuple[list[Finding], str]:
-    """Read+base64 inside the call, hold under the inflight byte cap, release immediately.
+    """Send the exhibit to Gemini: inline ≤15 MB, Files API for larger PDFs, chunk if needed."""
+    from app.gemini_inflight import acquire as acquire_inflight
+    from app.gemini_inflight import release as release_inflight
+    from app.gemini_review_state import note_ai_review_failure, note_partial_failure
+    from app.pdf_chunks import (
+        FILES_API_MAX_MB,
+        FILES_API_MAX_PAGES,
+        needs_split,
+        pdf_page_count,
+        split_pdf,
+    )
 
-    A format Gemini cannot read natively, or a file too large for an inline request,
-    degrades to text-only analysis rather than failing the module.
-    """
+    if source_file is None:
+        if not (text or "").strip():
+            return [], "no_content"
+        try:
+            result = analyze_document(text, None, None, extras)
+        except Exception as exc:
+            extras["document_analysis_error"] = str(exc)
+            return [_verification_unavailable(exc, stage="document analysis")], "error"
+        return _findings_from_analysis_result(result, text, source_file, extras)
+
+    suffix = source_file.suffix.lower()
+    mime_type = NATIVE_MIME_TYPES.get(suffix)
+    if mime_type is None:
+        extras["document_analysis_note"] = (
+            f"{suffix or 'this format'} has no native Gemini equivalent; analyzed text only."
+        )
+        if not (text or "").strip():
+            return [], "no_content"
+        try:
+            result = analyze_document(text, None, None, extras)
+        except Exception as exc:
+            extras["document_analysis_error"] = str(exc)
+            return [_verification_unavailable(exc, stage="document analysis")], "error"
+        return _findings_from_analysis_result(result, text, source_file, extras)
+
+    try:
+        size = int(source_file.stat().st_size)
+    except OSError as exc:
+        extras["document_analysis_note"] = f"Could not read the file for upload: {exc}"
+        note_ai_review_failure("file_not_sent")
+        if not (text or "").strip():
+            return [], "no_content"
+        try:
+            result = analyze_document(text, None, None, extras)
+        except Exception as exc2:
+            extras["document_analysis_error"] = str(exc2)
+            return [_verification_unavailable(exc2, stage="document analysis")], "error"
+        return _findings_from_analysis_result(result, text, source_file, extras)
+
+    inline_limit = settings.contextual_max_upload_mb * 1024 * 1024
+
+    # PDFs: page count can force Files API / chunking even when under the inline size cap.
+    if suffix == ".pdf":
+        try:
+            pages = pdf_page_count(source_file)
+        except Exception as exc:
+            extras["document_analysis_note"] = f"Could not read PDF page count: {exc}"
+            note_ai_review_failure("file_not_sent")
+            if not (text or "").strip():
+                return [], "no_content"
+            try:
+                result = analyze_document(text, None, None, extras)
+            except Exception as exc2:
+                extras["document_analysis_error"] = str(exc2)
+                return [_verification_unavailable(exc2, stage="document analysis")], "error"
+            return _findings_from_analysis_result(result, text, source_file, extras)
+
+        extras["document_analysis_pages"] = pages
+        extras["document_analysis_size_mb"] = round(size / 1048576, 2)
+
+        if needs_split(
+            source_file,
+            size_bytes=size,
+            pages=pages,
+            max_mb=FILES_API_MAX_MB,
+            max_pages=FILES_API_MAX_PAGES,
+        ):
+            extras["document_analysis_transport"] = "files_api_chunked"
+            return _run_document_analysis_chunked(text, source_file, extras)
+
+        if size <= inline_limit:
+            return _run_document_analysis_inline(text, source_file, mime_type, size, extras)
+
+        # Single Files API upload (inline < size ≤ 50 MB, pages ≤ 1000).
+        from app.gemini_files import delete_file, file_part, upload_file_streaming, wait_file_active
+
+        extras["document_analysis_transport"] = "files_api"
+        file_obj = None
+        held = False
+        payload_bytes = size
+        try:
+            if not acquire_inflight(payload_bytes, timeout=600):
+                extras["document_analysis_note"] = "Gemini inflight byte cap busy; analyzed text only."
+                note_ai_review_failure("file_not_sent")
+                if not (text or "").strip():
+                    return [], "no_content"
+                result = analyze_document(text, None, None, extras)
+                return _findings_from_analysis_result(result, text, source_file, extras)
+            held = True
+            file_obj = upload_file_streaming(source_file, mime_type=mime_type)
+            file_obj = wait_file_active(file_obj)
+            result = analyze_document(
+                text,
+                None,
+                mime_type,
+                extras,
+                file_ref=file_part(file_obj, mime_type=mime_type),
+            )
+        except Exception as exc:
+            extras["document_analysis_error"] = str(exc)
+            note_ai_review_failure("error")
+            return [_verification_unavailable(exc, stage="document analysis")], "error"
+        finally:
+            delete_file(file_obj)
+            if held:
+                release_inflight(payload_bytes)
+
+        return _findings_from_analysis_result(result, text, source_file, extras)
+
+    # Non-PDF: inline only; oversize → text-only + file_not_sent.
+    if size <= inline_limit:
+        return _run_document_analysis_inline(text, source_file, mime_type, size, extras)
+
+    extras["document_analysis_note"] = (
+        f"File is {size / 1048576:.1f} MB, over the {settings.contextual_max_upload_mb} MB "
+        "inline upload limit; analyzed text only."
+    )
+    note_ai_review_failure("file_not_sent")
+    if not (text or "").strip():
+        return [], "no_content"
+    try:
+        result = analyze_document(text, None, None, extras)
+    except Exception as exc:
+        extras["document_analysis_error"] = str(exc)
+        return [_verification_unavailable(exc, stage="document analysis")], "error"
+    return _findings_from_analysis_result(result, text, source_file, extras)
+
+
+def _run_document_analysis_inline(
+    text: str,
+    source_file: Path,
+    mime_type: str,
+    size: int,
+    extras: dict[str, Any],
+) -> tuple[list[Finding], str]:
     from app.gemini_inflight import acquire as acquire_inflight
     from app.gemini_inflight import release as release_inflight
 
     file_base64: str | None = None
-    mime_type: str | None = None
     payload_bytes = 0
     held = False
     result: dict[str, Any] | None = None
     try:
-        est = 0
-        if source_file is not None:
-            try:
-                est = int(source_file.stat().st_size * 1.37)  # ~base64 expansion
-            except OSError:
-                est = 0
-        if est:
-            if not acquire_inflight(est, timeout=600):
-                extras["document_analysis_note"] = "Gemini inflight byte cap busy; analyzed text only."
-            else:
-                held = True
-                payload_bytes = est
-                file_base64, mime_type, note = _encode_source_file(source_file)
-                if note:
-                    extras["document_analysis_note"] = note
-                if file_base64 is None:
-                    release_inflight(payload_bytes)
-                    held = False
-                    payload_bytes = 0
-        else:
-            file_base64, mime_type, note = _encode_source_file(source_file)
-            if note:
-                extras["document_analysis_note"] = note
+        est = int(size * 1.37)
+        if est and not acquire_inflight(est, timeout=600):
+            extras["document_analysis_note"] = "Gemini inflight byte cap busy; analyzed text only."
+            from app.gemini_review_state import note_ai_review_failure
 
+            note_ai_review_failure("file_not_sent")
+            if not (text or "").strip():
+                return [], "no_content"
+            result = analyze_document(text, None, None, extras)
+            return _findings_from_analysis_result(result, text, source_file, extras)
+        held = True
+        payload_bytes = est
+        file_base64, _mime, note = _encode_source_file(source_file)
+        if note:
+            extras["document_analysis_note"] = note
         if file_base64 is None and not (text or "").strip():
             return [], "no_content"
-        try:
-            result = analyze_document(text, file_base64, mime_type, extras)
-        except Exception as exc:
-            extras["document_analysis_error"] = str(exc)
-            return [_verification_unavailable(exc, stage="document analysis")], "error"
+        extras["document_analysis_transport"] = "inline"
+        result = analyze_document(text, file_base64, mime_type, extras)
+    except Exception as exc:
+        extras["document_analysis_error"] = str(exc)
+        return [_verification_unavailable(exc, stage="document analysis")], "error"
     finally:
         file_base64 = None
         if held:
             release_inflight(payload_bytes)
 
     assert result is not None
+    return _findings_from_analysis_result(result, text, source_file, extras)
+
+
+def _run_document_analysis_chunked(
+    text: str, source_file: Path, extras: dict[str, Any]
+) -> tuple[list[Finding], str]:
+    """Split oversized PDFs; analyze chunks via Files API up to GEMINI_MAX_CONCURRENT."""
+    import shutil
+    import tempfile
+
+    from app.gemini_cancel import CancelledError, current_job_id, is_cancelled, set_current_job
+    from app.gemini_files import delete_file, file_part, upload_file_streaming, wait_file_active
+    from app.gemini_inflight import acquire as acquire_inflight
+    from app.gemini_inflight import release as release_inflight
+    from app.gemini_review_state import (
+        get_ai_review_failure,
+        note_ai_review_failure,
+        note_partial_failure,
+        reset_ai_review_state,
+    )
+    from app.pdf_chunks import split_pdf
+
+    dest = Path(tempfile.mkdtemp(prefix="cs-gemini-chunks-"))
+    chunks: list = []
+    try:
+        chunks = split_pdf(source_file, dest_dir=dest)
+        extras["document_analysis_chunks"] = [
+            {"page_start": c.page_start, "page_end": c.page_end, "size_bytes": c.size_bytes}
+            for c in chunks
+        ]
+        workers = max(1, int(settings.gemini_max_concurrent or 2))
+        failed_ranges: list[tuple[int, int]] = []
+        merged_findings: list[dict[str, Any]] = []
+        notes: list[str] = []
+        worker_reasons: list[str] = []
+        lock = threading.Lock()
+        parent_job = current_job_id()
+
+        def _one(chunk) -> None:
+            set_current_job(parent_job)
+            reset_ai_review_state()
+            file_obj = None
+            held = False
+            payload = int(chunk.size_bytes)
+            cancelled = False
+            try:
+                if is_cancelled():
+                    cancelled = True
+                    raise CancelledError("Gemini stage cancelled.")
+                if not acquire_inflight(payload, timeout=600):
+                    raise RuntimeError("Gemini inflight byte cap busy for chunk.")
+                held = True
+                if is_cancelled():
+                    cancelled = True
+                    raise CancelledError("Gemini stage cancelled.")
+                file_obj = upload_file_streaming(chunk.path, mime_type="application/pdf")
+                file_obj = wait_file_active(file_obj)
+                # Page offset: chunk-local page 1 → original page_start.
+                offset = int(chunk.page_start) - 1
+                local_extras: dict[str, Any] = {
+                    "gemini_usage": {
+                        "prompt_tokens": 0,
+                        "candidates_tokens": 0,
+                        "thoughts_tokens": 0,
+                        "total_tokens": 0,
+                        "calls": 0,
+                    },
+                    "_gemini_usage_lock": threading.Lock(),
+                }
+                result = analyze_document(
+                    text,
+                    None,
+                    "application/pdf",
+                    local_extras,
+                    file_ref=file_part(file_obj, mime_type="application/pdf"),
+                    page_offset=offset,
+                )
+                with lock:
+                    merged_findings.extend(result.get("findings") or [])
+                    if result.get("overall_note"):
+                        notes.append(str(result["overall_note"]))
+                    usage = local_extras.get("gemini_usage")
+                    if isinstance(usage, dict):
+                        bucket = extras.setdefault(
+                            "gemini_usage",
+                            {
+                                "prompt_tokens": 0,
+                                "candidates_tokens": 0,
+                                "thoughts_tokens": 0,
+                                "total_tokens": 0,
+                                "calls": 0,
+                            },
+                        )
+                        for key in (
+                            "prompt_tokens",
+                            "candidates_tokens",
+                            "thoughts_tokens",
+                            "total_tokens",
+                            "calls",
+                        ):
+                            bucket[key] = int(bucket.get(key) or 0) + int(usage.get(key) or 0)
+            except CancelledError:
+                cancelled = True
+                logger.info(
+                    "gemini chunk skipped cancel pages=%s-%s job=%s",
+                    chunk.page_start,
+                    chunk.page_end,
+                    (parent_job or "-")[:8],
+                )
+            except Exception as exc:
+                logger.warning(
+                    "gemini chunk failed pages=%s-%s err=%s",
+                    chunk.page_start,
+                    chunk.page_end,
+                    type(exc).__name__,
+                )
+                with lock:
+                    failed_ranges.append((chunk.page_start, chunk.page_end))
+            finally:
+                reason = get_ai_review_failure()
+                with lock:
+                    if reason:
+                        worker_reasons.append(reason)
+                delete_file(file_obj)
+                if held:
+                    release_inflight(payload)
+                set_current_job(None)
+                _ = cancelled  # keep flag for clarity / future metrics
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(_one, chunks))
+
+        # Re-apply worker reasons on the parent thread so billing/rate_limited beat partial.
+        set_current_job(parent_job)
+        for reason in worker_reasons:
+            note_ai_review_failure(reason)
+        if failed_ranges:
+            note_partial_failure(failed_ranges)
+            extras["document_analysis_failed_page_ranges"] = [
+                [a, b] for a, b in sorted(failed_ranges)
+            ]
+
+        result = {
+            "findings": merged_findings,
+            "overall_note": " ".join(notes)[:500],
+            "file_sent": "application/pdf" if chunks and len(failed_ranges) < len(chunks) else None,
+            "model": settings.gemini_model,
+        }
+        if chunks and not merged_findings and failed_ranges and len(failed_ranges) == len(chunks):
+            extras["document_analysis_error"] = "All PDF chunks failed Gemini Files API analysis."
+            return (
+                [
+                    _verification_unavailable(
+                        RuntimeError(extras["document_analysis_error"]),
+                        stage="document analysis",
+                    )
+                ],
+                "error",
+            )
+        return _findings_from_analysis_result(result, text, source_file, extras)
+    finally:
+        shutil.rmtree(dest, ignore_errors=True)
+
+
+
+def _findings_from_analysis_result(
+    result: dict[str, Any],
+    text: str,
+    source_file: Path | None,
+    extras: dict[str, Any],
+) -> tuple[list[Finding], str]:
     extras["document_analysis_result"] = {
-        "count": len(result["findings"]),
-        "file_sent": result["file_sent"],
-        "overall_note": result["overall_note"],
+        "count": len(result.get("findings") or []),
+        "file_sent": result.get("file_sent"),
+        "overall_note": result.get("overall_note"),
+        "failed_page_ranges": extras.get("document_analysis_failed_page_ranges"),
     }
     findings: list[Finding] = []
-    for index, item in enumerate(result["findings"][: settings.contextual_max_ai_findings]):
+    for index, item in enumerate((result.get("findings") or [])[: settings.contextual_max_ai_findings]):
         converted = _finding_from_analysis(item, index, result, text=text, source_file=source_file)
         if converted:
             findings.append(converted)
@@ -1041,7 +1365,7 @@ def _run_document_analysis(
 
 
 def _encode_source_file(source_file: Path | None) -> tuple[str | None, str | None, str | None]:
-    """Base64-encode the exhibit for native upload.
+    """Base64-encode the exhibit for the inline (≤ CONTEXTUAL_MAX_UPLOAD_MB) path.
 
     Returns (data, mime_type, note). Any of the first two being None means the file is
     not being sent and the note explains why, for the record in extras.
