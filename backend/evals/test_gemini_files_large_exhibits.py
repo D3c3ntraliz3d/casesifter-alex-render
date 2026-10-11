@@ -230,3 +230,162 @@ def test_failed_chunk_marks_partial(tmp_path, monkeypatch):
         (result.extras or {}).get("document_analysis_failed_page_ranges") or []
     )
     assert (result.extras or {}).get("document_analysis_result", {}).get("file_sent") == "application/pdf"
+
+
+def test_split_150mb_writes_less_than_3x_source(tmp_path):
+    """Final chunk writes via _write_range stay under 3× source (no shrink-loop thrash)."""
+    from app.pdf_chunks import get_write_range_bytes, reset_write_range_bytes, split_pdf
+
+    source = tmp_path / "fat150.pdf"
+    _fat_pdf(source, 150.5, pages=24)
+    src_size = source.stat().st_size
+    assert src_size > 150 * 1024 * 1024
+
+    reset_write_range_bytes()
+    chunks = split_pdf(source, dest_dir=tmp_path / "chunks150", max_mb=40, max_pages=300)
+    written = get_write_range_bytes()
+    assert chunks
+    assert written > 0
+    assert written < 3 * src_size, f"wrote {written} bytes for source {src_size}"
+
+
+def test_cancel_stops_remaining_chunk_uploads(tmp_path, monkeypatch):
+    from app.engines import contextual_logic as cl
+    from app.gemini_cancel import clear_cancel, request_cancel, set_current_job
+    from app.gemini_review_state import reset_ai_review_state
+    from app.pdf_chunks import split_pdf
+
+    reset_ai_review_state()
+    job_id = "c" * 32
+    set_current_job(job_id)
+    clear_cancel(job_id)
+
+    source = tmp_path / "long.pdf"
+    _blank_pdf(source, 1200)
+    real_chunks = split_pdf(source, dest_dir=tmp_path / "cc", max_pages=300, max_mb=40)
+    assert len(real_chunks) == 4
+
+    uploads: list[str] = []
+
+    def fake_upload(path, *, mime_type="application/pdf"):
+        uploads.append(str(path))
+        # After the first upload starts, cancel so later workers skip.
+        request_cancel(job_id)
+        return {
+            "name": f"files/{Path(path).name}",
+            "uri": f"https://example.test/{Path(path).name}",
+            "state": "ACTIVE",
+        }
+
+    monkeypatch.setattr(cl.settings, "gemini_api_key", "test-key", raising=False)
+    monkeypatch.setattr(cl.settings, "contextual_multimodal", True, raising=False)
+    monkeypatch.setattr(cl.settings, "contextual_max_upload_mb", 15, raising=False)
+    monkeypatch.setattr(cl.settings, "logo_chrome_pass", False, raising=False)
+    # Serialize workers so cancel is visible before the next upload.
+    monkeypatch.setattr(cl.settings, "gemini_max_concurrent", 1, raising=False)
+    monkeypatch.setattr("app.gemini_files.upload_file_streaming", fake_upload)
+    monkeypatch.setattr("app.gemini_files.wait_file_active", lambda f, **_k: f)
+    monkeypatch.setattr("app.gemini_files.delete_file", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        cl,
+        "analyze_document",
+        lambda *a, **k: {
+            "findings": [],
+            "overall_note": "ok",
+            "file_sent": "application/pdf",
+            "model": "gemini-test",
+        },
+    )
+    monkeypatch.setattr("app.gemini_inflight.acquire", lambda *_a, **_k: True)
+    monkeypatch.setattr("app.gemini_inflight.release", lambda *_a, **_k: None)
+    monkeypatch.setattr("app.pdf_chunks.needs_split", lambda *_a, **_k: True)
+    monkeypatch.setattr("app.pdf_chunks.split_pdf", lambda *_a, **_k: real_chunks)
+
+    cl.analyze_contextual(
+        "Long exhibit.",
+        {"filename": "long.pdf", "doc_kind": "exhibit"},
+        source_file=source,
+        scan_profile="forensic",
+    )
+    clear_cancel(job_id)
+    set_current_job(None)
+    assert len(uploads) == 1, f"expected 1 upload after cancel, got {len(uploads)}"
+
+
+def test_chunk_402_reports_billing(tmp_path, monkeypatch):
+    from app.engines import contextual_logic as cl
+    from app.gemini_cancel import set_current_job
+    from app.gemini_review_state import get_ai_review_failure, note_ai_review_failure, reset_ai_review_state
+    from app.pdf_chunks import split_pdf
+
+    reset_ai_review_state()
+    set_current_job("b" * 32)
+    source = tmp_path / "long.pdf"
+    _blank_pdf(source, 600)
+    real_chunks = split_pdf(source, dest_dir=tmp_path / "cb", max_pages=300, max_mb=40)
+
+    def fake_upload(path, *, mime_type="application/pdf"):
+        note_ai_review_failure("billing")
+        raise RuntimeError("Gemini Files upload HTTP 402: quota")
+
+    monkeypatch.setattr(cl.settings, "gemini_api_key", "test-key", raising=False)
+    monkeypatch.setattr(cl.settings, "contextual_multimodal", True, raising=False)
+    monkeypatch.setattr(cl.settings, "contextual_max_upload_mb", 15, raising=False)
+    monkeypatch.setattr(cl.settings, "logo_chrome_pass", False, raising=False)
+    monkeypatch.setattr(cl.settings, "gemini_max_concurrent", 2, raising=False)
+    monkeypatch.setattr("app.gemini_files.upload_file_streaming", fake_upload)
+    monkeypatch.setattr("app.gemini_files.wait_file_active", lambda f, **_k: f)
+    monkeypatch.setattr("app.gemini_files.delete_file", lambda *_a, **_k: None)
+    monkeypatch.setattr("app.gemini_inflight.acquire", lambda *_a, **_k: True)
+    monkeypatch.setattr("app.gemini_inflight.release", lambda *_a, **_k: None)
+    monkeypatch.setattr("app.pdf_chunks.needs_split", lambda *_a, **_k: True)
+    monkeypatch.setattr("app.pdf_chunks.split_pdf", lambda *_a, **_k: real_chunks)
+
+    cl.analyze_contextual(
+        "Exhibit.",
+        {"filename": "long.pdf", "doc_kind": "exhibit"},
+        source_file=source,
+        scan_profile="forensic",
+    )
+    set_current_job(None)
+    assert get_ai_review_failure() == "billing"
+
+
+def test_gemini_files_urls_have_no_api_key_query(monkeypatch):
+    """All Files API requests must use x-goog-api-key only — never ?key=."""
+    import app.gemini_files as gf
+
+    seen: list[str] = []
+
+    class _Resp:
+        headers = {"X-Goog-Upload-URL": "https://generativelanguage.googleapis.com/upload/token"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b'{"name":"files/x","uri":"https://example.test/files/x","state":"ACTIVE"}'
+
+    def fake_urlopen(req, timeout=None):
+        seen.append(req.full_url)
+        assert "key=" not in req.full_url
+        assert req.get_header("X-goog-api-key") or req.headers.get("x-goog-api-key")
+        return _Resp()
+
+    monkeypatch.setattr(gf.settings, "gemini_api_key", "secret-key", raising=False)
+    monkeypatch.setattr(gf.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(gf.time, "sleep", lambda *_a, **_k: None)
+
+    req = gf.urllib.request.Request(
+        gf._UPLOAD_START,
+        data=b"{}",
+        method="POST",
+        headers={"x-goog-api-key": "secret-key", "Content-Type": "application/json"},
+    )
+    with gf._urlopen_with_retries(req, 5) as resp:
+        assert resp is not None
+    assert seen
+    assert all("key=" not in u for u in seen)

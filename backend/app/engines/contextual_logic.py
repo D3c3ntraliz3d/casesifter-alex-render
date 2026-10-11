@@ -1189,117 +1189,159 @@ def _run_document_analysis_chunked(
     import shutil
     import tempfile
 
+    from app.gemini_cancel import CancelledError, current_job_id, is_cancelled, set_current_job
     from app.gemini_files import delete_file, file_part, upload_file_streaming, wait_file_active
     from app.gemini_inflight import acquire as acquire_inflight
     from app.gemini_inflight import release as release_inflight
-    from app.gemini_review_state import note_partial_failure
+    from app.gemini_review_state import (
+        get_ai_review_failure,
+        note_ai_review_failure,
+        note_partial_failure,
+        reset_ai_review_state,
+    )
     from app.pdf_chunks import split_pdf
 
     dest = Path(tempfile.mkdtemp(prefix="cs-gemini-chunks-"))
-    chunks = split_pdf(source_file, dest_dir=dest)
-    extras["document_analysis_chunks"] = [
-        {"page_start": c.page_start, "page_end": c.page_end, "size_bytes": c.size_bytes}
-        for c in chunks
-    ]
-    workers = max(1, int(settings.gemini_max_concurrent or 2))
-    failed_ranges: list[tuple[int, int]] = []
-    merged_findings: list[dict[str, Any]] = []
-    notes: list[str] = []
-    lock = threading.Lock()
-
-    def _one(chunk) -> None:
-        file_obj = None
-        held = False
-        payload = int(chunk.size_bytes)
-        try:
-            if not acquire_inflight(payload, timeout=600):
-                raise RuntimeError("Gemini inflight byte cap busy for chunk.")
-            held = True
-            file_obj = upload_file_streaming(chunk.path, mime_type="application/pdf")
-            file_obj = wait_file_active(file_obj)
-            # Page offset: chunk-local page 1 → original page_start.
-            offset = int(chunk.page_start) - 1
-            local_extras: dict[str, Any] = {
-                "gemini_usage": {
-                    "prompt_tokens": 0,
-                    "candidates_tokens": 0,
-                    "thoughts_tokens": 0,
-                    "total_tokens": 0,
-                    "calls": 0,
-                },
-                "_gemini_usage_lock": threading.Lock(),
-            }
-            result = analyze_document(
-                text,
-                None,
-                "application/pdf",
-                local_extras,
-                file_ref=file_part(file_obj, mime_type="application/pdf"),
-                page_offset=offset,
-            )
-            with lock:
-                merged_findings.extend(result.get("findings") or [])
-                if result.get("overall_note"):
-                    notes.append(str(result["overall_note"]))
-                usage = local_extras.get("gemini_usage")
-                if isinstance(usage, dict):
-                    bucket = extras.setdefault(
-                        "gemini_usage",
-                        {
-                            "prompt_tokens": 0,
-                            "candidates_tokens": 0,
-                            "thoughts_tokens": 0,
-                            "total_tokens": 0,
-                            "calls": 0,
-                        },
-                    )
-                    for key in (
-                        "prompt_tokens",
-                        "candidates_tokens",
-                        "thoughts_tokens",
-                        "total_tokens",
-                        "calls",
-                    ):
-                        bucket[key] = int(bucket.get(key) or 0) + int(usage.get(key) or 0)
-        except Exception as exc:
-            logger.warning(
-                "gemini chunk failed pages=%s-%s err=%s",
-                chunk.page_start,
-                chunk.page_end,
-                type(exc).__name__,
-            )
-            with lock:
-                failed_ranges.append((chunk.page_start, chunk.page_end))
-        finally:
-            delete_file(file_obj)
-            if held:
-                release_inflight(payload)
-
+    chunks: list = []
     try:
+        chunks = split_pdf(source_file, dest_dir=dest)
+        extras["document_analysis_chunks"] = [
+            {"page_start": c.page_start, "page_end": c.page_end, "size_bytes": c.size_bytes}
+            for c in chunks
+        ]
+        workers = max(1, int(settings.gemini_max_concurrent or 2))
+        failed_ranges: list[tuple[int, int]] = []
+        merged_findings: list[dict[str, Any]] = []
+        notes: list[str] = []
+        worker_reasons: list[str] = []
+        lock = threading.Lock()
+        parent_job = current_job_id()
+
+        def _one(chunk) -> None:
+            set_current_job(parent_job)
+            reset_ai_review_state()
+            file_obj = None
+            held = False
+            payload = int(chunk.size_bytes)
+            cancelled = False
+            try:
+                if is_cancelled():
+                    cancelled = True
+                    raise CancelledError("Gemini stage cancelled.")
+                if not acquire_inflight(payload, timeout=600):
+                    raise RuntimeError("Gemini inflight byte cap busy for chunk.")
+                held = True
+                if is_cancelled():
+                    cancelled = True
+                    raise CancelledError("Gemini stage cancelled.")
+                file_obj = upload_file_streaming(chunk.path, mime_type="application/pdf")
+                file_obj = wait_file_active(file_obj)
+                # Page offset: chunk-local page 1 → original page_start.
+                offset = int(chunk.page_start) - 1
+                local_extras: dict[str, Any] = {
+                    "gemini_usage": {
+                        "prompt_tokens": 0,
+                        "candidates_tokens": 0,
+                        "thoughts_tokens": 0,
+                        "total_tokens": 0,
+                        "calls": 0,
+                    },
+                    "_gemini_usage_lock": threading.Lock(),
+                }
+                result = analyze_document(
+                    text,
+                    None,
+                    "application/pdf",
+                    local_extras,
+                    file_ref=file_part(file_obj, mime_type="application/pdf"),
+                    page_offset=offset,
+                )
+                with lock:
+                    merged_findings.extend(result.get("findings") or [])
+                    if result.get("overall_note"):
+                        notes.append(str(result["overall_note"]))
+                    usage = local_extras.get("gemini_usage")
+                    if isinstance(usage, dict):
+                        bucket = extras.setdefault(
+                            "gemini_usage",
+                            {
+                                "prompt_tokens": 0,
+                                "candidates_tokens": 0,
+                                "thoughts_tokens": 0,
+                                "total_tokens": 0,
+                                "calls": 0,
+                            },
+                        )
+                        for key in (
+                            "prompt_tokens",
+                            "candidates_tokens",
+                            "thoughts_tokens",
+                            "total_tokens",
+                            "calls",
+                        ):
+                            bucket[key] = int(bucket.get(key) or 0) + int(usage.get(key) or 0)
+            except CancelledError:
+                cancelled = True
+                logger.info(
+                    "gemini chunk skipped cancel pages=%s-%s job=%s",
+                    chunk.page_start,
+                    chunk.page_end,
+                    (parent_job or "-")[:8],
+                )
+            except Exception as exc:
+                logger.warning(
+                    "gemini chunk failed pages=%s-%s err=%s",
+                    chunk.page_start,
+                    chunk.page_end,
+                    type(exc).__name__,
+                )
+                with lock:
+                    failed_ranges.append((chunk.page_start, chunk.page_end))
+            finally:
+                reason = get_ai_review_failure()
+                with lock:
+                    if reason:
+                        worker_reasons.append(reason)
+                delete_file(file_obj)
+                if held:
+                    release_inflight(payload)
+                set_current_job(None)
+                _ = cancelled  # keep flag for clarity / future metrics
+
         with ThreadPoolExecutor(max_workers=workers) as pool:
             list(pool.map(_one, chunks))
+
+        # Re-apply worker reasons on the parent thread so billing/rate_limited beat partial.
+        set_current_job(parent_job)
+        for reason in worker_reasons:
+            note_ai_review_failure(reason)
+        if failed_ranges:
+            note_partial_failure(failed_ranges)
+            extras["document_analysis_failed_page_ranges"] = [
+                [a, b] for a, b in sorted(failed_ranges)
+            ]
+
+        result = {
+            "findings": merged_findings,
+            "overall_note": " ".join(notes)[:500],
+            "file_sent": "application/pdf" if chunks and len(failed_ranges) < len(chunks) else None,
+            "model": settings.gemini_model,
+        }
+        if chunks and not merged_findings and failed_ranges and len(failed_ranges) == len(chunks):
+            extras["document_analysis_error"] = "All PDF chunks failed Gemini Files API analysis."
+            return (
+                [
+                    _verification_unavailable(
+                        RuntimeError(extras["document_analysis_error"]),
+                        stage="document analysis",
+                    )
+                ],
+                "error",
+            )
+        return _findings_from_analysis_result(result, text, source_file, extras)
     finally:
         shutil.rmtree(dest, ignore_errors=True)
 
-    if failed_ranges:
-        note_partial_failure(failed_ranges)
-        extras["document_analysis_failed_page_ranges"] = [
-            [a, b] for a, b in sorted(failed_ranges)
-        ]
-
-    result = {
-        "findings": merged_findings,
-        "overall_note": " ".join(notes)[:500],
-        "file_sent": "application/pdf" if len(failed_ranges) < len(chunks) else None,
-        "model": settings.gemini_model,
-    }
-    if not merged_findings and failed_ranges and len(failed_ranges) == len(chunks):
-        extras["document_analysis_error"] = "All PDF chunks failed Gemini Files API analysis."
-        return (
-            [_verification_unavailable(RuntimeError(extras["document_analysis_error"]), stage="document analysis")],
-            "error",
-        )
-    return _findings_from_analysis_result(result, text, source_file, extras)
 
 
 def _findings_from_analysis_result(
