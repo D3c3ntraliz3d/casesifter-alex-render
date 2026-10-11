@@ -148,6 +148,18 @@ def _startup() -> None:
         max(1, int(settings.gemini_max_concurrent or 4)),
         max(16, int(settings.gemini_max_inflight_mb or 150)),
     )
+    try:
+        from app.llm_verify import resolve_verify_provider
+
+        _verifier = resolve_verify_provider()
+    except Exception:
+        _verifier = "unknown"
+    logger.info(
+        "Gotcha verifier: %s (GOTCHA_VERIFY_PROVIDER=%s); case-impact judge: %s",
+        _verifier,
+        settings.gotcha_verify_provider,
+        "claude" if (settings.anthropic_api_key or "").strip() else "local rules",
+    )
 
 
 @app.on_event("shutdown")

@@ -40,8 +40,9 @@
         references, and text excerpts used to compare documents) so your firm can find contradictions
         across filings. AI analysis is performed by Google Gemini under paid API terms (no training on
         your data; limited-period abuse logging). Large files are sent to Google’s Gemini file service for
-        analysis and deleted immediately after; at most 48 hours if deletion fails. Only signed-in members of
-        your firm can access your index.
+        analysis and deleted immediately after; at most 48 hours if deletion fails. Short quotes from proposed
+        findings are also sent to Anthropic’s Claude under its commercial API terms (no training on your data)
+        to double-check findings before you see them. Only signed-in members of your firm can access your index.
       </p>
     </div>
 
@@ -86,6 +87,11 @@
             <td class="module">Tier 3 — Contextual document analysis</td>
             <td>Comprehensive cross-document reasoning over the full exhibit text and layout.</td>
             <td>The exhibit file itself (inline for small files; Google’s Gemini file service for large PDFs), then deleted immediately after; at most 48 hours if deletion fails.</td>
+          </tr>
+          <tr>
+            <td class="module">Finding verification</td>
+            <td>A second AI (Anthropic Claude) rereads each proposed finding and its evidence and drops findings that don't hold up, then rates how much each one matters to the case.</td>
+            <td>The short claim and evidence quotes for each proposed finding — never the whole file.</td>
           </tr>
         </tbody>
       </table>
