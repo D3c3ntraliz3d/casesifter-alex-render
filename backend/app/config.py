@@ -102,8 +102,19 @@ class Settings(BaseSettings):
     # Scale Phase 1: scan dispatch. inline = today's in-process path (default).
     # worker = enqueue to local queue + blob store; cloudrun = Phase 3.
     scan_backend: str = "inline"
-    blob_backend: str = "local"  # local | gcs (gcs Phase 3)
-    queue_backend: str = "local"  # local | cloudtasks (cloudtasks Phase 3)
+    blob_backend: str = "local"  # local | s3 (S3-compatible: Cloudflare R2 or AWS S3)
+    queue_backend: str = "local"  # local | redis (Render Key Value / any Redis)
+    # S3-compatible object storage (blob_backend=s3). R2: endpoint
+    # https://<account_id>.r2.cloudflarestorage.com, region "auto". AWS S3: leave
+    # endpoint unset and set the real region.
+    s3_bucket: str | None = None
+    s3_endpoint_url: str | None = None
+    s3_region: str = "auto"
+    s3_access_key_id: str | None = None
+    s3_secret_access_key: str | None = None
+    # Shared job queue (queue_backend=redis).
+    redis_url: str | None = None
+    redis_queue_prefix: str = "casesifter:scan"
     worker_service_token: str | None = None  # shared secret for internal worker callbacks
     worker_callback_base_url: str = "http://127.0.0.1:8000"
     worker_max_attempts: int = 3

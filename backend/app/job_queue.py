@@ -1,4 +1,4 @@
-"""Scan job queue (local filesystem now; Cloud Tasks in Phase 3)."""
+"""Scan job queue: local filesystem (single host) or Redis (shared, multi-worker)."""
 
 from __future__ import annotations
 
@@ -25,9 +25,13 @@ class QueueMessage:
     enqueued_at: float = 0.0
     firm_id: str | None = None
     matter_id: str | None = None
+    # Set by a claim on queues that track ownership (Redis). Never persisted.
+    claim_token: str | None = None
 
     def to_json(self) -> str:
-        return json.dumps(asdict(self), separators=(",", ":"))
+        data = asdict(self)
+        data.pop("claim_token", None)
+        return json.dumps(data, separators=(",", ":"))
 
     @classmethod
     def from_json(cls, raw: str) -> "QueueMessage":
@@ -184,7 +188,7 @@ class LocalJobQueue(JobQueue):
     def fail(self, message: QueueMessage, *, reason: str) -> None:
         path = self._msg_path(self.inflight, message)
         dead = self.dead / f"{message.job_id}.json"
-        payload = asdict(message)
+        payload = json.loads(message.to_json())
         payload["failed_reason"] = reason[:500]
         dead.write_text(json.dumps(payload), encoding="utf-8")
         path.unlink(missing_ok=True)
@@ -206,9 +210,178 @@ class LocalJobQueue(JobQueue):
         return n
 
 
-class CloudTasksQueue(JobQueue):
-    def __init__(self, *args, **kwargs):
-        raise NotImplementedError("Cloud Tasks queue lands in Phase 3.")
+_CLAIM_LUA = """
+local ready, inflight, msgs, claims = KEYS[1], KEYS[2], KEYS[3], KEYS[4]
+local now, vis, token = tonumber(ARGV[1]), tonumber(ARGV[2]), ARGV[3]
+-- Requeue claims whose holder stopped heartbeating.
+local expired = redis.call('ZRANGEBYSCORE', inflight, '-inf', now - vis)
+for _, id in ipairs(expired) do
+  redis.call('ZREM', inflight, id)
+  redis.call('HDEL', claims, id)
+  redis.call('ZADD', ready, now, id)
+end
+local ids = redis.call('ZRANGEBYSCORE', ready, '-inf', now, 'LIMIT', 0, 1)
+if #ids == 0 then return false end
+local id = ids[1]
+redis.call('ZREM', ready, id)
+local body = redis.call('HGET', msgs, id)
+if not body then return false end
+redis.call('ZADD', inflight, now, id)
+redis.call('HSET', claims, id, token)
+return body
+"""
+
+_ENQUEUE_LUA = """
+local ready, inflight, msgs = KEYS[1], KEYS[2], KEYS[3]
+local id, body, at = ARGV[1], ARGV[2], tonumber(ARGV[3])
+-- Never disturb a job a worker currently holds (boot recovery re-enqueues).
+if redis.call('ZSCORE', inflight, id) then return 0 end
+redis.call('HSET', msgs, id, body)
+redis.call('ZADD', ready, at, id)
+return 1
+"""
+
+_HEARTBEAT_LUA = """
+local inflight, claims = KEYS[1], KEYS[2]
+local id, token, now = ARGV[1], ARGV[2], tonumber(ARGV[3])
+if redis.call('HGET', claims, id) ~= token then return 0 end
+redis.call('ZADD', inflight, 'XX', now, id)
+return 1
+"""
+
+_COMPLETE_LUA = """
+local inflight, claims, msgs = KEYS[1], KEYS[2], KEYS[3]
+local id, token = ARGV[1], ARGV[2]
+if redis.call('HGET', claims, id) ~= token then return 0 end
+redis.call('ZREM', inflight, id)
+redis.call('HDEL', claims, id)
+redis.call('HDEL', msgs, id)
+return 1
+"""
+
+_RELEASE_LUA = """
+local ready, inflight, claims, msgs = KEYS[1], KEYS[2], KEYS[3], KEYS[4]
+local id, token, body, at = ARGV[1], ARGV[2], ARGV[3], tonumber(ARGV[4])
+if redis.call('HGET', claims, id) ~= token then return 0 end
+redis.call('ZREM', inflight, id)
+redis.call('HDEL', claims, id)
+redis.call('HSET', msgs, id, body)
+redis.call('ZADD', ready, at, id)
+return 1
+"""
+
+_FAIL_LUA = """
+local inflight, claims, msgs, dead = KEYS[1], KEYS[2], KEYS[3], KEYS[4]
+local id, token, body = ARGV[1], ARGV[2], ARGV[3]
+if redis.call('HGET', claims, id) ~= token then return 0 end
+redis.call('ZREM', inflight, id)
+redis.call('HDEL', claims, id)
+redis.call('HDEL', msgs, id)
+redis.call('HSET', dead, id, body)
+return 1
+"""
+
+
+class RedisJobQueue(JobQueue):
+    """Shared queue for many worker instances (Render Key Value or any Redis).
+
+    Every claim gets a random token; complete/release/fail/heartbeat only act if
+    the caller still holds that token. A worker whose claim expired and was
+    re-claimed elsewhere can therefore never delete or requeue the new holder's
+    job. All state transitions are single Lua scripts (atomic).
+    """
+
+    def __init__(self, client=None, prefix: str | None = None) -> None:
+        if client is None:
+            import redis
+
+            url = (settings.redis_url or "").strip()
+            if not url:
+                raise RuntimeError("REDIS_URL is required when QUEUE_BACKEND=redis")
+            client = redis.Redis.from_url(url, decode_responses=True, health_check_interval=30)
+        self.r = client
+        p = (prefix or settings.redis_queue_prefix or "casesifter:scan").rstrip(":")
+        self.k_ready = f"{p}:ready"
+        self.k_inflight = f"{p}:inflight"
+        self.k_msgs = f"{p}:msgs"
+        self.k_claims = f"{p}:claims"
+        self.k_dead = f"{p}:dead"
+        self._claim = self.r.register_script(_CLAIM_LUA)
+        self._enqueue = self.r.register_script(_ENQUEUE_LUA)
+        self._heartbeat = self.r.register_script(_HEARTBEAT_LUA)
+        self._complete = self.r.register_script(_COMPLETE_LUA)
+        self._release = self.r.register_script(_RELEASE_LUA)
+        self._fail = self.r.register_script(_FAIL_LUA)
+
+    def enqueue(self, message: QueueMessage) -> None:
+        if not message.enqueued_at:
+            message.enqueued_at = time.time()
+        added = self._enqueue(
+            keys=[self.k_ready, self.k_inflight, self.k_msgs],
+            args=[message.job_id, message.to_json(), time.time()],
+        )
+        if not added:
+            logger.info("enqueue skipped — job in flight job=%s", message.job_id[:8])
+
+    def claim(self, *, visibility_timeout_s: int = 900) -> QueueMessage | None:
+        token = uuid.uuid4().hex
+        body = self._claim(
+            keys=[self.k_ready, self.k_inflight, self.k_msgs, self.k_claims],
+            args=[time.time(), int(visibility_timeout_s), token],
+        )
+        if not body:
+            return None
+        msg = QueueMessage.from_json(body)
+        msg.claim_token = token
+        return msg
+
+    def heartbeat(self, message: QueueMessage) -> bool:
+        return bool(
+            self._heartbeat(
+                keys=[self.k_inflight, self.k_claims],
+                args=[message.job_id, message.claim_token or "", time.time()],
+            )
+        )
+
+    def complete(self, message: QueueMessage) -> None:
+        ok = self._complete(
+            keys=[self.k_inflight, self.k_claims, self.k_msgs],
+            args=[message.job_id, message.claim_token or ""],
+        )
+        if not ok:
+            logger.warning("complete ignored — claim lost job=%s", message.job_id[:8])
+
+    def release(self, message: QueueMessage, *, delay_s: float = 0) -> None:
+        nxt = QueueMessage.from_json(message.to_json())
+        nxt.attempt = int(message.attempt) + 1
+        ok = self._release(
+            keys=[self.k_ready, self.k_inflight, self.k_claims, self.k_msgs],
+            args=[message.job_id, message.claim_token or "", nxt.to_json(), time.time() + max(0.0, delay_s)],
+        )
+        if ok:
+            message.attempt = nxt.attempt
+        else:
+            logger.warning("release ignored — claim lost job=%s", message.job_id[:8])
+
+    def fail(self, message: QueueMessage, *, reason: str) -> None:
+        payload = json.loads(message.to_json())
+        payload["failed_reason"] = reason[:500]
+        payload["failed_at"] = time.time()
+        ok = self._fail(
+            keys=[self.k_inflight, self.k_claims, self.k_msgs, self.k_dead],
+            args=[message.job_id, message.claim_token or "", json.dumps(payload)],
+        )
+        if not ok:
+            logger.warning("fail ignored — claim lost job=%s", message.job_id[:8])
+
+    def ready_count(self) -> int:
+        return int(self.r.zcount(self.k_ready, "-inf", time.time()))
+
+    def inflight_count(self) -> int:
+        return int(self.r.zcard(self.k_inflight))
+
+    def dead_count(self) -> int:
+        return int(self.r.hlen(self.k_dead))
 
 
 _queue: JobQueue | None = None
@@ -219,8 +392,8 @@ def get_job_queue() -> JobQueue:
     if _queue is not None:
         return _queue
     backend = (settings.queue_backend or "local").strip().lower()
-    if backend == "cloudtasks":
-        _queue = CloudTasksQueue()
+    if backend == "redis":
+        _queue = RedisJobQueue()
     else:
         _queue = LocalJobQueue()
     return _queue
@@ -237,6 +410,9 @@ _process_job_lock = threading.Lock()
 # Renew the claim well inside the visibility timeout (default 900s) so a long
 # scan is never handed to a second worker while the first is still running.
 HEARTBEAT_INTERVAL_S = 60.0
+# With heartbeats, a short visibility timeout is safe: a crashed or redeployed
+# worker's job is picked up by another worker in ~3 minutes instead of 15.
+VISIBILITY_TIMEOUT_S = 180
 
 
 def _start_heartbeat(q: JobQueue, msg: QueueMessage) -> threading.Event:
@@ -265,7 +441,7 @@ def run_local_worker_loop(
     q = get_job_queue()
     stop = stop_event or threading.Event()
     while not stop.is_set():
-        msg = q.claim()
+        msg = q.claim(visibility_timeout_s=VISIBILITY_TIMEOUT_S)
         if msg is None:
             stop.wait(idle_sleep_s)
             continue

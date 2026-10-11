@@ -90,6 +90,113 @@ services:
         sync: false
       - key: SENTRY_ENVIRONMENT
         value: production
+      # --- Scale Phase 3 (worker path). Stays inline until we flip SCAN_BACKEND=worker.
+      # R2 keys + WORKER_SERVICE_TOKEN come from a Dashboard env group linked by hand
+      # (not declared here, so a sync can never blank them).
+      - key: SCAN_BACKEND
+        value: inline
+      - key: BLOB_BACKEND
+        value: s3
+      - key: QUEUE_BACKEND
+        value: redis
+      - key: S3_BUCKET
+        value: casesifter
+      - key: S3_ENDPOINT_URL
+        value: https://a860da2299bdcd448a40c99cca302236.r2.cloudflarestorage.com
+      - key: S3_REGION
+        value: auto
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: casesifter-queue
+          property: connectionString
+
+  # Shared scan job queue. noeviction: a full queue must reject writes, never
+  # silently drop jobs (the default allkeys-lru would). Private network only.
+  - type: keyvalue
+    name: casesifter-queue
+    region: oregon
+    plan: 256mb
+    maxmemoryPolicy: noeviction
+    ipAllowList: []
+
+  # Scan worker: claims jobs from Redis, pulls the bundle from R2, runs OCR +
+  # Gemini, and POSTs the result back to the analysis service over the private
+  # network. No database or fact-memory keys by design.
+  - type: worker
+    name: casesifter-scan-worker
+    runtime: docker
+    region: oregon
+    plan: 1c-2g
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    dockerCommand: python -m worker.main
+    buildFilter:
+      paths:
+        - backend/**
+        - render.yaml
+    envVars:
+      - key: APP_MODE
+        value: analysis
+      - key: APP_ENV
+        value: production
+      - key: SCAN_BACKEND
+        value: worker
+      - key: BLOB_BACKEND
+        value: s3
+      - key: QUEUE_BACKEND
+        value: redis
+      - key: S3_BUCKET
+        value: casesifter
+      - key: S3_ENDPOINT_URL
+        value: https://a860da2299bdcd448a40c99cca302236.r2.cloudflarestorage.com
+      - key: S3_REGION
+        value: auto
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: casesifter-queue
+          property: connectionString
+      - key: WORKER_CALLBACK_BASE_URL
+        fromService:
+          type: web
+          name: casesifter-analysis
+          property: hostport
+      - key: WORKER_MAX_ATTEMPTS
+        value: "3"
+      # Pipeline settings (same values as the analysis service).
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        sync: false
+      - key: GEMINI_MAX_CONCURRENT
+        sync: false
+      - key: GEMINI_MAX_INFLIGHT_MB
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: CLAUDE_MODEL
+        sync: false
+      - key: GOTCHA_VERIFY_PROVIDER
+        value: auto
+      - key: CONTEXTUAL_MULTIMODAL
+        value: "true"
+      - key: OCR_MAX_PAGES
+        value: "40"
+      - key: SCAN_JOB_TIMEOUT_S
+        value: "600"
+      - key: SCAN_JOB_TIMEOUT_BASE_S
+        value: "120"
+      - key: SCAN_JOB_TIMEOUT_PER_PAGE_S
+        value: "10"
+      - key: GEMINI_STAGE_TIMEOUT_S
+        value: "900"
+      - key: SENTRY_DSN
+        sync: false
+      - key: SENTRY_BACKEND_DSN
+        sync: false
+      - key: SENTRY_ENVIRONMENT
+        value: production
 
   - type: web
     name: casesifter-control
