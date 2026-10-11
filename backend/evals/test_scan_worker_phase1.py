@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import io
 import json
 import threading
 import time
@@ -15,6 +14,7 @@ from fastapi.testclient import TestClient
 @pytest.fixture()
 def worker_env(tmp_path, monkeypatch):
     monkeypatch.setenv("FACT_MEMORY_MASTER_KEY", "unit-test-master-key-phase1-worker")
+    monkeypatch.setenv("FACT_MEMORY_SQLITE_PATH", str(tmp_path / "fm.sqlite3"))
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("WORKER_SERVICE_TOKEN", "test-worker-secret")
     monkeypatch.setenv("SCAN_BACKEND", "worker")
@@ -22,24 +22,59 @@ def worker_env(tmp_path, monkeypatch):
     monkeypatch.setenv("QUEUE_BACKEND", "local")
     monkeypatch.setenv("APP_MODE", "vault")
     monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("SESSION_SECRET", "unit-test-session-secret-phase1")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
     (tmp_path / "data").mkdir()
 
+    from app.fact_memory.store import reset_store
     from app.config import Settings
     import app.config as config_mod
     import app.blob_store as blob_mod
     import app.job_queue as queue_mod
     import app.storage as storage_mod
+    import app.worker_auth as worker_auth_mod
+    import app.internal_jobs as internal_mod
+    import app.scan_dispatch as dispatch_mod
+    import app.ephemeral as ephemeral_mod
+    import worker.client as worker_client_mod
+    import worker.run_job as run_job_mod
 
+    reset_store()
     settings = Settings()
-    monkeypatch.setattr(config_mod, "settings", settings)
-    monkeypatch.setattr(storage_mod, "settings", settings)
-    monkeypatch.setattr(blob_mod, "settings", settings)
-    monkeypatch.setattr(queue_mod, "settings", settings)
+    # Patch every module that bound ``settings`` at import time (avoids 503 from
+    # worker_auth reading the process-global Settings without WORKER_SERVICE_TOKEN).
+    for mod in (
+        config_mod,
+        storage_mod,
+        blob_mod,
+        queue_mod,
+        worker_auth_mod,
+        internal_mod,
+        dispatch_mod,
+        ephemeral_mod,
+        worker_client_mod,
+        run_job_mod,
+    ):
+        monkeypatch.setattr(mod, "settings", settings)
+
+    try:
+        import app.main as main_mod
+
+        monkeypatch.setattr(main_mod, "settings", settings)
+    except Exception:
+        pass
+    try:
+        import app.v1_analysis as v1_mod
+
+        monkeypatch.setattr(v1_mod, "settings", settings)
+    except Exception:
+        pass
+
     blob_mod.reset_blob_store_for_tests(None)
     queue_mod.reset_job_queue_for_tests(None)
 
-    from app.blob_store import LocalBlobStore, get_blob_store
-    from app.job_queue import LocalJobQueue, get_job_queue
+    from app.blob_store import LocalBlobStore
+    from app.job_queue import LocalJobQueue
 
     store = LocalBlobStore(settings.blob_dir)
     queue = LocalJobQueue(settings.queue_dir)
@@ -60,14 +95,54 @@ def _tiny_pdf(path: Path) -> None:
     path.write_bytes(b"%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n")
 
 
-def test_result_endpoint_rejects_bad_token(worker_env, monkeypatch):
+def _hmac_headers(job_id: str, body: bytes, token: str = "test-worker-secret") -> dict[str, str]:
+    import hashlib
+    import hmac as hm
+
+    ts = str(int(time.time()))
+    body_hash = hashlib.sha256(body or b"").hexdigest()
+    msg = f"{job_id}:{ts}:{body_hash}".encode("utf-8")
+    sig = hm.new(token.encode("utf-8"), msg, hashlib.sha256).hexdigest()
+    return {
+        "Content-Type": "application/json",
+        "X-CS-Timestamp": ts,
+        "X-CS-Signature": sig,
+    }
+
+
+def _post_result(client: TestClient, job_id: str, payload: dict, token: str = "test-worker-secret"):
+    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    return client.post(
+        f"/api/internal/v1/jobs/{job_id}/result",
+        content=body,
+        headers=_hmac_headers(job_id, body, token=token),
+    )
+
+
+def test_result_endpoint_rejects_bare_bearer(worker_env):
     from app.main import app
 
     client = TestClient(app)
+    job_id = "a" * 32
     res = client.post(
-        "/api/internal/v1/jobs/" + ("a" * 32) + "/result",
+        f"/api/internal/v1/jobs/{job_id}/result",
         json={"status": "failed", "error": "x"},
-        headers={"Authorization": "Bearer wrong"},
+        headers={"Authorization": "Bearer test-worker-secret"},
+    )
+    assert res.status_code == 401
+
+
+def test_result_endpoint_rejects_bad_hmac(worker_env):
+    from app.main import app
+
+    client = TestClient(app)
+    job_id = "a" * 32
+    body = b'{"status":"failed","error":"x"}'
+    headers = _hmac_headers(job_id, body, token="wrong-secret")
+    res = client.post(
+        f"/api/internal/v1/jobs/{job_id}/result",
+        content=body,
+        headers=headers,
     )
     assert res.status_code == 401
 
@@ -132,17 +207,19 @@ def test_worker_round_trip_deletes_bundle(worker_env, monkeypatch):
     monkeypatch.setattr("worker.run_job.run_local_stage", lambda *a, **k: None)
     monkeypatch.setattr("worker.run_job.run_gemini_stage", lambda *a, **k: fake_report)
 
-    # Callback into the real FastAPI app in-process.
     from app.main import app
 
     client = TestClient(app)
-
     posts: list[str] = []
 
     def fake_post(job_id_arg, path, payload):
         posts.append(path)
-        headers = {"Authorization": f"Bearer {env['token']}"}
-        res = client.post(path if path.startswith("/api") else f"/api{path}", json=payload, headers=headers)
+        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        res = client.post(
+            path if path.startswith("/api") else f"/api{path}",
+            content=body,
+            headers=_hmac_headers(job_id_arg, body, token=env["token"]),
+        )
         assert res.status_code < 400, res.text
         return res.json()
 
@@ -155,13 +232,114 @@ def test_worker_round_trip_deletes_bundle(worker_env, monkeypatch):
     progress = load_progress(job_id)
     assert progress is not None
     assert progress.status == "complete"
-    # progress.json is stored without the report blob; report lives in report.json.
     report = load_report(job_id)
     assert report is not None
     assert report.ai_review == "complete"
-    # Bundle deleted after accepted result.
     assert not env["store"].exists(job_meta_key(job_id))
     assert not env["store"].exists(job_source_key(job_id, source_name))
+
+
+def test_fail_once_then_succeed_keeps_bundle(worker_env, monkeypatch):
+    """Non-final failure must not POST terminal failed or delete the blob bundle."""
+    from app.blob_store import job_meta_key, job_source_key
+    from app.job_queue import QueueMessage
+    from app.models import AuditTrail, Report
+    from app.storage import load_progress
+    from worker.run_job import WorkerJobError, process_queue_message
+    from worker import client as worker_client
+
+    env = worker_env
+    job_id = "9" * 32
+    source_name = "retry.pdf"
+    src = env["tmp"] / source_name
+    _tiny_pdf(src)
+    meta = {
+        "job_id": job_id,
+        "persist": False,
+        "source_name": source_name,
+        "prior_snapshots": [],
+        "submitted_by": "test",
+        "attempt": 1,
+        "max_attempts": 3,
+    }
+    env["store"].put(job_source_key(job_id, source_name), src.read_bytes())
+    env["store"].put(job_meta_key(job_id), json.dumps(meta).encode("utf-8"))
+
+    from datetime import datetime, timezone
+
+    fake_report = Report(
+        job_id=job_id,
+        risk_level="green",
+        risk_score=1,
+        ai_review="complete",
+        executive_summary="ok",
+        top_findings=[],
+        recommended_actions=[],
+        findings=[],
+        timeline=[],
+        page_dimensions=[],
+        fonts=[],
+        comparison={},
+        modules=[],
+        audit=AuditTrail(
+            scanned_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            analysis_version="t",
+            modules_run=[],
+            submitted_by="t",
+            filename=source_name,
+            file_size_bytes=src.stat().st_size,
+            file_type="application/pdf",
+            sha256="a" * 64,
+        ),
+        artifact_urls=[],
+    )
+
+    calls = {"n": 0}
+
+    def flaky_local(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("simulated pipeline failure")
+
+    monkeypatch.setattr("worker.run_job.run_local_stage", flaky_local)
+    monkeypatch.setattr("worker.run_job.run_gemini_stage", lambda *a, **k: fake_report)
+
+    from app.main import app
+
+    client = TestClient(app)
+    result_posts: list[dict] = []
+
+    def fake_post(job_id_arg, path, payload):
+        if path.endswith("/result"):
+            result_posts.append(payload)
+        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        res = client.post(
+            path if path.startswith("/api") else f"/api{path}",
+            content=body,
+            headers=_hmac_headers(job_id_arg, body, token=env["token"]),
+        )
+        assert res.status_code < 400, res.text
+        return res.json()
+
+    monkeypatch.setattr(worker_client, "_post", fake_post)
+
+    msg1 = QueueMessage(job_id=job_id, bundle_prefix=f"jobs/{job_id}", attempt=1)
+    with pytest.raises(WorkerJobError, match="simulated pipeline failure"):
+        process_queue_message(msg1)
+
+    # Non-final: no terminal result POST, bundle still present.
+    assert result_posts == []
+    assert env["store"].exists(job_meta_key(job_id))
+    assert env["store"].exists(job_source_key(job_id, source_name))
+    progress_after_fail = load_progress(job_id)
+    assert progress_after_fail is None or progress_after_fail.status not in {"complete", "failed"}
+
+    msg2 = QueueMessage(job_id=job_id, bundle_prefix=f"jobs/{job_id}", attempt=2)
+    process_queue_message(msg2)
+
+    assert any(p.get("status") == "complete" for p in result_posts)
+    assert load_progress(job_id).status == "complete"
+    assert not env["store"].exists(job_meta_key(job_id))
 
 
 def test_duplicate_result_is_idempotent(worker_env):
@@ -201,10 +379,10 @@ def test_duplicate_result_is_idempotent(worker_env):
     update_job(job_id, status="complete", stage="complete", percent=100, message="done", report=report)
 
     client = TestClient(app)
-    res1 = client.post(
-        f"/api/internal/v1/jobs/{job_id}/result",
-        json={"status": "complete", "report": report.model_dump(mode="json"), "message": "again"},
-        headers={"Authorization": "Bearer test-worker-secret"},
+    res1 = _post_result(
+        client,
+        job_id,
+        {"status": "complete", "report": report.model_dump(mode="json"), "message": "again"},
     )
     assert res1.status_code == 200
     assert res1.json().get("idempotent") is True
@@ -220,17 +398,117 @@ def test_bundle_deleted_after_failure_result(worker_env):
     env["store"].put(job_source_key(job_id, "a.pdf"), b"%PDF")
 
     client = TestClient(app)
-    res = client.post(
-        f"/api/internal/v1/jobs/{job_id}/result",
-        json={"status": "failed", "error": "boom", "message": "Analysis failed."},
-        headers={"Authorization": "Bearer test-worker-secret"},
+    res = _post_result(
+        client,
+        job_id,
+        {"status": "failed", "error": "boom", "message": "Analysis failed."},
     )
     assert res.status_code == 200
     assert not env["store"].exists(job_meta_key(job_id))
 
 
+def test_result_rejects_mismatched_firm(worker_env):
+    from app.fact_memory.store import FactMemoryStore, reset_store
+    from app.main import app
+    from app.storage import create_job
+
+    env = worker_env
+    reset_store()
+    db = env["tmp"] / "firm-mismatch.sqlite3"
+    store = FactMemoryStore(database_url=f"sqlite:///{db}")
+    firm_a = store.ensure_firm_for_email("a@example.com", name="Firm A")
+    firm_b = store.ensure_firm_for_email("b@example.com", name="Firm B")
+    job_id = "7" * 32
+    store.upsert_analysis_job(
+        job_id=job_id,
+        firm_id=firm_a["firm_id"],
+        user_id=firm_a["user_id"],
+        matter_id=None,
+        status="running",
+        message="Scanning…",
+    )
+    create_job(job_id, "x.pdf")
+
+    import app.fact_memory.store as store_mod
+
+    store_mod._default_store = store
+
+    client = TestClient(app)
+    res = _post_result(
+        client,
+        job_id,
+        {
+            "status": "failed",
+            "error": "x",
+            "firm_id": firm_b["firm_id"],
+            "user_id": firm_b["user_id"],
+        },
+    )
+    assert res.status_code == 403
+    assert "firm_id" in res.text.lower()
+    reset_store()
+
+
+def test_claim_honors_delay_sidecar(worker_env):
+    from app.job_queue import QueueMessage, get_job_queue
+
+    q = get_job_queue()
+    msg = QueueMessage(job_id="3" * 32, bundle_prefix="jobs/" + "3" * 32, attempt=1)
+    q.enqueue(msg)
+    claimed = q.claim()
+    assert claimed is not None
+    q.release(claimed, delay_s=30.0)
+    assert q.claim() is None
+    assert q.ready_count() == 0
+
+
+def test_local_blobs_404_outside_local_dev(worker_env, monkeypatch):
+    from app.main import app
+    import app.internal_jobs as internal_mod
+
+    monkeypatch.setattr(internal_mod.settings, "app_env", "production")
+    client = TestClient(app)
+    res = client.put(
+        "/api/internal/v1/local-blobs/jobs/x/source.pdf",
+        content=b"%PDF",
+        headers={"Authorization": "Bearer test-worker-secret"},
+    )
+    assert res.status_code == 404
+
+
+def test_job_recovery_reenqueues_worker_bundle(worker_env):
+    from app.blob_store import job_meta_key
+    from app.fact_memory.store import FactMemoryStore, reset_store
+    from app.job_queue import get_job_queue
+    from app.job_recovery import recover_local_done_jobs
+
+    env = worker_env
+    reset_store()
+    db = env["tmp"] / "recovery.sqlite3"
+    store = FactMemoryStore(database_url=f"sqlite:///{db}")
+    firm = store.ensure_firm_for_email("rec@example.com", name="Rec")
+    job_id = "8" * 32
+    store.upsert_analysis_job(
+        job_id=job_id,
+        firm_id=firm["firm_id"],
+        user_id=firm["user_id"],
+        status="local_done",
+        message="Local done",
+    )
+    env["store"].put(job_meta_key(job_id), json.dumps({"job_id": job_id}).encode("utf-8"))
+
+    import app.fact_memory.store as store_mod
+
+    store_mod._default_store = store
+
+    out = recover_local_done_jobs()
+    assert out["requeued"] == 1
+    assert get_job_queue().ready_count() == 1
+    reset_store()
+
+
 def test_crash_retries_then_dead_letters(worker_env, monkeypatch):
-    from app.job_queue import QueueMessage, get_job_queue, run_local_worker_loop
+    from app.job_queue import LocalJobQueue, QueueMessage, get_job_queue, run_local_worker_loop
     from worker.run_job import WorkerJobError
 
     q = get_job_queue()
@@ -244,6 +522,12 @@ def test_crash_retries_then_dead_letters(worker_env, monkeypatch):
         raise WorkerJobError("simulated crash")
 
     stop = threading.Event()
+    _orig_release = LocalJobQueue.release
+
+    def fast_release(self, message, *, delay_s=0):
+        _orig_release(self, message, delay_s=0)
+
+    monkeypatch.setattr(LocalJobQueue, "release", fast_release)
 
     def _run():
         run_local_worker_loop(boom, idle_sleep_s=0.05, stop_event=stop)
@@ -270,7 +554,6 @@ def test_dispatch_writes_bundle_and_enqueues(worker_env, monkeypatch):
     from app.storage import create_job
 
     create_job(job_id, dest.name)
-    # Place file where payload expects it.
     job_dest = worker_env["settings"].jobs_dir / job_id / dest.name
     job_dest.parent.mkdir(parents=True, exist_ok=True)
     job_dest.write_bytes(dest.read_bytes())
@@ -290,5 +573,4 @@ def test_dispatch_writes_bundle_and_enqueues(worker_env, monkeypatch):
     assert worker_env["store"].exists(job_meta_key(job_id))
     assert worker_env["store"].exists(job_source_key(job_id, dest.name))
     assert worker_env["queue"].ready_count() == 1
-    # Web copy of source removed after blob put.
     assert not job_dest.exists()

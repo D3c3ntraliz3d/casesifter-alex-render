@@ -36,16 +36,10 @@ def verify_worker_request(
     x_cs_signature: str | None,
     body: bytes = b"",
 ) -> None:
+    """Require HMAC signature. Bare Bearer tokens are not accepted."""
     token = worker_service_token()
     if not token:
         raise HTTPException(503, "Worker auth is not configured.")
-
-    # Accept either Bearer service token or HMAC signature (+ timestamp).
-    if authorization and authorization.lower().startswith("bearer "):
-        presented = authorization[7:].strip()
-        if hmac.compare_digest(presented, token):
-            return
-        raise HTTPException(401, "Invalid worker token.")
 
     if not x_cs_timestamp or not x_cs_signature:
         raise HTTPException(401, "Worker authentication required.")

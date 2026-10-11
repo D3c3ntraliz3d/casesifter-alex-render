@@ -1161,6 +1161,7 @@ class FactMemoryStore:
         firm_id: str,
         matter_id: str | None = None,
         document_id: str | None = None,
+        user_id: str | None = None,
         sha256: str = "",
         status: str = "queued",
         message: str | None = None,
@@ -1174,6 +1175,7 @@ class FactMemoryStore:
                 row = AnalysisJob(
                     job_id=job_id,
                     firm_id=firm_id,
+                    user_id=user_id or None,
                     matter_id=matter_id or None,
                     document_id=document_id or None,
                     sha256=(sha256 or "").lower(),
@@ -1190,6 +1192,8 @@ class FactMemoryStore:
                     row.matter_id = matter_id or None
                 if document_id is not None:
                     row.document_id = document_id or None
+                if user_id is not None:
+                    row.user_id = user_id or None
                 if sha256:
                     row.sha256 = sha256.lower()
                 prev_status = row.status
@@ -1648,6 +1652,7 @@ class FactMemoryStore:
         return {
             "job_id": row.job_id,
             "firm_id": row.firm_id,
+            "user_id": getattr(row, "user_id", None),
             "matter_id": row.matter_id,
             "document_id": row.document_id,
             "sha256": row.sha256 or "",

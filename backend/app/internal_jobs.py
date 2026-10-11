@@ -39,6 +39,8 @@ class ResultBody(BaseModel):
     display_name: str | None = None
     doc_kind: str | None = None
     filed_date: str | None = None
+    # Ignored for ownership — firm/matter/user come from the durable job record.
+    # Present only so a mismatched body can be rejected.
     matter_id: str | None = None
     firm_id: str | None = None
     user_id: str | None = None
@@ -56,6 +58,35 @@ def _check_auth(request: Request, job_id: str, body: bytes) -> None:
         x_cs_signature=request.headers.get("x-cs-signature"),
         body=body,
     )
+
+
+def _is_local_dev_env() -> bool:
+    return (settings.app_env or "").strip().lower() in {"local", "development", "dev"}
+
+
+def _resolve_job_ownership(job_id: str, body: ResultBody) -> dict[str, Any]:
+    """Firm/matter/user come from the durable analysis_jobs row, never the body."""
+    from app.fact_memory.store import get_store
+
+    row = get_store().get_analysis_job(job_id)
+    if row is None:
+        if body.firm_id or body.matter_id or body.user_id or body.persist:
+            raise HTTPException(404, "Unknown job — no durable job record.")
+        return {"firm_id": None, "matter_id": None, "user_id": None, "persist": False}
+
+    if body.firm_id and body.firm_id != row["firm_id"]:
+        raise HTTPException(403, "firm_id does not match job record.")
+    if body.matter_id and row.get("matter_id") and body.matter_id != row["matter_id"]:
+        raise HTTPException(403, "matter_id does not match job record.")
+    if body.user_id and row.get("user_id") and body.user_id != row["user_id"]:
+        raise HTTPException(403, "user_id does not match job record.")
+
+    return {
+        "firm_id": row["firm_id"],
+        "matter_id": row.get("matter_id"),
+        "user_id": row.get("user_id"),
+        "persist": bool(body.persist),
+    }
 
 
 @internal_router.post("/jobs/{job_id}/progress")
@@ -114,6 +145,8 @@ async def worker_result(job_id: str, request: Request):
     if body.status not in {"complete", "failed"}:
         raise HTTPException(400, "status must be complete or failed.")
 
+    ownership = _resolve_job_ownership(job_id, body)
+
     # Idempotent: already terminal → accept without duplicating persist.
     existing = load_progress(job_id)
     if existing and existing.status in TERMINAL_STATUSES:
@@ -148,20 +181,25 @@ async def worker_result(job_id: str, request: Request):
             message=body.message or "Analysis complete.",
             report=report_obj,
         )
-        if body.persist and body.matter_id and body.firm_id and report_obj is not None:
+        if (
+            ownership["persist"]
+            and ownership.get("matter_id")
+            and ownership.get("firm_id")
+            and report_obj is not None
+        ):
             from app.v1_analysis import _persist_pipeline_result
 
             # Source bytes live only on the worker; persist uses report audit + stubs.
             stub = Path(body.source_name or "document.pdf")
             firm_ctx = {
-                "firm_id": body.firm_id,
-                "user_id": body.user_id,
+                "firm_id": ownership["firm_id"],
+                "user_id": ownership.get("user_id"),
             }
             document_id = _persist_pipeline_result(
                 job_id=job_id,
                 source=stub,
                 report=report_obj,
-                matter_id=body.matter_id,
+                matter_id=ownership["matter_id"],
                 firm_ctx=firm_ctx,
                 display_name=body.display_name,
                 doc_kind=body.doc_kind,
@@ -193,7 +231,7 @@ async def worker_result(job_id: str, request: Request):
     try:
         from app.ephemeral import delete_ephemeral_source, maybe_delete_after_terminal
 
-        maybe_delete_after_terminal(job_id, retain_report=bool(body.persist))
+        maybe_delete_after_terminal(job_id, retain_report=bool(ownership["persist"]))
         delete_ephemeral_source(job_id)
     except Exception:
         logger.debug("ephemeral cleanup after worker result failed job=%s", job_id[:8], exc_info=True)
@@ -222,8 +260,10 @@ async def local_blob_put(
     expires: int | None = None,
     content_type: str | None = None,
 ):
-    """Local signed-upload stand-in (Phase 2 will use this from the browser)."""
-    # Phase 1: allow worker/tests to PUT without browser auth when token matches.
+    """Local signed-upload stand-in (Phase 2). Mounted only for local/dev."""
+    if not _is_local_dev_env():
+        raise HTTPException(404, "Not found.")
+
     auth = request.headers.get("authorization")
     from app.worker_auth import worker_service_token
     import hmac
@@ -232,7 +272,7 @@ async def local_blob_put(
     if token and auth and auth.lower().startswith("bearer "):
         if not hmac.compare_digest(auth[7:].strip(), token):
             raise HTTPException(401, "Invalid token.")
-    elif (settings.app_env or "").strip().lower() == "production":
+    elif token:
         raise HTTPException(401, "Unauthorized.")
 
     from app.blob_store import get_blob_store

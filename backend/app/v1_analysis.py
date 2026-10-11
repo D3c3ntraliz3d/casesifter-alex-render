@@ -331,6 +331,7 @@ def _upsert_durable_job(
             firm_id=firm_ctx["firm_id"],
             matter_id=matter_id,
             document_id=document_id,
+            user_id=firm_ctx.get("user_id"),
             sha256=sha256,
             status=status,
             message=message,

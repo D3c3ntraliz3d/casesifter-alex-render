@@ -90,8 +90,17 @@ class LocalJobQueue(JobQueue):
     def claim(self, *, visibility_timeout_s: int = 900) -> QueueMessage | None:
         with self._lock:
             self._requeue_expired(visibility_timeout_s)
+            now = time.time()
             candidates = sorted(self.ready.glob("*.json"), key=lambda p: p.stat().st_mtime)
             for path in candidates:
+                delay = path.with_suffix(".delay")
+                if delay.is_file():
+                    try:
+                        if float(delay.read_text(encoding="utf-8")) > now:
+                            continue
+                    except Exception:
+                        pass
+                    delay.unlink(missing_ok=True)
                 try:
                     msg = QueueMessage.from_json(path.read_text(encoding="utf-8"))
                 except Exception:
@@ -136,17 +145,12 @@ class LocalJobQueue(JobQueue):
         path = self._msg_path(self.inflight, message)
         path.with_suffix(".claimed").unlink(missing_ok=True)
         message.attempt = int(message.attempt) + 1
+        # Always rewrite JSON so the bumped attempt is persisted (move alone keeps stale body).
+        ready = self._msg_path(self.ready, message)
+        ready.write_text(message.to_json(), encoding="utf-8")
         if delay_s > 0:
-            # Ready but mtime in the future via a delay sidecar.
-            ready = self._msg_path(self.ready, message)
-            ready.write_text(message.to_json(), encoding="utf-8")
             (ready.with_suffix(".delay")).write_text(str(time.time() + delay_s), encoding="utf-8")
-            path.unlink(missing_ok=True)
-        else:
-            if path.is_file():
-                path.replace(self._msg_path(self.ready, message))
-            else:
-                self.enqueue(message)
+        path.unlink(missing_ok=True)
 
     def fail(self, message: QueueMessage, *, reason: str) -> None:
         path = self._msg_path(self.inflight, message)
@@ -198,19 +202,30 @@ def reset_job_queue_for_tests(queue: JobQueue | None = None) -> None:
     _queue = queue
 
 
+# One in-flight job per worker process (local loop is sequential; lock is the guard).
+_process_job_lock = threading.Lock()
+
+
 def run_local_worker_loop(
     handler: Callable[[QueueMessage], None],
     *,
     idle_sleep_s: float = 0.5,
     stop_event: threading.Event | None = None,
 ) -> None:
-    """Poll the local queue forever (or until stop_event)."""
+    """Poll the local queue forever (or until stop_event). At most one job at a time."""
     q = get_job_queue()
     stop = stop_event or threading.Event()
     while not stop.is_set():
         msg = q.claim()
         if msg is None:
             stop.wait(idle_sleep_s)
+            continue
+        if not _process_job_lock.acquire(blocking=False):
+            logger.error(
+                "refusing concurrent job in same worker process job=%s",
+                msg.job_id[:8],
+            )
+            q.release(msg, delay_s=1.0)
             continue
         try:
             handler(msg)
@@ -222,3 +237,5 @@ def run_local_worker_loop(
                 q.fail(msg, reason=str(exc)[:500])
             else:
                 q.release(msg, delay_s=min(60.0, 2.0 ** msg.attempt))
+        finally:
+            _process_job_lock.release()

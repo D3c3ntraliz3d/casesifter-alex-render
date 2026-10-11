@@ -13,7 +13,7 @@ from app.blob_store import get_blob_store, job_meta_key, job_source_key
 from app.config import settings
 from app.job_queue import QueueMessage
 from app.pipeline import run_gemini_stage, run_local_stage
-from app.storage import create_job, job_dir
+from app.storage import create_job
 from worker.client import post_progress, post_result
 
 logger = logging.getLogger(__name__)
@@ -23,8 +23,20 @@ class WorkerJobError(RuntimeError):
     pass
 
 
+def _max_attempts(meta: dict[str, Any]) -> int:
+    return max(1, int(meta.get("max_attempts") or settings.worker_max_attempts or 3))
+
+
+def _is_final_attempt(message: QueueMessage, meta: dict[str, Any]) -> bool:
+    return message_attempt(message_obj=message, meta=meta) >= _max_attempts(meta)
+
+
 def process_queue_message(message: QueueMessage) -> None:
-    """Download bundle, run pipeline, POST result, delete bundle on every terminal path."""
+    """Download bundle, run pipeline, POST result only on terminal outcomes.
+
+    Non-final failures re-raise so the queue can retry without POSTing a terminal
+    failed result or deleting the blob bundle.
+    """
     job_id = message.job_id
     store = get_blob_store()
     work = Path(tempfile.mkdtemp(prefix=f"cs-worker-{job_id[:8]}-"))
@@ -35,6 +47,7 @@ def process_queue_message(message: QueueMessage) -> None:
 
     meta: dict[str, Any] = {}
     source_path: Path | None = None
+    terminal = False
     try:
         meta_raw = store.get(job_meta_key(job_id))
         meta = json.loads(meta_raw.decode("utf-8"))
@@ -90,6 +103,8 @@ def process_queue_message(message: QueueMessage) -> None:
 
         # Prefer sticky failed from pipeline if present.
         if status == "failed":
+            if not _is_final_attempt(message, meta):
+                raise WorkerJobError(error or status_message or "pipeline_failed")
             post_result(
                 job_id,
                 {
@@ -101,12 +116,10 @@ def process_queue_message(message: QueueMessage) -> None:
                     "display_name": meta.get("display_name"),
                     "doc_kind": meta.get("doc_kind"),
                     "filed_date": meta.get("filed_date"),
-                    "matter_id": meta.get("matter_id"),
-                    "firm_id": meta.get("firm_id"),
-                    "user_id": meta.get("user_id"),
                     "persist": bool(meta.get("persist")),
                 },
             )
+            terminal = True
             return
 
         post_result(
@@ -122,46 +135,51 @@ def process_queue_message(message: QueueMessage) -> None:
                 "display_name": meta.get("display_name"),
                 "doc_kind": meta.get("doc_kind"),
                 "filed_date": meta.get("filed_date"),
-                "matter_id": meta.get("matter_id"),
-                "firm_id": meta.get("firm_id"),
-                "user_id": meta.get("user_id"),
                 "persist": bool(meta.get("persist")),
                 "source_size": int(source_path.stat().st_size) if source_path and source_path.is_file() else None,
                 "sha256": (report.audit.sha256 if report and report.audit else None),
             },
         )
+        terminal = True
     except Exception as exc:
         logger.exception("worker job failed job=%s", job_id[:8])
         settings.data_dir = original_data_dir
-        try:
-            post_result(
-                job_id,
-                {
-                    "status": "failed",
-                    "message": "Analysis failed.",
-                    "error": str(exc)[:500],
-                    "attempt": message_attempt(message_obj=message, meta=meta),
-                    "source_name": meta.get("source_name"),
-                    "display_name": meta.get("display_name"),
-                    "doc_kind": meta.get("doc_kind"),
-                    "filed_date": meta.get("filed_date"),
-                    "matter_id": meta.get("matter_id"),
-                    "firm_id": meta.get("firm_id"),
-                    "user_id": meta.get("user_id"),
-                    "persist": bool(meta.get("persist")),
-                },
+        if _is_final_attempt(message, meta):
+            try:
+                post_result(
+                    job_id,
+                    {
+                        "status": "failed",
+                        "message": "Analysis failed.",
+                        "error": str(exc)[:500],
+                        "attempt": message_attempt(message_obj=message, meta=meta),
+                        "source_name": meta.get("source_name"),
+                        "display_name": meta.get("display_name"),
+                        "doc_kind": meta.get("doc_kind"),
+                        "filed_date": meta.get("filed_date"),
+                        "persist": bool(meta.get("persist")),
+                    },
+                )
+                terminal = True
+            except Exception:
+                logger.exception("failed to POST failure result job=%s", job_id[:8])
+        else:
+            logger.info(
+                "worker job retryable failure job=%s attempt=%s/%s",
+                job_id[:8],
+                message_attempt(message_obj=message, meta=meta),
+                _max_attempts(meta),
             )
-        except Exception:
-            logger.exception("failed to POST failure result job=%s", job_id[:8])
         raise WorkerJobError(str(exc)) from exc
     finally:
         settings.data_dir = original_data_dir
         shutil.rmtree(work, ignore_errors=True)
-        # Bundle delete is also done by the API on accepted result; belt-and-suspenders here.
-        try:
-            store.delete_prefix(f"jobs/{job_id}")
-        except Exception:
-            logger.debug("worker bundle delete failed job=%s", job_id[:8], exc_info=True)
+        # Delete blob bundle only after a terminal result was accepted.
+        if terminal:
+            try:
+                store.delete_prefix(f"jobs/{job_id}")
+            except Exception:
+                logger.debug("worker bundle delete failed job=%s", job_id[:8], exc_info=True)
 
 
 def message_attempt(*, message_obj: QueueMessage, meta: dict[str, Any]) -> int:
