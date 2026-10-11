@@ -349,6 +349,9 @@ def _update_durable_job(
     error: str | None = None,
     document_id: str | None = None,
     sha256: str | None = None,
+    ai_review: str | None = None,
+    ai_review_reason: str | None = None,
+    allow_rerun: bool = False,
 ) -> None:
     try:
         from app.fact_memory.store import get_store
@@ -360,6 +363,9 @@ def _update_durable_job(
             error=error,
             document_id=document_id,
             sha256=sha256,
+            ai_review=ai_review,
+            ai_review_reason=ai_review_reason,
+            allow_rerun=allow_rerun,
         )
     except Exception:
         logger.exception("Durable job update failed for %s", job_id)
@@ -728,12 +734,82 @@ def get_ephemeral_job(
             payload["eta_seconds"] = estimate_eta_seconds(queue_position=position)
         except Exception:
             logger.debug("queue eta failed job=%s", job_id[:8], exc_info=True)
+    if progress.status == "complete":
+        # Lightweight AI-review badge fields (avoid embedding the full report).
+        try:
+            row = owned.get("job") or {}
+            if row.get("ai_review"):
+                payload["ai_review"] = row.get("ai_review")
+                payload["ai_review_reason"] = row.get("ai_review_reason")
+            else:
+                report_lite = load_report(job_id)
+                if report_lite is not None:
+                    payload["ai_review"] = getattr(report_lite, "ai_review", None)
+                    payload["ai_review_reason"] = getattr(report_lite, "ai_review_reason", None)
+        except Exception:
+            logger.debug("ai_review status fields failed job=%s", job_id[:8], exc_info=True)
     if include_report and progress.status == "complete":
         report = load_report(job_id)
         from app.case_conflict_toggle import strip_report
 
         payload["report"] = strip_report(report.model_dump(mode="json")) if report else None
     return payload
+
+
+
+
+@v1.post("/jobs/{job_id}/rerun-ai-review")
+def rerun_ai_review(job_id: str, _auth: dict = Depends(_require_analysis_auth)):
+    """Re-run only the Gemini stage from retained local_stage.json — no re-upload."""
+    owned = require_job_owner(job_id, _auth)
+    from app.gemini_executor import gemini_payload_path, local_stage_path, submit_gemini_stage
+    from app.storage import job_dir
+
+    stage = local_stage_path(job_id)
+    payload_path = gemini_payload_path(job_id)
+    if not stage.is_file():
+        raise HTTPException(
+            409,
+            "Local scan results are no longer available for AI re-run. Re-scan the document.",
+        )
+    payload: dict = {}
+    if payload_path.is_file():
+        try:
+            payload = json.loads(payload_path.read_text(encoding="utf-8"))
+        except Exception:
+            payload = {}
+    payload["job_id"] = job_id
+    if not payload.get("dest"):
+        # Stub dest; execute_gemini_stage resolves a name from local_stage when missing.
+        payload["dest"] = str(job_dir(job_id) / "document.pdf")
+
+    update_job(
+        job_id,
+        status="local_done",
+        stage="local_done",
+        percent=82,
+        message="Re-running AI review from stored local results…",
+        error=None,
+        allow_rerun=True,
+    )
+    _update_durable_job(
+        job_id,
+        status="local_done",
+        message="Re-running AI review from stored local results.",
+        error=None,
+        allow_rerun=True,
+        ai_review="",
+        ai_review_reason="",
+    )
+    submit_gemini_stage(payload)
+    row = owned.get("job") or {}
+    return {
+        "job_id": job_id,
+        "status": "local_done",
+        "message": "AI review re-run queued.",
+        "matter_id": row.get("matter_id"),
+        "document_id": row.get("document_id"),
+    }
 
 
 @v1.get("/jobs/{job_id}/report")

@@ -188,6 +188,13 @@ export async function uploadExhibit(file, submittedBy = "court-staff") {
   return readJson(res);
 }
 
+export async function rerunAiReview(jobId) {
+  const res = await analysisFetch(`/api/v1/jobs/${jobId}/rerun-ai-review`, {
+    method: "POST",
+  });
+  return readJson(res);
+}
+
 export async function getJob(jobId, { includeReport = false } = {}) {
   const cs = desktop();
   if (cs) {

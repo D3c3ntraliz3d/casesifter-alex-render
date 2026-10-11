@@ -33,6 +33,7 @@ import {
   getDesktopReport,
   isDesktopApp,
   rescanCase,
+  rerunAiReview,
   recomputeMatterFacts,
   retitleCaseDocuments,
   saveLicense,
@@ -1991,6 +1992,35 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
     }
   }
 
+  async function rerunAi(doc) {
+    const jobId = doc.scan_job_id;
+    if (!jobId) {
+      onError("No prior scan job available for AI re-run. Use Re-scan instead.");
+      return;
+    }
+    setBusy(true);
+    setScanBacklogError("");
+    onError("");
+    try {
+      await rerunAiReview(jobId);
+      setUploadNote(`AI review re-run queued for ${doc.display_name || doc.original_filename || "file"}.`);
+      // Poll until the Gemini stage finishes so the badge can clear.
+      for (let i = 0; i < 120; i += 1) {
+        const progress = await getJob(jobId);
+        if (progress.status === "complete" || progress.status === "failed") break;
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+      await onRefresh();
+    } catch (err) {
+      const msg = err?.message || String(err) || "AI review re-run failed.";
+      onError(msg);
+      setScanBacklogError(msg);
+      setUploadNote("");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function scanWaitingNow() {
     if (!waitingDocs.length || scanningRef.current) return;
     setBusy(true);
@@ -2516,12 +2546,22 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
                   {doc.last_error ? (
                     <div className="footnote" style={{ color: "var(--red)" }}>{doc.last_error}</div>
                   ) : null}
+                  {doc.ai_review === "incomplete" ? (
+                    <div className="ai-review-badge" title={doc.ai_review_reason || "AI review incomplete"}>
+                      AI review incomplete — re-run
+                    </div>
+                  ) : null}
                 </td>
                 <td className="row-actions">
                   <div className="doc-actions">
                     {doc.status === "complete" && (
                       <button className="btn gold" type="button" onClick={() => onOpenReport(doc)}>
                         Report
+                      </button>
+                    )}
+                    {doc.status === "complete" && doc.ai_review === "incomplete" && (
+                      <button className="btn secondary" type="button" disabled={busy} onClick={() => rerunAi(doc)}>
+                        Re-run AI review
                       </button>
                     )}
                     {(doc.status === "failed" || doc.status === "uploaded" || doc.status === "complete") && (
@@ -3914,6 +3954,47 @@ function ReportViewer({
                   : "exhibit forensic"}
                 {report.comparison.doc_kind ? ` · kind ${report.comparison.doc_kind}` : ""}
               </p>
+            )}
+            {(report.ai_review === "incomplete" || report.comparison?.ai_review === "incomplete") && (
+              <div className="ai-review-banner">
+                <div>
+                  <p>AI review incomplete — re-run</p>
+                  <p className="footnote">
+                    Gemini did not finish ({report.ai_review_reason || report.comparison?.ai_review_reason || "error"}).
+                    Local OCR results were kept; this re-runs AI only.
+                  </p>
+                </div>
+                <button
+                  className="btn secondary"
+                  type="button"
+                  onClick={async () => {
+                    const jobId = job?.job_id || report.job_id;
+                    if (!jobId) {
+                      onError?.("No job id for AI re-run.");
+                      return;
+                    }
+                    try {
+                      await rerunAiReview(jobId);
+                      let progress = null;
+                      for (let i = 0; i < 120; i += 1) {
+                        progress = await getJob(jobId, { includeReport: true });
+                        if (progress.status === "complete" || progress.status === "failed") break;
+                        await new Promise((r) => setTimeout(r, 1000));
+                      }
+                      const doc = documents.find((d) => d.id === documentId)
+                        || { id: documentId, scan_job_id: jobId, display_name: documentName };
+                      if (onOpenReport && doc?.id) onOpenReport({ ...doc, scan_job_id: jobId });
+                      else if (progress?.status === "failed") {
+                        onError?.(progress.error || progress.message || "AI review re-run failed.");
+                      }
+                    } catch (err) {
+                      onError?.(err?.message || "AI review re-run failed.");
+                    }
+                  }}
+                >
+                  Re-run AI review
+                </button>
+              </div>
             )}
           </div>
           <div className="actions">

@@ -316,6 +316,9 @@ def run_gemini_stage(
     peak_rss_mb: float | None = None,
 ) -> Report:
     """Multimodal / claims / AI facts / gotchas / report. Reads local_stage.json."""
+    from app.gemini_review_state import get_ai_review_failure, reset_ai_review_state
+
+    reset_ai_review_state()
     gemini_timing.reset()
     gemini_started = time.monotonic()
     stage_path = _local_stage_path(job_id)
@@ -593,6 +596,16 @@ def run_gemini_stage(
         "text_excerpt": (full_text or "")[:24000],
     }
 
+    fail_reason = get_ai_review_failure()
+    if fail_reason:
+        ai_review = "incomplete"
+        ai_review_reason = fail_reason
+    else:
+        ai_review = "complete" if settings.gemini_api_key else None
+        ai_review_reason = None
+    comparison["ai_review"] = ai_review
+    comparison["ai_review_reason"] = ai_review_reason
+
     risk_level, risk_score, score_drivers = score_risk_details(findings)
     comparison["score_drivers"] = score_drivers
     top = pick_top_findings(findings)
@@ -614,6 +627,8 @@ def run_gemini_stage(
         job_id=job_id,
         risk_level=risk_level,
         risk_score=risk_score,
+        ai_review=ai_review,
+        ai_review_reason=ai_review_reason,
         executive_summary=executive_summary(risk_level, report_name, findings),
         top_findings=top,
         recommended_actions=recommended_actions(risk_level, findings),
@@ -654,16 +669,34 @@ def run_gemini_stage(
     }
     comparison["timing"] = timing
 
+    if ai_review == "incomplete":
+        complete_msg = (
+            f"Scan finished but AI review is incomplete ({ai_review_reason or 'error'}). Re-run AI review."
+        )
+        try:
+            (job_dir(job_id) / "retain_local_stage.flag").write_text(
+                ai_review_reason or "error", encoding="utf-8"
+            )
+        except OSError:
+            logger.debug("retain_local_stage flag write failed job=%s", job_id[:8], exc_info=True)
+    else:
+        complete_msg = (
+            "Court-filing scan complete (content + case comparison)."
+            if court_filing
+            else "Exhibit forensic scan complete."
+        )
+        flag = job_dir(job_id) / "retain_local_stage.flag"
+        if flag.exists():
+            try:
+                flag.unlink()
+            except OSError:
+                pass
     update_job(
         job_id,
         status="complete",
         stage="complete",
         percent=100,
-        message=(
-            "Court-filing scan complete (content + case comparison)."
-            if court_filing
-            else "Exhibit forensic scan complete."
-        ),
+        message=complete_msg,
         report=report,
     )
     _write_timing(job_id, timing, peak_rss_mb=peak_rss_mb)

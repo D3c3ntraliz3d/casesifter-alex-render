@@ -36,5 +36,9 @@ def set_current_job(job_id: str | None) -> None:
     _tls.job_id = job_id
 
 
+def current_job_id() -> str | None:
+    return getattr(_tls, "job_id", None)
+
+
 class CancelledError(RuntimeError):
     """Raised when a Gemini stage cancel flag is set between calls."""

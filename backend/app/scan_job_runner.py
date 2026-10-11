@@ -204,13 +204,31 @@ def execute_gemini_stage(payload: dict[str, Any]) -> dict[str, Any]:
     terminal_error = None
     document_id = None
     timing = None
+    ai_review = None
+    ai_review_reason = None
     try:
         try:
-            report = run_gemini_stage(job_id, dest, peak_rss_mb=peak_rss)
+            # Source may be gone on AI-only re-run; prefer path if present.
+            source_path = Path(dest) if dest else Path(".")
+            if not source_path.is_file():
+                from app.storage import job_dir as _job_dir
+
+                stage_path = _job_dir(job_id) / "local_stage.json"
+                source_name = "document.pdf"
+                if stage_path.is_file():
+                    try:
+                        source_name = (
+                            json.loads(stage_path.read_text(encoding="utf-8")).get("source_name")
+                            or source_name
+                        )
+                    except Exception:
+                        pass
+                source_path = _job_dir(job_id) / Path(str(source_name)).name
+            report = run_gemini_stage(job_id, source_path, peak_rss_mb=peak_rss)
             if persist and matter_id and firm_ctx and report is not None:
                 document_id = _persist_pipeline_result(
                     job_id=job_id,
-                    source=dest,
+                    source=source_path,
                     report=report,
                     matter_id=matter_id,
                     firm_ctx=firm_ctx,
@@ -230,6 +248,12 @@ def execute_gemini_stage(payload: dict[str, Any]) -> dict[str, Any]:
             else:
                 terminal_status = "complete"
                 terminal_message = "Analysis complete."
+            if report is not None:
+                ai_review = getattr(report, "ai_review", None)
+                ai_review_reason = getattr(report, "ai_review_reason", None)
+            else:
+                ai_review = None
+                ai_review_reason = None
             try:
                 from app.storage import job_dir
 
@@ -270,6 +294,8 @@ def execute_gemini_stage(payload: dict[str, Any]) -> dict[str, Any]:
             message=terminal_message,
             error=terminal_error,
             document_id=document_id,
+            ai_review=ai_review if terminal_status == "complete" else None,
+            ai_review_reason=ai_review_reason if terminal_status == "complete" else None,
         )
         logger.info(
             "gemini stage end job=%s status=%s web_rss_mb=%s timing=%s",

@@ -52,19 +52,32 @@ def maybe_delete_after_terminal(job_id: str, *, retain_report: bool = False) -> 
             delete_disk_reports(job_id)
 
 
-def delete_ephemeral_source(job_id: str) -> None:
+def delete_ephemeral_source(job_id: str, *, retain_stage: bool | None = None) -> None:
     """Drop the uploaded bytes. Log the job id only — never a filename or content."""
     if not settings.ephemeral_jobs:
         return
-    _delete_source_bytes(job_id)
-    logger.info("deleted ephemeral source bytes job=%s", job_id)
+    if retain_stage is None:
+        retain_stage = (job_dir(job_id) / "retain_local_stage.flag").exists()
+    _delete_source_bytes(job_id, retain_stage=bool(retain_stage))
+    logger.info(
+        "deleted ephemeral source bytes job=%s retain_stage=%s",
+        job_id,
+        bool(retain_stage),
+    )
 
 
-def _delete_source_bytes(job_id: str) -> None:
+def _delete_source_bytes(job_id: str, *, retain_stage: bool = False) -> None:
     root = job_dir(job_id)
     if not root.exists():
         return
     skip = {"progress.json", "report.json", "report.html", "report.pdf", "persist.flag"}
+    if retain_stage:
+        skip |= {
+            "local_stage.json",
+            "gemini_payload.json",
+            "retain_local_stage.flag",
+            "timing.json",
+        }
     for path in list(root.iterdir()):
         if path.name in skip:
             continue
@@ -98,10 +111,13 @@ def sweep_stale_jobs() -> int:
             continue
         progress = load_progress(child.name)
         terminal = progress is None or progress.status in {"complete", "failed"}
-        if terminal and age >= ttl:
+        retain_stage = (child / "retain_local_stage.flag").exists()
+        # Keep incomplete-AI artifacts longer so Gemini-only re-run can use them.
+        effective_ttl = ttl * 4 if retain_stage else ttl
+        if terminal and age >= effective_ttl:
             shutil.rmtree(child, ignore_errors=True)
             removed += 1
-        elif age >= ttl * 2:
+        elif age >= ttl * 2 and not retain_stage:
             # Abandoned running jobs
             shutil.rmtree(child, ignore_errors=True)
             removed += 1
