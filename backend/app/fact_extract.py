@@ -270,6 +270,8 @@ def extract_facts(
     ai_usage_out: dict[str, Any] | None = None,
     document_label: str | None = None,
     enable_ai: bool = True,
+    doc_kind: str | None = None,
+    scan_profile: str | None = None,
 ) -> list[dict[str, Any]]:
     body = text or ""
     facts: list[dict[str, Any]] = []
@@ -294,6 +296,8 @@ def extract_facts(
                     ai_usage_out=ai_usage_out,
                     document_label=document_label,
                     enable_ai=enable_ai,
+                    doc_kind=doc_kind,
+                    scan_profile=scan_profile,
                 )
     except Exception:
         pass
@@ -343,6 +347,8 @@ def extract_facts(
                     ai_usage_out=ai_usage_out,
                     document_label=document_label,
                     enable_ai=enable_ai,
+                    doc_kind=doc_kind,
+                    scan_profile=scan_profile,
                 )
 
     for match in RATE_RE.finditer(body):
@@ -368,6 +374,8 @@ def extract_facts(
                     ai_usage_out=ai_usage_out,
                     document_label=document_label,
                     enable_ai=enable_ai,
+                    doc_kind=doc_kind,
+                    scan_profile=scan_profile,
                 )
 
     for key, pattern in DATE_PATTERNS:
@@ -391,6 +399,8 @@ def extract_facts(
                     ai_usage_out=ai_usage_out,
                     document_label=document_label,
                     enable_ai=enable_ai,
+                    doc_kind=doc_kind,
+                    scan_profile=scan_profile,
                 )
 
     return _finalize_facts(
@@ -401,6 +411,8 @@ def extract_facts(
                     ai_usage_out=ai_usage_out,
                     document_label=document_label,
                     enable_ai=enable_ai,
+                    doc_kind=doc_kind,
+                    scan_profile=scan_profile,
                 )
 
 
@@ -413,6 +425,8 @@ def _finalize_facts(
     ai_usage_out: dict[str, Any] | None = None,
     document_label: str | None = None,
     enable_ai: bool = True,
+    doc_kind: str | None = None,
+    scan_profile: str | None = None,
 ) -> list[dict[str, Any]]:
     from app.page_anchors import enrich_fact_anchors
 
@@ -431,6 +445,9 @@ def _finalize_facts(
             page_offsets=page_offsets,
             limit=max(4, limit // 3),
             document_label=document_label,
+            doc_kind=doc_kind,
+            scan_profile=scan_profile,
+            chunk_id="full",
         )
         if ai_usage_out is not None:
             ai_usage_out.clear()

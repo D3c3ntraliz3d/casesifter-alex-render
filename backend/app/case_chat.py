@@ -142,6 +142,9 @@ def ask_case(
         prior = "Recent thread:\n" + "\n".join(bits) + "\n\n"
 
     try:
+        from app.gemini_tasks import TASK_B_ENTITY, task_config
+
+        entity = task_config(TASK_B_ENTITY)
         body = _post_gemini(
             {
                 "contents": [
@@ -166,9 +169,14 @@ def ask_case(
                         ],
                     }
                 ],
-                "generationConfig": _generation_config(CHAT_SCHEMA, settings.gemini_thinking_level),
+                "generationConfig": _generation_config(
+                    CHAT_SCHEMA, entity.thinking_level, model=entity.primary
+                ),
             },
             timeout=max(settings.gemini_timeout_s, 45),
+            task=TASK_B_ENTITY,
+            step="case_chat",
+            chunk_id="chat",
         )
         parsed = _parse_json_payload(body)
     except Exception:
@@ -285,6 +293,9 @@ def ask_case_from_packet(
         FOCUS_BLOCK.format(name=focus_name, kind=focus_kind or "unknown") if focus_name else ""
     )
     try:
+        from app.gemini_tasks import TASK_B_ENTITY, task_config
+
+        entity = task_config(TASK_B_ENTITY)
         body = _post_gemini(
             {
                 "contents": [
@@ -302,9 +313,14 @@ def ask_case_from_packet(
                         ],
                     }
                 ],
-                "generationConfig": _generation_config(CHAT_SCHEMA, settings.gemini_thinking_level),
+                "generationConfig": _generation_config(
+                    CHAT_SCHEMA, entity.thinking_level, model=entity.primary
+                ),
             },
             timeout=max(settings.gemini_timeout_s, 45),
+            task=TASK_B_ENTITY,
+            step="case_chat",
+            chunk_id="chat",
         )
         parsed = _parse_json_payload(body)
     except Exception:

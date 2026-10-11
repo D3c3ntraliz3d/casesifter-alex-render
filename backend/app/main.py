@@ -111,12 +111,18 @@ def _startup() -> None:
     except Exception as exc:
         logger.warning("local_done recovery failed: %s", exc)
     from app.config import gemini_model_is_valid
+    from app.gemini_tasks import startup_validate_and_probe, task_config, TASK_D_VISUAL
 
-    model_ok = gemini_model_is_valid(settings.gemini_model)
+    try:
+        visual_primary = task_config(TASK_D_VISUAL).primary
+    except Exception:
+        visual_primary = ""
+    model_ok = gemini_model_is_valid(visual_primary)
+    startup_validate_and_probe()
     if not model_ok:
         # Never echo a malformed/secret-shaped model string into logs.
         logger.error(
-            "GEMINI_MODEL failed validation (expected ^gemini-[\\w.-]+$). "
+            "TASK_D_VISUAL_PRIMARY failed validation (expected ^gemini-[\\w.-]+$). "
             "Multimodal Gemini path disabled. APP_MODE=%s",
             _mode,
         )
@@ -133,7 +139,7 @@ def _startup() -> None:
         )
     elif not model_ok:
         logger.error(
-            "Refusing multimodal Gemini calls: GEMINI_MODEL does not match "
+            "Refusing multimodal Gemini calls: TASK_D_VISUAL_PRIMARY does not match "
             "^gemini-[\\w.-]+$. Fix the env var before enabling CONTEXTUAL_MULTIMODAL."
         )
     else:
@@ -148,7 +154,7 @@ def _startup() -> None:
         settings.persist_facts,
         settings.source_file_retention,
         max(1, int(settings.scan_max_concurrent or 1)),
-        max(1, int(settings.gemini_max_concurrent or 4)),
+        max(1, int(settings.gemini_max_concurrent or 2)),
         max(16, int(settings.gemini_max_inflight_mb or 150)),
     )
     try:

@@ -42,11 +42,19 @@ def test_post_gemini_429_then_402_marks_billing(monkeypatch):
     monkeypatch.setattr(cl.settings, "gemini_api_key", "test-key", raising=False)
     monkeypatch.setattr(cl.settings, "gemini_timeout_s", 5, raising=False)
 
+    from app.gemini_tasks import TASK_A_EXTRACT
+
     with pytest.raises(RuntimeError, match="HTTP 402"):
-        cl._post_gemini({"contents": [{"role": "user", "parts": [{"text": "x"}]}]})
+        cl._post_gemini(
+            {"contents": [{"role": "user", "parts": [{"text": "x"}]}]},
+            task=TASK_A_EXTRACT,
+            step="test",
+            chunk_id="t",
+        )
 
     assert get_ai_review_failure() == "billing"
-    assert calls["n"] == 3  # two 429 retries then 402
+    # Primary: 429, 429, then 402 (non-retryable) — stops before backup.
+    assert calls["n"] == 3
     set_current_job(None)
 
 

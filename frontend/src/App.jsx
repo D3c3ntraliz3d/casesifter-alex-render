@@ -1841,8 +1841,9 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
                   : "";
               const queueLabel =
                 typeof pos === "number" && pos > 0 ? ` · queue #${pos}` : "";
-              const stage =
-                progress.status === "local_done"
+              const stage = /gemini busy/i.test(String(progress.message || ""))
+                ? "Gemini busy, retrying"
+                : progress.status === "local_done"
                   ? "waiting for Gemini"
                   : progress.message || progress.stage || "analyzing";
               setUploadNote(
@@ -3717,6 +3718,7 @@ function ProgressPanel({ job, filename }) {
   const current = job.stage;
   const pos = job.queue_position;
   const eta = job.eta_seconds;
+  const busyRetry = /gemini busy/i.test(String(job.message || ""));
   const etaLabel =
     typeof eta === "number" && eta > 0
       ? eta >= 60
@@ -3725,9 +3727,9 @@ function ProgressPanel({ job, filename }) {
       : null;
   return (
     <div className="card">
-      <p className="kicker">Analyzing</p>
+      <p className="kicker">{busyRetry ? "Gemini busy" : "Analyzing"}</p>
       <h2 className="serif" style={{ marginTop: 4 }}>{filename}</h2>
-      <p>{job.message}</p>
+      <p>{busyRetry ? "Gemini busy, retrying…" : job.message}</p>
       {(typeof pos === "number" || etaLabel) && (
         <p className="footnote" style={{ marginTop: 4 }}>
           {typeof pos === "number" ? `Queue position ${pos}` : ""}

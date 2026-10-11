@@ -34,13 +34,10 @@ def _job_prefix() -> str:
     return job[:8] if job else "-"
 
 
-def _retry_delay(attempt: int, headers) -> float:
-    retry_after = headers.get("Retry-After") if headers else None
-    try:
-        delay = float(retry_after) if retry_after else (1.5 * (2**attempt))
-    except (TypeError, ValueError):
-        delay = 1.5 * (2**attempt)
-    return min(60.0, max(0.5, delay))
+def _retry_delay(attempt: int, headers, *, code: int = 503) -> float:
+    from app.engines.contextual_logic import gemini_retry_delay
+
+    return gemini_retry_delay(attempt, headers, code=code)
 
 
 def _urlopen_with_retries(
@@ -80,7 +77,14 @@ def _urlopen_with_retries(
                     note_ai_review_failure(reason)
                 raise RuntimeError(f"Gemini Files HTTP {exc.code}: {detail}") from exc
             if exc.code in (429, 500, 502, 503, 504) and attempt + 1 < _MAX_ATTEMPTS:
-                time.sleep(_retry_delay(attempt, exc.headers))
+                try:
+                    from app.engines.contextual_logic import _notify_gemini_busy
+                    from app.gemini_cancel import current_job_id
+
+                    _notify_gemini_busy(current_job_id() or "")
+                except Exception:
+                    pass
+                time.sleep(_retry_delay(attempt, exc.headers, code=exc.code))
                 last_err = RuntimeError(f"Gemini Files HTTP {exc.code}: {detail}")
                 last_reason = reason
                 continue

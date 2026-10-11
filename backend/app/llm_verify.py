@@ -62,12 +62,20 @@ def ask_verify(
 
 def _gemini_verify(prompt: str, verify_schema: dict[str, Any], first_fail) -> dict[int, dict[str, Any]]:
     try:
+        from app.gemini_tasks import TASK_C_CONTRA, task_config
+
+        contra = task_config(TASK_C_CONTRA)
         body = _post_gemini(
             {
                 "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                "generationConfig": _generation_config(verify_schema, settings.gemini_thinking_level),
+                "generationConfig": _generation_config(
+                    verify_schema, contra.thinking_level, model=contra.primary
+                ),
             },
             timeout=max(settings.gemini_timeout_s, 45),
+            task=TASK_C_CONTRA,
+            step="gotcha_verify",
+            chunk_id="verify",
         )
         parsed = _parse_json_payload(body)
     except Exception:

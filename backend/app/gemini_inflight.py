@@ -28,7 +28,7 @@ def _ensure() -> None:
         return
     from app.config import settings
 
-    _MAX_CALLS = max(1, int(settings.gemini_max_concurrent or 4))
+    _MAX_CALLS = max(1, int(settings.gemini_max_concurrent or 2))
     mb = max(16, int(settings.gemini_max_inflight_mb or 150))
     _MAX_BYTES = mb * 1024 * 1024
     _SEM = threading.Semaphore(_MAX_CALLS)

@@ -50,16 +50,42 @@ services:
         value: "30"
       - key: ANALYSIS_API_KEYS
         sync: false
-      # Keys + model live only in Dashboard (sync:false) so blueprint sync cannot overwrite.
+      # Keys live only in Dashboard (sync:false) so blueprint sync cannot overwrite.
       - key: GEMINI_API_KEY
-        sync: false
-      - key: GEMINI_MODEL
         sync: false
       - key: CONTEXTUAL_MULTIMODAL
         value: "true"
       - key: OCR_MAX_PAGES
         value: "40"
+      # Per-task Gemini models (no gemini-2.0-flash).
+      - key: TASK_A_EXTRACT_PRIMARY
+        value: "gemini-3.6-flash"
+      - key: TASK_A_EXTRACT_BACKUP
+        value: "gemini-3.5-flash-lite"
+      - key: TASK_A_EXTRACT_THINKING_LEVEL
+        value: "minimal"
+      - key: TASK_B_ENTITY_PRIMARY
+        value: "gemini-3.8-flash"
+      - key: TASK_B_ENTITY_BACKUP
+        value: "gemini-3.6-flash"
+      - key: TASK_B_ENTITY_THINKING_LEVEL
+        value: "medium"
+      - key: TASK_C_CONTRA_PRIMARY
+        value: "gemini-3.8-flash"
+      - key: TASK_C_CONTRA_BACKUP
+        value: "gemini-3.6-flash"
+      - key: TASK_C_CONTRA_THINKING_LEVEL
+        value: "high"
+      - key: TASK_D_VISUAL_PRIMARY
+        value: "gemini-3.8-flash"
+      - key: TASK_D_VISUAL_BACKUP
+        value: "gemini-3.6-flash"
+      - key: TASK_D_VISUAL_THINKING_LEVEL
+        value: "medium"
+      - key: GEMINI_SERVICE_TIER
+        value: "standard"
       # Concurrency / memory caps: Dashboard-owned after Standard upgrade.
+      # Keep GEMINI_MAX_CONCURRENT=2 while Google 503/overloaded rates are high.
       - key: SCAN_MAX_CONCURRENT
         sync: false
       - key: GEMINI_MAX_CONCURRENT
@@ -199,6 +225,84 @@ services:
       - key: GEMINI_STAGE_TIMEOUT_S
         value: "900"
       - key: SENTRY_DSN
+        sync: false
+      - key: SENTRY_BACKEND_DSN
+        sync: false
+      - key: SENTRY_ENVIRONMENT
+        value: production
+
+  # Portable scan worker (Phase 1). Gemini runs here when SCAN_BACKEND=worker on analysis.
+  # Until that flag is set, casesifter-analysis still executes Gemini inline.
+  - type: worker
+    name: casesifter-worker
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    dockerCommand: python -m worker.main
+    buildFilter:
+      paths:
+        - backend/**
+        - render.yaml
+    envVars:
+      - fromGroup: casesifter-auth
+      - key: APP_MODE
+        value: analysis
+      - key: APP_ENV
+        value: production
+      - key: SCAN_BACKEND
+        value: worker
+      - key: BLOB_BACKEND
+        value: local
+      - key: QUEUE_BACKEND
+        value: local
+      - key: WORKER_SERVICE_TOKEN
+        sync: false
+      - key: WORKER_CALLBACK_BASE_URL
+        value: https://casesifter-analysis.onrender.com
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: CONTEXTUAL_MULTIMODAL
+        value: "true"
+      - key: OCR_MAX_PAGES
+        value: "40"
+      # Same per-task Gemini models as casesifter-analysis (no gemini-2.0-flash).
+      - key: TASK_A_EXTRACT_PRIMARY
+        value: "gemini-3.6-flash"
+      - key: TASK_A_EXTRACT_BACKUP
+        value: "gemini-3.5-flash-lite"
+      - key: TASK_A_EXTRACT_THINKING_LEVEL
+        value: "minimal"
+      - key: TASK_B_ENTITY_PRIMARY
+        value: "gemini-3.8-flash"
+      - key: TASK_B_ENTITY_BACKUP
+        value: "gemini-3.6-flash"
+      - key: TASK_B_ENTITY_THINKING_LEVEL
+        value: "medium"
+      - key: TASK_C_CONTRA_PRIMARY
+        value: "gemini-3.8-flash"
+      - key: TASK_C_CONTRA_BACKUP
+        value: "gemini-3.6-flash"
+      - key: TASK_C_CONTRA_THINKING_LEVEL
+        value: "high"
+      - key: TASK_D_VISUAL_PRIMARY
+        value: "gemini-3.8-flash"
+      - key: TASK_D_VISUAL_BACKUP
+        value: "gemini-3.6-flash"
+      - key: TASK_D_VISUAL_THINKING_LEVEL
+        value: "medium"
+      - key: GEMINI_SERVICE_TIER
+        value: "standard"
+      - key: GEMINI_MAX_CONCURRENT
+        sync: false
+      - key: GEMINI_MAX_INFLIGHT_MB
+        sync: false
+      - key: GEMINI_STAGE_TIMEOUT_S
+        value: "900"
+      - key: GEMINI_ORPHAN_SOURCE_GRACE_S
+        value: "60"
+      - key: DATABASE_URL
+        sync: false
+      - key: FACT_MEMORY_MASTER_KEY
         sync: false
       - key: SENTRY_BACKEND_DSN
         sync: false

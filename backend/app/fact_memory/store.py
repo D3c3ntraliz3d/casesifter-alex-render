@@ -1720,3 +1720,11 @@ def reset_store() -> None:
     with _store_lock:
         _default_store = None
         reset_engine()
+    # Tests often rotate FACT_MEMORY_MASTER_KEY between cases; drop the
+    # process-wide Fernet cache so the next store uses the current env key.
+    try:
+        from app.fact_memory.encryption import master_fernet
+
+        master_fernet.cache_clear()
+    except Exception:
+        pass
