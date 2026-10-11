@@ -603,7 +603,8 @@ class FactMemoryStore:
                                 phase="docs",
                             )
                         continue
-                    facts = extract_facts(text)
+                    # Offline recompute — regex/graph only; never spend Gemini here.
+                    facts = extract_facts(text, enable_ai=False)
                     for fact in facts:
                         if isinstance(fact, dict) and not fact.get("document_id"):
                             fact["document_id"] = doc.id
