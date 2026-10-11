@@ -90,11 +90,13 @@ services:
         sync: false
       - key: SENTRY_ENVIRONMENT
         value: production
-      # --- Scale Phase 3 (worker path). Stays inline until we flip SCAN_BACKEND=worker.
+      # --- Scale Phase 3: scans run on casesifter-scan-worker (R2 + Redis).
+      # Rollback: set back to inline (revert this commit) — the analysis service
+      # then runs scans itself again.
       # R2 keys + WORKER_SERVICE_TOKEN come from a Dashboard env group linked by hand
       # (not declared here, so a sync can never blank them).
       - key: SCAN_BACKEND
-        value: inline
+        value: worker
       - key: BLOB_BACKEND
         value: s3
       - key: QUEUE_BACKEND
