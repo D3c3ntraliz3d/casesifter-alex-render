@@ -164,6 +164,12 @@ services:
           property: hostport
       - key: WORKER_MAX_ATTEMPTS
         value: "3"
+      # Jobs per worker instance, each in its own process. Scans are mostly
+      # waiting on Gemini; watch memory (2 GB) before raising.
+      - key: WORKER_CONCURRENCY
+        value: "3"
+      - key: WORKER_JOB_TIMEOUT_S
+        value: "1800"
       # Pipeline settings (same values as the analysis service).
       - key: GEMINI_API_KEY
         sync: false
