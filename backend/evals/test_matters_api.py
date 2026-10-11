@@ -89,6 +89,18 @@ def test_matters_crud_and_job_matter_id(tmp_path, monkeypatch):
     monkeypatch.setattr("app.main.settings", settings)
     monkeypatch.setattr("app.v1_analysis.settings", settings)
     monkeypatch.setattr("app.ephemeral.settings", settings)
+    # Every already-imported module that bound the old Settings at import time
+    # (app.storage, scan executors, …) must see this test's DATA_DIR too —
+    # otherwise the parent writes the job under a previous test's data dir while
+    # the spawned scan child (fresh env) can't find it ("Unknown job").
+    import sys
+
+    for name, mod in list(sys.modules.items()):
+        if not (name == "app" or name.startswith("app.") or name.startswith("worker.")):
+            continue
+        current = getattr(mod, "settings", None)
+        if current is not None and current is not settings and current.__class__.__name__ == "Settings":
+            monkeypatch.setattr(mod, "settings", settings)
 
     import importlib
     import app.main as main_mod
@@ -155,6 +167,12 @@ def test_matters_crud_and_job_matter_id(tmp_path, monkeypatch):
         if p.is_file() and p.name.lower() in {"voe.txt"} or (p.suffix.lower() in {".txt", ".docx"} and not p.name.startswith("report"))
     ]
     # Source upload must be gone; generated report.pdf/html/json may remain for persist firms.
+    # Status flips to complete inside the pipeline; source cleanup runs in the
+    # runner's finally right after — allow that brief window before asserting.
+    for _ in range(40):
+        if not (root / "voe.txt").exists():
+            break
+        time.sleep(0.05)
     assert not (root / "voe.txt").exists(), "source upload must be deleted after run"
 
     refreshed = client.get(f"/api/v1/matters/{matter_id}", headers=headers)

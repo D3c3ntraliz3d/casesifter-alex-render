@@ -10,6 +10,7 @@ from app.fact_memory.matters_api import matters_router
 from app.fact_memory.store import get_store
 from app.scan_watchdog import ensure_watchdog
 from app.sentry_scrub import init_sentry
+from app.internal_jobs import internal_router
 from app.v1_analysis import v1
 import os
 
@@ -48,10 +49,12 @@ if _mode == "analysis":
     app.include_router(public_router, prefix="/api")
     app.include_router(v1, prefix="/api")
     app.include_router(matters_router, prefix="/api")
+    app.include_router(internal_router, prefix="/api")
 else:
     app.include_router(router, prefix="/api")
     app.include_router(v1, prefix="/api")
     app.include_router(matters_router, prefix="/api")
+    app.include_router(internal_router, prefix="/api")
 
 
 init_sentry(service="analysis-api")

@@ -10,6 +10,95 @@ logger = logging.getLogger("uvicorn.error")
 
 
 def recover_local_done_jobs() -> dict[str, int]:
+    """Resume Gemini when artifacts+source exist; otherwise requeue from local.
+
+    When ``SCAN_BACKEND=worker``, source bytes live in the blob store — never call
+    the inline scan/gemini executors; re-enqueue to the worker queue instead.
+    """
+    from app.scan_dispatch import scan_backend
+
+    backend = scan_backend()
+    if backend in {"worker", "local_worker", "cloudrun"}:
+        return _recover_worker_jobs()
+    return _recover_inline_local_done_jobs()
+
+
+def _recover_worker_jobs() -> dict[str, int]:
+    """Re-enqueue worker jobs stuck mid-flight when the blob bundle still exists."""
+    from app.blob_store import get_blob_store, job_meta_key
+    from app.ephemeral import delete_ephemeral_source
+    from app.fact_memory.store import get_store
+    from app.job_queue import QueueMessage, get_job_queue
+    from app.storage import update_job
+
+    store = get_store()
+    blob = get_blob_store()
+    queue = get_job_queue()
+    rows = store.list_analysis_jobs_by_status(["local_done", "running", "queued"])
+    resumed = 0
+    requeued = 0
+    failed = 0
+    for row in rows:
+        job_id = row["job_id"]
+        if not blob.exists(job_meta_key(job_id)):
+            try:
+                store.update_analysis_job(
+                    job_id,
+                    status="interrupted",
+                    message="Worker job missing blob bundle after restart; re-submit required.",
+                    error="worker_bundle_missing",
+                )
+                try:
+                    update_job(
+                        job_id,
+                        status="interrupted",
+                        stage="interrupted",
+                        percent=0,
+                        message="Worker bundle missing after restart; re-submit required.",
+                        error="worker_bundle_missing",
+                    )
+                except Exception:
+                    pass
+                delete_ephemeral_source(job_id)
+            except Exception:
+                logger.exception("worker boot interrupt failed job=%s", job_id[:8])
+            failed += 1
+            continue
+        try:
+            store.update_analysis_job(
+                job_id,
+                status="queued",
+                message="Requeued to worker after restart.",
+                error=None,
+            )
+            try:
+                update_job(
+                    job_id,
+                    status="queued",
+                    stage="queued",
+                    percent=0,
+                    message="Requeued to worker after restart.",
+                )
+            except Exception:
+                pass
+            queue.enqueue(
+                QueueMessage(
+                    job_id=job_id,
+                    bundle_prefix=f"jobs/{job_id}",
+                    attempt=int(row.get("attempts") or 1),
+                    firm_id=row.get("firm_id"),
+                    matter_id=row.get("matter_id"),
+                )
+            )
+            requeued += 1
+            logger.info("boot requeue worker job=%s", job_id[:8])
+        except Exception:
+            logger.exception("boot worker requeue failed job=%s", job_id[:8])
+            failed += 1
+    return {"resumed": resumed, "requeued": requeued, "failed": failed, "seen": len(rows)}
+
+
+def _recover_inline_local_done_jobs() -> dict[str, int]:
     """Resume Gemini when artifacts+source exist; otherwise requeue from local."""
     from app.ephemeral import delete_ephemeral_source
     from app.fact_memory.store import get_store

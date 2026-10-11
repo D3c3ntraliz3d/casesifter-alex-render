@@ -30,7 +30,7 @@ from app.ephemeral import (
 )
 from app.models import UploadResponse
 from app.product_events import emit_chat_asked
-from app.scan_executor import ensure_scan_executor, submit_ephemeral_job
+from app.scan_executor import ensure_scan_executor
 from app.scan_watchdog import ensure_watchdog
 from app.storage import create_job, job_dir, load_progress, load_report, update_job
 
@@ -331,6 +331,7 @@ def _upsert_durable_job(
             firm_id=firm_ctx["firm_id"],
             matter_id=matter_id,
             document_id=document_id,
+            user_id=firm_ctx.get("user_id"),
             sha256=sha256,
             status=status,
             message=message,
@@ -570,7 +571,7 @@ async def create_ephemeral_job(
         # Marker so sweeper retains report (facts live in DB; PDF still deleted).
         (dest_dir / "persist.flag").write_text(resolved_matter or "", encoding="utf-8")
 
-    # Schedule off the request thread — backpressure may wait for Gemini slots.
+    # Schedule off the request thread — inline backpressure or worker enqueue.
     ensure_scan_executor()
     payload = {
         "job_id": job_id,
@@ -587,7 +588,9 @@ async def create_ephemeral_job(
 
     def _kick() -> None:
         try:
-            submit_ephemeral_job(payload)
+            from app.scan_dispatch import dispatch_ephemeral_job
+
+            dispatch_ephemeral_job(payload)
         except Exception:
             logger.exception("Failed to schedule analysis job %s", job_id)
 

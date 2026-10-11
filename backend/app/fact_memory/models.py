@@ -221,6 +221,8 @@ class AnalysisJob(Base):
     firm_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("firms.id", ondelete="CASCADE"), nullable=False
     )
+    # Submitting user — used by worker result persist (never trusted from worker body).
+    user_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     matter_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("matters.id", ondelete="SET NULL"), nullable=True
     )
@@ -394,6 +396,8 @@ def ensure_analysis_job_columns(engine) -> None:
         alters.append(
             "ALTER TABLE analysis_jobs ADD COLUMN ai_review_reason VARCHAR(32)"
         )
+    if "user_id" not in have:
+        alters.append("ALTER TABLE analysis_jobs ADD COLUMN user_id VARCHAR(36)")
     if not alters:
         return
     with engine.begin() as conn:

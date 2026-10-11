@@ -121,9 +121,39 @@ def ensure_sweeper() -> None:
                 sweep_stale_jobs()
             except Exception:
                 pass
+            try:
+                sweep_stale_blobs()
+            except Exception:
+                pass
             time.sleep(900)
 
     threading.Thread(target=_loop, daemon=True, name="ephemeral-sweeper").start()
+
+
+def sweep_stale_blobs() -> int:
+    """TTL backstop: delete orphaned job bundles older than blob_ttl_hours."""
+    from app.blob_store import LocalBlobStore, get_blob_store
+
+    store = get_blob_store()
+    if not isinstance(store, LocalBlobStore):
+        return 0
+    root = store.root / "jobs"
+    if not root.is_dir():
+        return 0
+    ttl = max(1, int(settings.blob_ttl_hours or 24)) * 3600
+    now = time.time()
+    removed = 0
+    for child in list(root.iterdir()):
+        if not child.is_dir():
+            continue
+        try:
+            age = now - child.stat().st_mtime
+        except OSError:
+            continue
+        if age >= ttl:
+            shutil.rmtree(child, ignore_errors=True)
+            removed += 1
+    return removed
 
 
 def utc_now_iso() -> str:
