@@ -274,3 +274,61 @@ def test_worker_round_trip_on_s3_and_redis(worker_env, s3_store, redis_queue, mo
     assert not s3_store.exists(job_meta_key(job_id))
     assert not s3_store.exists(job_source_key(job_id, name))
     assert redis_queue.inflight_count() == 0 and redis_queue.ready_count() == 0
+
+
+def test_worker_writes_reports_without_master_key_in_production(worker_env, monkeypatch):  # noqa: F811
+    """Regression: production worker has no FACT_MEMORY_MASTER_KEY; the pipeline's
+    update_job(report=...) must still succeed using the process-local key."""
+    from datetime import datetime, timezone
+
+    import app.storage as storage_mod
+    from app.fact_memory.encryption import master_fernet
+    from app.models import AuditTrail, Report
+    from app.storage import create_job, load_report, update_job
+
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.delenv("FACT_MEMORY_MASTER_KEY", raising=False)
+    master_fernet.cache_clear()
+    monkeypatch.setattr(storage_mod, "_report_fernet_override", None)
+
+    job_id = "8" * 32
+    create_job(job_id, "x.pdf")
+    report = Report(
+        job_id=job_id, risk_level="green", risk_score=1, ai_review="complete",
+        executive_summary="ok", top_findings=[], recommended_actions=[], findings=[],
+        timeline=[], page_dimensions=[], fonts=[], comparison={}, modules=[],
+        audit=AuditTrail(
+            scanned_at=datetime(2026, 1, 1, tzinfo=timezone.utc), analysis_version="t",
+            modules_run=[], submitted_by="t", filename="x.pdf", file_size_bytes=1,
+            file_type="application/pdf", sha256="c" * 64,
+        ),
+        artifact_urls=[],
+    )
+
+    # Without the worker key: fails closed exactly as it did in production.
+    with pytest.raises(RuntimeError, match="FACT_MEMORY_MASTER_KEY"):
+        update_job(job_id, status="complete", report=report)
+
+    storage_mod.use_ephemeral_report_key()
+    update_job(job_id, status="complete", report=report)
+    raw = (storage_mod.job_dir(job_id) / "report.json").read_text()
+    assert raw.startswith(storage_mod._REPORT_ENC_PREFIX)  # still encrypted at rest
+    assert "executive_summary" not in raw
+    assert load_report(job_id).executive_summary == "ok"
+    master_fernet.cache_clear()
+
+
+def test_worker_main_enables_ephemeral_report_key(monkeypatch):
+    """worker.main must switch on the process-local key before polling."""
+    import app.storage as storage_mod
+    import worker.main as wm
+
+    monkeypatch.setattr(storage_mod, "_report_fernet_override", None)
+    monkeypatch.setattr("app.worker_auth.require_worker_token_configured", lambda: None)
+
+    def stop_loop(*a, **k):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("app.job_queue.run_local_worker_loop", stop_loop)
+    wm.main()
+    assert storage_mod._report_fernet_override is not None

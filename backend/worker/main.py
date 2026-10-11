@@ -32,6 +32,11 @@ def main() -> None:
             settings.scan_backend,
         )
     require_worker_token_configured()
+    # Temp reports are encrypted with a process-local random key; the worker
+    # never receives FACT_MEMORY_MASTER_KEY.
+    from app.storage import use_ephemeral_report_key
+
+    use_ephemeral_report_key()
     logger.info(
         "scan worker starting callback=%s blob=%s queue=%s max_attempts=%s",
         settings.worker_callback_base_url,
