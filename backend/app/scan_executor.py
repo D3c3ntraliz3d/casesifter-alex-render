@@ -361,142 +361,148 @@ def submit_ephemeral_job(payload: dict[str, Any]) -> Future:
 
     def _run() -> None:
         global _ACTIVE_PROC, _ACTIVE_JOB
+        # Lease is acquired in _wait_for_local_start. Release on every exit
+        # except a successful handoff to submit_gemini_stage (which owns it).
+        reserved = False
+        handed_to_gemini = False
         try:
-            _wait_for_local_start(job_id)
-        except Exception:
-            logger.exception("local start wait failed job=%s", job_id[:8])
-            # Keep waiting path non-fatal: clear ahead and leave job queued.
-            clear_ahead(job_id)
-            if not out.done():
-                out.set_result({"job_id": job_id, "status": "queued"})
-            return
-
-        pages = _pdf_page_count(payload.get("dest"))
-        timeout = _job_timeout_s(page_count=pages)
-        logger.info(
-            "local process start job=%s pages=%s timeout_s=%.0f web_rss_mb=%s",
-            job_id[:8],
-            pages,
-            timeout,
-            rss_mb(),
-        )
-
-        ctx = mp.get_context("spawn")
-        result_q = ctx.Queue()
-        proc = ctx.Process(
-            target=_local_worker,
-            args=(payload, result_q),
-            name=f"local-{job_id[:8]}",
-            daemon=True,
-        )
-        # Exclusive local slot shared with recompute (512 MB: never overlap).
-        claim_local_slot(job_id, kind="scan")
-        result = None
-        try:
-            bind_local_process(job_id, proc)
-            note_queue_progress()
-            proc.start()
-            # Read the result BEFORE joining. A child that has put data on an
-            # mp.Queue cannot exit until the parent reads it; join-then-get
-            # deadlocked on large results and held the local slot forever.
-            message, timed_out = _await_child_result(proc, result_q, timeout)
-            if timed_out:
-                logger.error(
-                    "local stage timeout job=%s after %.0fs pages=%s — terminating process pid=%s",
-                    job_id[:8],
-                    timeout,
-                    pages,
-                    proc.pid,
-                )
-                _terminate(proc, job_id)
-                # Never read the queue after a kill: a half-written message blocks forever.
-                _discard_queue(result_q)
-                clear_ahead(job_id)
-                try:
-                    _mark_local_timeout(job_id, "local", timeout_s=timeout)
-                except Exception:
-                    logger.exception("mark local timeout failed job=%s", job_id[:8])
-                try:
-                    _maybe_retry_local(payload, job_id)
-                except Exception:
-                    logger.exception("local retry failed job=%s", job_id[:8])
-                if not out.done():
-                    out.set_result({"job_id": job_id, "status": "failed", "timed_out": True})
-                return
-
-            proc.join(timeout=5)
-            if proc.is_alive():
-                _terminate(proc, job_id)
-            _discard_queue(result_q)
             try:
-                if message is None:
-                    raise RuntimeError(
-                        f"local worker exited without a result (exitcode={proc.exitcode})"
-                    )
-                kind, payload_or_err = message
-                if kind == "ok":
-                    result = payload_or_err
-                else:
-                    raise RuntimeError(str(payload_or_err))
-            except Exception as exc:
-                clear_ahead(job_id)
-                logger.exception("scan child crashed job=%s", job_id[:8] if job_id else "?")
-                try:
-                    from app.ephemeral import delete_ephemeral_source
-                    from app.storage import update_job
-                    from app.v1_analysis import _update_durable_job
-
-                    update_job(
-                        job_id,
-                        status="failed",
-                        stage="failed",
-                        percent=100,
-                        message="Analysis worker crashed.",
-                        error=str(exc),
-                    )
-                    _update_durable_job(
-                        job_id,
-                        status="failed",
-                        message="Analysis worker crashed.",
-                        error=str(exc),
-                    )
-                    delete_ephemeral_source(job_id)
-                except Exception:
-                    logger.exception("could not mark crashed job %s failed", job_id[:8])
-                if not out.done():
-                    out.set_exception(exc)
-                return
-
-            status = (result or {}).get("status")
-            if status != "local_done":
-                clear_ahead(job_id)
-                if not out.done():
-                    out.set_result(result)
-                return
-
-            gemini_payload = dict(payload)
-            try:
-                from app.gemini_executor import gemini_payload_path
-                import json
-
-                path = gemini_payload_path(job_id)
-                if path.is_file():
-                    gemini_payload.update(json.loads(path.read_text(encoding="utf-8")))
+                _wait_for_local_start(job_id)
+                reserved = True
             except Exception:
-                logger.debug("gemini payload enrich failed job=%s", job_id[:8], exc_info=True)
-            if result.get("peak_rss_mb") is not None:
-                gemini_payload["peak_rss_mb"] = result["peak_rss_mb"]
+                logger.exception("local start wait failed job=%s", job_id[:8])
+                # Keep waiting path non-fatal: leave job queued.
+                if not out.done():
+                    out.set_result({"job_id": job_id, "status": "queued"})
+                return
+
+            pages = _pdf_page_count(payload.get("dest"))
+            timeout = _job_timeout_s(page_count=pages)
             logger.info(
-                "local done → gemini job=%s peak_rss_mb=%s web_rss_mb=%s",
+                "local process start job=%s pages=%s timeout_s=%.0f web_rss_mb=%s",
                 job_id[:8],
-                result.get("peak_rss_mb"),
+                pages,
+                timeout,
                 rss_mb(),
             )
-            submit_gemini_stage(gemini_payload)
-            if not out.done():
-                out.set_result(result)
+
+            ctx = mp.get_context("spawn")
+            result_q = ctx.Queue()
+            proc = ctx.Process(
+                target=_local_worker,
+                args=(payload, result_q),
+                name=f"local-{job_id[:8]}",
+                daemon=True,
+            )
+            # Exclusive local slot shared with recompute (512 MB: never overlap).
+            claim_local_slot(job_id, kind="scan")
+            result = None
+            try:
+                bind_local_process(job_id, proc)
+                note_queue_progress()
+                proc.start()
+                # Read the result BEFORE joining. A child that has put data on an
+                # mp.Queue cannot exit until the parent reads it; join-then-get
+                # deadlocked on large results and held the local slot forever.
+                message, timed_out = _await_child_result(proc, result_q, timeout)
+                if timed_out:
+                    logger.error(
+                        "local stage timeout job=%s after %.0fs pages=%s — terminating process pid=%s",
+                        job_id[:8],
+                        timeout,
+                        pages,
+                        proc.pid,
+                    )
+                    _terminate(proc, job_id)
+                    # Never read the queue after a kill: a half-written message blocks forever.
+                    _discard_queue(result_q)
+                    try:
+                        _mark_local_timeout(job_id, "local", timeout_s=timeout)
+                    except Exception:
+                        logger.exception("mark local timeout failed job=%s", job_id[:8])
+                    try:
+                        _maybe_retry_local(payload, job_id)
+                    except Exception:
+                        logger.exception("local retry failed job=%s", job_id[:8])
+                    if not out.done():
+                        out.set_result({"job_id": job_id, "status": "failed", "timed_out": True})
+                    return
+
+                proc.join(timeout=5)
+                if proc.is_alive():
+                    _terminate(proc, job_id)
+                _discard_queue(result_q)
+                try:
+                    if message is None:
+                        raise RuntimeError(
+                            f"local worker exited without a result (exitcode={proc.exitcode})"
+                        )
+                    kind, payload_or_err = message
+                    if kind == "ok":
+                        result = payload_or_err
+                    else:
+                        raise RuntimeError(str(payload_or_err))
+                except Exception as exc:
+                    logger.exception("scan child crashed job=%s", job_id[:8] if job_id else "?")
+                    try:
+                        from app.ephemeral import delete_ephemeral_source
+                        from app.storage import update_job
+                        from app.v1_analysis import _update_durable_job
+
+                        update_job(
+                            job_id,
+                            status="failed",
+                            stage="failed",
+                            percent=100,
+                            message="Analysis worker crashed.",
+                            error=str(exc),
+                        )
+                        _update_durable_job(
+                            job_id,
+                            status="failed",
+                            message="Analysis worker crashed.",
+                            error=str(exc),
+                        )
+                        delete_ephemeral_source(job_id)
+                    except Exception:
+                        logger.exception("could not mark crashed job %s failed", job_id[:8])
+                    if not out.done():
+                        out.set_exception(exc)
+                    return
+
+                status = (result or {}).get("status")
+                if status != "local_done":
+                    if not out.done():
+                        out.set_result(result)
+                    return
+
+                gemini_payload = dict(payload)
+                try:
+                    from app.gemini_executor import gemini_payload_path
+                    import json
+
+                    path = gemini_payload_path(job_id)
+                    if path.is_file():
+                        gemini_payload.update(json.loads(path.read_text(encoding="utf-8")))
+                except Exception:
+                    logger.debug("gemini payload enrich failed job=%s", job_id[:8], exc_info=True)
+                if result.get("peak_rss_mb") is not None:
+                    gemini_payload["peak_rss_mb"] = result["peak_rss_mb"]
+                logger.info(
+                    "local done → gemini job=%s peak_rss_mb=%s web_rss_mb=%s",
+                    job_id[:8],
+                    result.get("peak_rss_mb"),
+                    rss_mb(),
+                )
+                submit_gemini_stage(gemini_payload)
+                handed_to_gemini = True
+                if not out.done():
+                    out.set_result(result)
+            finally:
+                release_local_slot(job_id)
         finally:
-            release_local_slot(job_id)
+            if reserved and not handed_to_gemini:
+                clear_ahead(job_id)
 
     threading.Thread(target=_run, daemon=True, name=f"local-wait-{job_id[:8]}").start()
     return out

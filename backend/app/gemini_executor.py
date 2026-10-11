@@ -1,5 +1,8 @@
 """Gemini stage thread pool + local-vs-Gemini backpressure.
 
+Capacity ("ahead") is grounded in live Gemini-stage work plus short-lived local
+pre-reserves — never a bare increment that can stick after error/timeout.
+
 On stage timeout: stop waiting, free the slot, set cancel flag, sticky-fail.
 Delete source when the orphaned thread exits or after grace (60s), whichever first.
 """
@@ -20,8 +23,11 @@ logger = logging.getLogger("uvicorn.error")
 _executor: ThreadPoolExecutor | None = None
 _LOCK = threading.Lock()
 _COND = threading.Condition(_LOCK)
+# Capacity holders: local pre-reserve and/or in-flight Gemini stage (same job_id).
 _AHEAD: set[str] = set()
 _GEMINI_RUNNING: set[str] = set()
+# Inner pool futures still live — used to reconcile stuck leases after exit.
+_GEMINI_PENDING: dict[str, Future] = {}
 _ROLLING_TOTAL_S: deque[float] = deque(maxlen=24)
 _ROLLING_LOCAL_S: deque[float] = deque(maxlen=24)
 _ROLLING_GEMINI_S: deque[float] = deque(maxlen=24)
@@ -64,8 +70,24 @@ def shutdown_gemini_executor() -> None:
     logger.info("gemini thread pool shut down")
 
 
+def _reconcile_done_futures_unlocked() -> None:
+    """Drop leases for Gemini futures that finished without a clear (safety net)."""
+    freed = False
+    for job_id, fut in list(_GEMINI_PENDING.items()):
+        if not fut.done():
+            continue
+        _GEMINI_PENDING.pop(job_id, None)
+        if job_id in _AHEAD and job_id not in _GEMINI_RUNNING:
+            _AHEAD.discard(job_id)
+            freed = True
+    if freed:
+        _COND.notify_all()
+
+
 def ahead_count() -> int:
-    with _LOCK:
+    """Live capacity holders: Gemini-stage work + local pre-reserves."""
+    with _COND:
+        _reconcile_done_futures_unlocked()
         return len(_AHEAD)
 
 
@@ -75,29 +97,56 @@ def gemini_running_count() -> int:
 
 
 def mark_ahead(job_id: str) -> None:
+    """Ensure job holds a capacity lease (idempotent; used on Gemini handoff/resume)."""
+    if not job_id:
+        return
     with _COND:
         _AHEAD.add(job_id)
         _COND.notify_all()
 
 
 def reserve_ahead(job_id: str, *, timeout: float = 600.0) -> bool:
+    """Acquire a capacity lease, waiting on live ahead (reconciled) not a stale counter."""
+    if not job_id:
+        return False
     deadline = time.monotonic() + max(1.0, float(timeout))
     with _COND:
-        while len(_AHEAD) >= _max_ahead():
+        while True:
+            _reconcile_done_futures_unlocked()
+            if job_id in _AHEAD:
+                return True
+            if len(_AHEAD) < _max_ahead():
+                _AHEAD.add(job_id)
+                _COND.notify_all()
+                return True
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return False
             _COND.wait(timeout=min(1.0, remaining))
-        _AHEAD.add(job_id)
-        _COND.notify_all()
-        return True
 
 
 def clear_ahead(job_id: str) -> None:
+    """Release capacity lease and running marker (safe to call more than once)."""
+    if not job_id:
+        return
     with _COND:
         _AHEAD.discard(job_id)
         _GEMINI_RUNNING.discard(job_id)
+        _GEMINI_PENDING.pop(job_id, None)
         _COND.notify_all()
+
+
+def reset_ahead_state_for_tests() -> None:
+    """Test helper: drop all leases and shut down the Gemini pool."""
+    global _executor
+    with _COND:
+        _AHEAD.clear()
+        _GEMINI_RUNNING.clear()
+        _GEMINI_PENDING.clear()
+        _COND.notify_all()
+    if _executor is not None:
+        _executor.shutdown(wait=False, cancel_futures=False)
+        _executor = None
 
 
 def record_timing(timing: dict[str, Any] | None) -> None:
@@ -178,22 +227,30 @@ def submit_gemini_stage(payload: dict[str, Any]) -> Future:
 
     pool = ensure_gemini_executor()
     job_id = str(payload.get("job_id") or "")
+    # Handoff / boot-resume: hold lease for the whole stage (idempotent if local reserved).
     mark_ahead(job_id)
     clear_cancel(job_id)
     note_queue_progress()
 
     def _runner() -> dict[str, Any]:
         set_current_job(job_id)
-        with _LOCK:
+        with _COND:
             _GEMINI_RUNNING.add(job_id)
+            _COND.notify_all()
         try:
             return execute_gemini_stage(payload)
         finally:
             set_current_job(None)
             clear_cancel(job_id)
+            with _COND:
+                _GEMINI_RUNNING.discard(job_id)
+                _COND.notify_all()
+            # Always free the lease when the stage thread exits (success/error).
             clear_ahead(job_id)
 
     future = pool.submit(_runner)
+    with _COND:
+        _GEMINI_PENDING[job_id] = future
     outer: Future = Future()
 
     def _await() -> None:
@@ -216,7 +273,6 @@ def submit_gemini_stage(payload: dict[str, Any]) -> Future:
                 timeout,
             )
             request_cancel(job_id)
-            clear_ahead(job_id)
             progress = load_progress(job_id)
             stage = (progress.stage if progress else None) or "contextual"
             msg = f"Gemini stage timed out after {timeout:.0f}s (last stage: {stage})."
@@ -244,7 +300,6 @@ def submit_gemini_stage(payload: dict[str, Any]) -> Future:
                 outer.set_result({"job_id": job_id, "status": "failed", "timed_out": True})
         except Exception as exc:
             logger.exception("gemini stage crashed job=%s", job_id[:8] if job_id else "?")
-            clear_ahead(job_id)
             try:
                 update_job(
                     job_id,
@@ -265,6 +320,10 @@ def submit_gemini_stage(payload: dict[str, Any]) -> Future:
                 logger.exception("could not mark gemini crash job %s failed", job_id[:8])
             if not outer.done():
                 outer.set_exception(exc)
+        finally:
+            # Timeout frees the slot while the orphaned thread may still run.
+            # Success/error: runner finally also clears — discard is idempotent.
+            clear_ahead(job_id)
 
     threading.Thread(target=_await, daemon=True, name=f"gemini-wait-{job_id[:8]}").start()
     return outer
