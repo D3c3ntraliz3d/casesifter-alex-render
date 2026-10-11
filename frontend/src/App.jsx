@@ -1991,6 +1991,50 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
     }
   }
 
+  function docNeedsLocate(doc) {
+    const sha = String(doc?.sha256 || "").toLowerCase();
+    if (!sha || !isHostedAnalysis()) return false;
+    return Boolean(cacheCoverage?.missingShas?.includes(sha));
+  }
+
+  async function rerunAi(doc) {
+    // Full re-scan via IndexedDB cache (same path as Re-scan). Locate first if missing.
+    setBusy(true);
+    setScanBacklogError("");
+    onError("");
+    try {
+      const sha = String(doc?.sha256 || "").toLowerCase();
+      if (isHostedAnalysis() && sha) {
+        const cached = await localCacheAdapter.hasFile(doc.id, sha).catch(() => false);
+        if (!cached) {
+          const { locateOneExhibit } = await import("./storage/index.js");
+          await locateOneExhibit({
+            exhibitId: doc.id,
+            sha256: sha,
+            byteLength: doc.source_size,
+          });
+        }
+      }
+      const result = await scanDocument(caseData.id, doc.id, doc);
+      setUploadNote(
+        result?.queued
+          ? `AI review re-run queued for ${doc.display_name || doc.original_filename || "file"}.`
+          : `AI review re-run started for ${doc.display_name || doc.original_filename || "file"}.`
+      );
+      await onRefresh();
+    } catch (err) {
+      const msg = err?.message || String(err) || "AI review re-run failed.";
+      const locateHint = /not cached|Locate|re-upload/i.test(msg)
+        ? msg
+        : `${msg} Locate the file to re-run.`;
+      onError(locateHint);
+      setScanBacklogError(locateHint);
+      setUploadNote("");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function scanWaitingNow() {
     if (!waitingDocs.length || scanningRef.current) return;
     setBusy(true);
@@ -2516,12 +2560,22 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
                   {doc.last_error ? (
                     <div className="footnote" style={{ color: "var(--red)" }}>{doc.last_error}</div>
                   ) : null}
+                  {doc.ai_review === "incomplete" ? (
+                    <div className="ai-review-badge" title={doc.ai_review_reason || "AI review incomplete"}>
+                      AI review incomplete — re-run
+                    </div>
+                  ) : null}
                 </td>
                 <td className="row-actions">
                   <div className="doc-actions">
                     {doc.status === "complete" && (
                       <button className="btn gold" type="button" onClick={() => onOpenReport(doc)}>
                         Report
+                      </button>
+                    )}
+                    {doc.status === "complete" && doc.ai_review === "incomplete" && (
+                      <button className="btn secondary" type="button" disabled={busy} onClick={() => rerunAi(doc)}>
+                        {docNeedsLocate(doc) ? "Locate file to re-run" : "Re-run AI review"}
                       </button>
                     )}
                     {(doc.status === "failed" || doc.status === "uploaded" || doc.status === "complete") && (
@@ -3914,6 +3968,79 @@ function ReportViewer({
                   : "exhibit forensic"}
                 {report.comparison.doc_kind ? ` · kind ${report.comparison.doc_kind}` : ""}
               </p>
+            )}
+            {(report.ai_review === "incomplete" || report.comparison?.ai_review === "incomplete") && (
+              <div className="ai-review-banner">
+                <div>
+                  <p>AI review incomplete — re-run</p>
+                  <p className="footnote">
+                    Gemini did not finish (
+                    {report.ai_review_reason || report.comparison?.ai_review_reason || "error"}
+                    ). Re-uploads the file from this computer’s cache and runs the full scan again.
+                  </p>
+                </div>
+                <button
+                  className="btn secondary"
+                  type="button"
+                  disabled={locating}
+                  onClick={async () => {
+                    if (!caseId || !documentId) {
+                      onError?.("No document available for AI re-run.");
+                      return;
+                    }
+                    const doc =
+                      documents.find((d) => d.id === documentId) || {
+                        id: documentId,
+                        display_name: documentName,
+                        sha256: docSha,
+                        scan_job_id: job?.job_id || report.job_id,
+                      };
+                    try {
+                      const sha = String(doc.sha256 || docSha || "").toLowerCase();
+                      if (isHostedAnalysis() && sha) {
+                        const cached = await localCacheAdapter.hasFile(doc.id, sha).catch(() => false);
+                        if (!cached) {
+                          setLocating(true);
+                          const { locateOneExhibit } = await import("./storage/index.js");
+                          await locateOneExhibit({
+                            exhibitId: doc.id,
+                            sha256: sha,
+                            byteLength: report?.audit?.file_size_bytes,
+                          });
+                          setLocating(false);
+                        }
+                      }
+                      const result = await scanDocument(caseId, documentId, doc);
+                      const newJobId = result?.job_id;
+                      if (newJobId) {
+                        let progress = null;
+                        for (let i = 0; i < 180; i += 1) {
+                          progress = await getJob(newJobId, { includeReport: true });
+                          if (progress.status === "complete" || progress.status === "failed") break;
+                          await new Promise((r) => setTimeout(r, 1000));
+                        }
+                        if (progress?.status === "failed") {
+                          onError?.(progress.error || progress.message || "AI review re-run failed.");
+                          return;
+                        }
+                        if (onOpenReport) {
+                          onOpenReport({ ...doc, scan_job_id: newJobId });
+                        }
+                      }
+                    } catch (err) {
+                      setLocating(false);
+                      const msg = err?.message || "AI review re-run failed.";
+                      onError?.(
+                        /not cached|Locate|re-upload/i.test(msg)
+                          ? msg
+                          : `${msg} Locate the file to re-run.`
+                      );
+                    }
+                  }}
+                >
+                  {sourceMissing ? "Locate file to re-run" : "Re-run AI review"}
+                </button>
+              </div>
             )}
           </div>
           <div className="actions">

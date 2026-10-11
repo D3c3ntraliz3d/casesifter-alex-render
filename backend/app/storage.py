@@ -146,6 +146,7 @@ def update_job(
     message: str | None = None,
     error: str | None = None,
     report: Report | None = None,
+    allow_rerun: bool = False,
 ) -> JobProgress:
     """Update job progress. Terminal statuses are sticky — refuse overwrite."""
     with _lock:
@@ -162,7 +163,17 @@ def update_job(
             except Exception:
                 raise FileNotFoundError(f"progress.json not ready for job {job_id}") from exc
         current = progress.status
-        if current in TERMINAL_STATUSES and status is not None and status != current:
+        rerun_ok = (
+            allow_rerun
+            and current == "complete"
+            and status in {"queued", "running", "local_done"}
+        )
+        if (
+            current in TERMINAL_STATUSES
+            and status is not None
+            and status != current
+            and not rerun_ok
+        ):
             logger.info(
                 "sticky status refuse job=%s current=%s attempted=%s",
                 job_id[:8],

@@ -231,13 +231,17 @@ export async function cacheCoverageForDocs(docs = []) {
   }
   const total = unique.size;
   const missing = [];
+  const missingShas = [];
   let cached = 0;
   for (const item of unique.values()) {
     const hit = await localCacheAdapter.hasFile(item.id, item.sha256).catch(() => false);
     if (hit) cached += 1;
-    else missing.push(item.name);
+    else {
+      missing.push(item.name);
+      missingShas.push(item.sha256);
+    }
   }
-  return { total, cached, missing };
+  return { total, cached, missing, missingShas };
 }
 
 export async function clearCachedExhibits() {

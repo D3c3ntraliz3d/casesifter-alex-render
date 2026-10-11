@@ -349,6 +349,9 @@ def _update_durable_job(
     error: str | None = None,
     document_id: str | None = None,
     sha256: str | None = None,
+    ai_review: str | None = None,
+    ai_review_reason: str | None = None,
+    allow_rerun: bool = False,
 ) -> None:
     try:
         from app.fact_memory.store import get_store
@@ -360,6 +363,9 @@ def _update_durable_job(
             error=error,
             document_id=document_id,
             sha256=sha256,
+            ai_review=ai_review,
+            ai_review_reason=ai_review_reason,
+            allow_rerun=allow_rerun,
         )
     except Exception:
         logger.exception("Durable job update failed for %s", job_id)
@@ -728,12 +734,28 @@ def get_ephemeral_job(
             payload["eta_seconds"] = estimate_eta_seconds(queue_position=position)
         except Exception:
             logger.debug("queue eta failed job=%s", job_id[:8], exc_info=True)
+    if progress.status == "complete":
+        # Lightweight AI-review badge fields (avoid embedding the full report).
+        try:
+            row = owned.get("job") or {}
+            if row.get("ai_review"):
+                payload["ai_review"] = row.get("ai_review")
+                payload["ai_review_reason"] = row.get("ai_review_reason")
+            else:
+                report_lite = load_report(job_id)
+                if report_lite is not None:
+                    payload["ai_review"] = getattr(report_lite, "ai_review", None)
+                    payload["ai_review_reason"] = getattr(report_lite, "ai_review_reason", None)
+        except Exception:
+            logger.debug("ai_review status fields failed job=%s", job_id[:8], exc_info=True)
     if include_report and progress.status == "complete":
         report = load_report(job_id)
         from app.case_conflict_toggle import strip_report
 
         payload["report"] = strip_report(report.model_dump(mode="json")) if report else None
     return payload
+
+
 
 
 @v1.get("/jobs/{job_id}/report")

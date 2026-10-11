@@ -1349,3 +1349,41 @@ table.data td.row-actions { width: 1%; text-align: right; }
   .doc-pane { position: static; }
   .doc-frame { height: 55vh; }
 }
+
+
+/* AI review incomplete warning */
+.ai-review-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--yellow);
+  background: var(--yellow-bg);
+  border: 1px solid #ead9a8;
+}
+.ai-review-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 12px 0 4px;
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--yellow-bg);
+  border: 1px solid #ead9a8;
+  color: var(--yellow);
+}
+.ai-review-banner p {
+  margin: 0;
+  font-weight: 600;
+}
+.ai-review-banner .footnote {
+  color: var(--muted);
+  font-weight: 400;
+}

@@ -90,6 +90,8 @@ class Report(BaseModel):
     job_id: str
     risk_level: RiskLevel
     risk_score: int = Field(ge=0, le=100)
+    ai_review: str | None = None
+    ai_review_reason: str | None = None
     executive_summary: str
     top_findings: list[Finding] = Field(default_factory=list)
     recommended_actions: list[str] = Field(default_factory=list)

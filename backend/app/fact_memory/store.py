@@ -365,6 +365,8 @@ class FactMemoryStore:
         risk_level = None
         risk_score = None
         file_size_bytes = None
+        ai_review = None
+        ai_review_reason = None
         if doc.report_enc:
             try:
                 report = enc.decrypt_json(fernet, doc.report_enc) or {}
@@ -376,6 +378,8 @@ class FactMemoryStore:
                     report = strip_report(report)
                     risk_level = report.get("risk_level")
                     risk_score = report.get("risk_score")
+                    ai_review = report.get("ai_review")
+                    ai_review_reason = report.get("ai_review_reason")
                     audit = report.get("audit") if isinstance(report.get("audit"), dict) else {}
                     file_size_bytes = audit.get("file_size_bytes")
             except Exception:
@@ -403,6 +407,8 @@ class FactMemoryStore:
             "risk_level": risk_level,
             "risk_score": risk_score,
             "file_size_bytes": file_size_bytes,
+            "ai_review": ai_review,
+            "ai_review_reason": ai_review_reason,
         }
 
     def list_prior_snapshots(
@@ -1218,6 +1224,9 @@ class FactMemoryStore:
         error: str | None = None,
         sha256: str | None = None,
         attempts: int | None = None,
+        ai_review: str | None = None,
+        ai_review_reason: str | None = None,
+        allow_rerun: bool = False,
     ) -> dict[str, Any] | None:
         terminal = frozenset({"complete", "failed", "interrupted"})
         with self.session() as s:
@@ -1232,11 +1241,18 @@ class FactMemoryStore:
                 and status
                 in {"queued", "running", "local_done", "complete"}
             )
+            # Gemini-only re-run: reopen a complete job that retained local_stage.
+            rerun_resume = (
+                allow_rerun
+                and row.status == "complete"
+                and status in {"queued", "running", "local_done"}
+            )
             if (
                 status is not None
                 and row.status in terminal
                 and status != row.status
                 and not restart_resume
+                and not rerun_resume
             ):
                 # Sticky terminal — refuse overwrite (A3).
                 return self._analysis_job_dict(row)
@@ -1252,6 +1268,14 @@ class FactMemoryStore:
                 row.sha256 = sha256.lower()
             if attempts is not None:
                 row.attempts = int(attempts)
+            if ai_review is not None:
+                row.ai_review = ai_review or None
+            if ai_review_reason is not None:
+                row.ai_review_reason = ai_review_reason or None
+            if rerun_resume:
+                row.ai_review = None
+                row.ai_review_reason = None
+                row.error = None
             row.updated_at = _utcnow()
             s.commit()
             return self._analysis_job_dict(row)
@@ -1632,6 +1656,8 @@ class FactMemoryStore:
             "restart_interruptions": int(getattr(row, "restart_interruptions", 0) or 0),
             "message": row.message,
             "error": row.error,
+            "ai_review": getattr(row, "ai_review", None),
+            "ai_review_reason": getattr(row, "ai_review_reason", None),
             "created_at": row.created_at.isoformat() if row.created_at else None,
             "updated_at": row.updated_at.isoformat() if row.updated_at else None,
         }

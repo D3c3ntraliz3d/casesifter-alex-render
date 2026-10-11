@@ -495,11 +495,17 @@ def _run(
         elif settings.contextual_multimodal and not court_filing:
             import time as _time
 
+            from app.gemini_review_state import note_ai_review_failure
+
             t_mm = _time.perf_counter()
             document_findings, status = _run_document_analysis(text, source_file, extras)
             extras["multimodal_ms"] = int((_time.perf_counter() - t_mm) * 1000)
             findings.extend(document_findings)
             extras["document_analysis"] = status
+            # Forensic exhibits: skipped / failed native upload must not look like a full AI review.
+            dar = extras.get("document_analysis_result")
+            if isinstance(dar, dict) and not dar.get("file_sent"):
+                note_ai_review_failure("file_not_sent")
             extras["logo_chrome_ms"] = 0
             if settings.logo_chrome_pass:
                 try:
@@ -1063,7 +1069,8 @@ def _encode_source_file(source_file: Path | None) -> tuple[str | None, str | Non
 
 
 def _post_gemini(payload: dict[str, Any], timeout: int | None = None) -> dict[str, Any]:
-    from app.gemini_cancel import CancelledError, is_cancelled
+    from app.gemini_cancel import CancelledError, current_job_id, is_cancelled
+    from app.gemini_review_state import note_ai_review_failure, reason_for_http_status
     from app.gemini_timing import GeminiTimer
 
     if is_cancelled():
@@ -1075,6 +1082,8 @@ def _post_gemini(payload: dict[str, Any], timeout: int | None = None) -> dict[st
     last_err: Exception | None = None
     # Prefer document timeout when caller omits; never hang unbounded.
     http_timeout = timeout if timeout is not None else settings.gemini_timeout_s
+    job = current_job_id() or ""
+    job_prefix = job[:8] if job else "-"
     with GeminiTimer():
         for attempt in range(max_attempts):
             if is_cancelled():
@@ -1092,7 +1101,27 @@ def _post_gemini(payload: dict[str, Any], timeout: int | None = None) -> dict[st
                 with urllib.request.urlopen(request, timeout=http_timeout) as response:
                     return json.loads(response.read().decode("utf-8"))
             except urllib.error.HTTPError as exc:
+                # Log status only — never document/request content.
+                logger.warning(
+                    "gemini non-200 status=%s attempt=%s/%s job=%s",
+                    exc.code,
+                    attempt + 1,
+                    max_attempts,
+                    job_prefix,
+                )
                 detail = exc.read().decode("utf-8", errors="replace")[:300]
+                reason = reason_for_http_status(exc.code)
+                # Billing / permission errors are not retryable.
+                if exc.code in (402, 403):
+                    logger.error(
+                        "gemini non-retryable status=%s attempt=%s/%s job=%s",
+                        exc.code,
+                        attempt + 1,
+                        max_attempts,
+                        job_prefix,
+                    )
+                    note_ai_review_failure(reason)
+                    raise RuntimeError(f"Gemini returned HTTP {exc.code}: {detail}") from exc
                 if exc.code == 429 and attempt + 1 < max_attempts:
                     # Honor Retry-After when present; otherwise exponential backoff.
                     retry_after = exc.headers.get("Retry-After") if exc.headers else None
@@ -1104,10 +1133,16 @@ def _post_gemini(payload: dict[str, Any], timeout: int | None = None) -> dict[st
                     time.sleep(delay)
                     last_err = RuntimeError(f"Gemini returned HTTP 429: {detail}")
                     continue
+                note_ai_review_failure(reason)
                 raise RuntimeError(f"Gemini returned HTTP {exc.code}: {detail}") from exc
             except urllib.error.URLError as exc:
+                note_ai_review_failure("error")
                 raise RuntimeError(f"Could not reach Gemini: {exc.reason}") from exc
-    raise last_err or RuntimeError("Gemini request failed after retries.")
+    if last_err is not None:
+        note_ai_review_failure("rate_limited")
+        raise last_err
+    note_ai_review_failure("error")
+    raise RuntimeError("Gemini request failed after retries.")
 
 
 def _parse_json_payload(body: dict[str, Any]) -> dict[str, Any]:

@@ -234,6 +234,8 @@ class AnalysisJob(Base):
     restart_interruptions: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     message: Mapped[str | None] = mapped_column(Text, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ai_review: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    ai_review_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
@@ -373,22 +375,30 @@ def ensure_source_columns(engine) -> None:
 
 
 def ensure_analysis_job_columns(engine) -> None:
-    """Add restart_interruptions to existing analysis_jobs tables."""
+    """Add missing columns to existing analysis_jobs tables."""
     from sqlalchemy import inspect, text
 
     insp = inspect(engine)
     if "analysis_jobs" not in insp.get_table_names():
         return
     have = {col["name"] for col in insp.get_columns("analysis_jobs")}
-    if "restart_interruptions" in have:
+    alters: list[str] = []
+    if "restart_interruptions" not in have:
+        alters.append(
+            "ALTER TABLE analysis_jobs ADD COLUMN restart_interruptions "
+            "INTEGER NOT NULL DEFAULT 0"
+        )
+    if "ai_review" not in have:
+        alters.append("ALTER TABLE analysis_jobs ADD COLUMN ai_review VARCHAR(32)")
+    if "ai_review_reason" not in have:
+        alters.append(
+            "ALTER TABLE analysis_jobs ADD COLUMN ai_review_reason VARCHAR(32)"
+        )
+    if not alters:
         return
     with engine.begin() as conn:
-        conn.execute(
-            text(
-                "ALTER TABLE analysis_jobs ADD COLUMN restart_interruptions "
-                "INTEGER NOT NULL DEFAULT 0"
-            )
-        )
+        for sql in alters:
+            conn.execute(text(sql))
 
 
 def reset_engine() -> None:
