@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import multiprocessing as mp
+import queue as queue_mod
 import threading
 import time
 from concurrent.futures import Future
@@ -298,6 +299,52 @@ def _maybe_retry_local(payload: dict[str, Any], job_id: str) -> bool:
         return False
 
 
+def _await_child_result(proc: Any, result_q: Any, timeout: float) -> tuple[Any, bool]:
+    """Poll the result queue while the child runs.
+
+    Returns (message, timed_out). message is None if the child died without
+    sending a result. Never joins before reading, so a large result cannot
+    deadlock the parent.
+    """
+    deadline = time.monotonic() + float(timeout)
+    while True:
+        try:
+            return result_q.get(timeout=1.0), False
+        except queue_mod.Empty:
+            pass
+        if not proc.is_alive():
+            # Child exited; give an in-flight put one last chance to arrive.
+            try:
+                return result_q.get(timeout=1.0), False
+            except queue_mod.Empty:
+                return None, False
+        if time.monotonic() >= deadline:
+            return None, True
+
+
+def _terminate(proc: Any, job_id: str) -> None:
+    try:
+        proc.terminate()
+        proc.join(timeout=5)
+        if proc.is_alive():
+            proc.kill()
+            proc.join(timeout=2)
+    except Exception:
+        logger.exception("terminate failed job=%s", job_id[:8])
+
+
+def _discard_queue(result_q: Any) -> None:
+    """Drop the queue without reading it (safe after the child was killed)."""
+    try:
+        result_q.cancel_join_thread()
+    except Exception:
+        pass
+    try:
+        result_q.close()
+    except Exception:
+        pass
+
+
 def submit_ephemeral_job(payload: dict[str, Any]) -> Future:
     """Run local stage in a terminable Process; on local_done schedule Gemini."""
     from app.gemini_executor import (
@@ -349,8 +396,11 @@ def submit_ephemeral_job(payload: dict[str, Any]) -> Future:
             bind_local_process(job_id, proc)
             note_queue_progress()
             proc.start()
-            proc.join(timeout=timeout)
-            if proc.is_alive():
+            # Read the result BEFORE joining. A child that has put data on an
+            # mp.Queue cannot exit until the parent reads it; join-then-get
+            # deadlocked on large results and held the local slot forever.
+            message, timed_out = _await_child_result(proc, result_q, timeout)
+            if timed_out:
                 logger.error(
                     "local stage timeout job=%s after %.0fs pages=%s — terminating process pid=%s",
                     job_id[:8],
@@ -358,28 +408,32 @@ def submit_ephemeral_job(payload: dict[str, Any]) -> Future:
                     pages,
                     proc.pid,
                 )
-                try:
-                    proc.terminate()
-                    proc.join(timeout=5)
-                    if proc.is_alive():
-                        proc.kill()
-                        proc.join(timeout=2)
-                except Exception:
-                    logger.exception("terminate failed job=%s", job_id[:8])
-                try:
-                    while not result_q.empty():
-                        result_q.get_nowait()
-                except Exception:
-                    pass
+                _terminate(proc, job_id)
+                # Never read the queue after a kill: a half-written message blocks forever.
+                _discard_queue(result_q)
                 clear_ahead(job_id)
-                _mark_local_timeout(job_id, "local", timeout_s=timeout)
-                _maybe_retry_local(payload, job_id)
+                try:
+                    _mark_local_timeout(job_id, "local", timeout_s=timeout)
+                except Exception:
+                    logger.exception("mark local timeout failed job=%s", job_id[:8])
+                try:
+                    _maybe_retry_local(payload, job_id)
+                except Exception:
+                    logger.exception("local retry failed job=%s", job_id[:8])
                 if not out.done():
                     out.set_result({"job_id": job_id, "status": "failed", "timed_out": True})
                 return
 
+            proc.join(timeout=5)
+            if proc.is_alive():
+                _terminate(proc, job_id)
+            _discard_queue(result_q)
             try:
-                kind, payload_or_err = result_q.get(timeout=5)
+                if message is None:
+                    raise RuntimeError(
+                        f"local worker exited without a result (exitcode={proc.exitcode})"
+                    )
+                kind, payload_or_err = message
                 if kind == "ok":
                     result = payload_or_err
                 else:

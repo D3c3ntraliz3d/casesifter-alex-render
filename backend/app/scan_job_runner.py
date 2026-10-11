@@ -143,7 +143,11 @@ def execute_ephemeral_job(payload: dict[str, Any]) -> dict[str, Any]:
         "status": terminal_status,
         "peak_rss_mb": peak["mb"],
         "local_s": local_s,
-        "payload": payload,
+        # Never echo `payload` back: it carries every prior document's facts and
+        # text excerpts (megabytes on a large matter). Sending that through the
+        # multiprocessing queue kept the child from exiting and deadlocked the
+        # local slot. The parent already holds the payload; Gemini resume data
+        # is on disk (gemini_payload.json).
     }
 
 
