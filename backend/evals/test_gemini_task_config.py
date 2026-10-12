@@ -45,3 +45,24 @@ def test_service_tier_only_on_task_a(monkeypatch):
     monkeypatch.setattr(config_mod.settings, "gemini_service_tier", "priority")
     assert service_tier_for_task(TASK_A_EXTRACT) == "priority"
     assert service_tier_for_task(TASK_D_VISUAL) == ""
+
+
+def test_gemini_38_flash_rejects_thinking_minimal(monkeypatch):
+    from app import config as config_mod
+    from app.gemini_tasks import validate_gemini_task_settings
+
+    monkeypatch.setattr(config_mod.settings, "task_d_visual_primary", "gemini-3.8-flash")
+    monkeypatch.setattr(config_mod.settings, "task_d_visual_thinking_level", "minimal")
+    errs = validate_gemini_task_settings()
+    assert any("minimal" in e and "3.8-flash" in e for e in errs)
+
+
+def test_gemini_38_flash_allows_low_medium_high(monkeypatch):
+    from app import config as config_mod
+    from app.gemini_tasks import TASK_D_VISUAL, task_config
+
+    monkeypatch.setattr(config_mod.settings, "task_d_visual_primary", "gemini-3.8-flash")
+    monkeypatch.setattr(config_mod.settings, "task_d_visual_backup", "gemini-3.6-flash")
+    for level in ("low", "medium", "high"):
+        monkeypatch.setattr(config_mod.settings, "task_d_visual_thinking_level", level)
+        assert task_config(TASK_D_VISUAL).thinking_level == level

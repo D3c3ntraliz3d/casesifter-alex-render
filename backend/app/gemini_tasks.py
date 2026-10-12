@@ -27,6 +27,8 @@ VALID_TASKS = frozenset(
     {TASK_A_EXTRACT, TASK_B_ENTITY, TASK_C_CONTRA, TASK_D_VISUAL}
 )
 VALID_THINKING_LEVELS = frozenset({"minimal", "low", "medium", "high"})
+# gemini-3.8-flash rejects thinking_level=minimal (supports low/medium/high only).
+FLASH_38_THINKING_LEVELS = frozenset({"low", "medium", "high"})
 VALID_SERVICE_TIERS = frozenset({"standard", "priority", "flex"})
 
 # models.get probe
@@ -50,6 +52,24 @@ def _level(raw: str | None, default: str) -> str:
     return level
 
 
+def _is_gemini_38_flash(model: str) -> bool:
+    return "gemini-3.8-flash" in (model or "").strip().lower()
+
+
+def thinking_level_for_model(model: str, level: str) -> str:
+    """Clamp/validate thinking_level for the target model.
+
+    gemini-3.8-flash does not accept ``minimal`` — only low/medium/high.
+    """
+    normalized = _level(level, level)
+    if _is_gemini_38_flash(model) and normalized == "minimal":
+        raise ValueError(
+            f"thinking_level=minimal is not supported on {model}; "
+            f"use one of {sorted(FLASH_38_THINKING_LEVELS)}"
+        )
+    return normalized
+
+
 def _model(raw: str | None, *, label: str) -> str:
     model = (raw or "").strip()
     if not gemini_model_is_valid(model):
@@ -59,39 +79,51 @@ def _model(raw: str | None, *, label: str) -> str:
     return model
 
 
+def _task(
+    task: str,
+    *,
+    primary: str,
+    backup: str,
+    thinking_level: str,
+) -> GeminiTaskConfig:
+    # Validate against both primary and backup — either may receive the level.
+    thinking_level_for_model(primary, thinking_level)
+    thinking_level_for_model(backup, thinking_level)
+    return GeminiTaskConfig(
+        task=task,
+        primary=primary,
+        backup=backup,
+        thinking_level=thinking_level,
+    )
+
+
 def task_config(task: str) -> GeminiTaskConfig:
     key = (task or "").strip().lower()
     if key not in VALID_TASKS:
         raise ValueError(f"unknown gemini task={task!r}")
     if key == TASK_A_EXTRACT:
-        return GeminiTaskConfig(
-            task=key,
+        return _task(
+            key,
             primary=_model(settings.task_a_extract_primary, label="TASK_A_EXTRACT_PRIMARY"),
             backup=_model(settings.task_a_extract_backup, label="TASK_A_EXTRACT_BACKUP"),
-            thinking_level=_level(
-                settings.task_a_extract_thinking_level, "minimal"
-            ),
+            thinking_level=_level(settings.task_a_extract_thinking_level, "minimal"),
         )
     if key == TASK_B_ENTITY:
-        return GeminiTaskConfig(
-            task=key,
+        return _task(
+            key,
             primary=_model(settings.task_b_entity_primary, label="TASK_B_ENTITY_PRIMARY"),
             backup=_model(settings.task_b_entity_backup, label="TASK_B_ENTITY_BACKUP"),
-            thinking_level=_level(
-                settings.task_b_entity_thinking_level, "medium"
-            ),
+            thinking_level=_level(settings.task_b_entity_thinking_level, "medium"),
         )
     if key == TASK_C_CONTRA:
-        return GeminiTaskConfig(
-            task=key,
+        return _task(
+            key,
             primary=_model(settings.task_c_contra_primary, label="TASK_C_CONTRA_PRIMARY"),
             backup=_model(settings.task_c_contra_backup, label="TASK_C_CONTRA_BACKUP"),
-            thinking_level=_level(
-                settings.task_c_contra_thinking_level, "high"
-            ),
+            thinking_level=_level(settings.task_c_contra_thinking_level, "high"),
         )
-    return GeminiTaskConfig(
-        task=key,
+    return _task(
+        key,
         primary=_model(settings.task_d_visual_primary, label="TASK_D_VISUAL_PRIMARY"),
         backup=_model(settings.task_d_visual_backup, label="TASK_D_VISUAL_BACKUP"),
         thinking_level=_level(settings.task_d_visual_thinking_level, "medium"),
