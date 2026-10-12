@@ -54,22 +54,23 @@ class Settings(BaseSettings):
     contextual_window: int = 400
 
     # Per-task model config (env-overridable). Do not use shutdown gemini-2.0-flash.
+    # Match Render dashboard: all primary=3.6-flash, backup=3.5-flash-lite, thinking=minimal.
     # Task A — AI fact extract (near-instant; never Batch API).
     task_a_extract_primary: str = "gemini-3.6-flash"
     task_a_extract_backup: str = "gemini-3.5-flash-lite"
     task_a_extract_thinking_level: str = "minimal"
     # Task B — entity / issuer timeline claims (questions only).
-    task_b_entity_primary: str = "gemini-3.8-flash"
-    task_b_entity_backup: str = "gemini-3.6-flash"
-    task_b_entity_thinking_level: str = "medium"
+    task_b_entity_primary: str = "gemini-3.6-flash"
+    task_b_entity_backup: str = "gemini-3.5-flash-lite"
+    task_b_entity_thinking_level: str = "minimal"
     # Task C — contradiction / gotcha candidates + Gemini verify path.
-    task_c_contra_primary: str = "gemini-3.8-flash"
-    task_c_contra_backup: str = "gemini-3.6-flash"
-    task_c_contra_thinking_level: str = "high"
+    task_c_contra_primary: str = "gemini-3.6-flash"
+    task_c_contra_backup: str = "gemini-3.5-flash-lite"
+    task_c_contra_thinking_level: str = "minimal"
     # Task D — multimodal visual / historical fraud + logo chrome.
-    task_d_visual_primary: str = "gemini-3.8-flash"
-    task_d_visual_backup: str = "gemini-3.6-flash"
-    task_d_visual_thinking_level: str = "medium"
+    task_d_visual_primary: str = "gemini-3.6-flash"
+    task_d_visual_backup: str = "gemini-3.5-flash-lite"
+    task_d_visual_thinking_level: str = "minimal"
     # generateContent ``service_tier`` (REST GenerateContentRequest.serviceTier).
     # Applied to Task A only. standard (omit) | priority | flex — never Batch for scans.
     gemini_service_tier: str = "standard"

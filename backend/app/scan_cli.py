@@ -7,7 +7,7 @@ Usage (from backend/ with deps installed and repo-root .env or env vars set):
   python -m app.scan_cli ./samples/bill.pdf --doc-kind exhibit
 
 Requires GEMINI_API_KEY for contextual / multimodal lanes. Prefer:
-  TASK_D_VISUAL_PRIMARY=gemini-3.8-flash
+  TASK_D_VISUAL_PRIMARY=gemini-3.6-flash
   CONTEXTUAL_MULTIMODAL=true
 """
 

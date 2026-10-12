@@ -159,6 +159,14 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE scan_snapshots ADD COLUMN facts_json TEXT")
     if "page_offsets_json" not in snap_cols:
         conn.execute("ALTER TABLE scan_snapshots ADD COLUMN page_offsets_json TEXT")
+    if "extraction_status" not in snap_cols:
+        conn.execute("ALTER TABLE scan_snapshots ADD COLUMN extraction_status TEXT")
+    if "extraction_error" not in snap_cols:
+        conn.execute("ALTER TABLE scan_snapshots ADD COLUMN extraction_error TEXT")
+    if "extraction_retry_done" not in snap_cols:
+        conn.execute(
+            "ALTER TABLE scan_snapshots ADD COLUMN extraction_retry_done INTEGER NOT NULL DEFAULT 0"
+        )
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS case_messages (
@@ -455,9 +463,13 @@ def save_scan_snapshot(
     text_excerpt: str | None = None,
     facts: list[dict[str, Any]] | None = None,
     page_offsets: list[dict[str, int]] | None = None,
+    extraction_status: str | None = None,
+    extraction_error: str | None = None,
+    extraction_retry_done: bool | None = None,
 ) -> dict[str, Any]:
     snap_id = uuid.uuid4().hex
     now = utcnow_iso()
+    retry_flag = 1 if extraction_retry_done else 0
     with connect() as conn:
         conn.execute("DELETE FROM scan_snapshots WHERE document_id = ?", (document_id,))
         conn.execute(
@@ -465,8 +477,9 @@ def save_scan_snapshot(
             INSERT INTO scan_snapshots (
                 id, document_id, case_id, entities_json, findings_summary_json,
                 text_fingerprint, excerpt_hashes_json, amounts_json, text_excerpt,
-                facts_json, page_offsets_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                facts_json, page_offsets_json, extraction_status, extraction_error,
+                extraction_retry_done, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 snap_id,
@@ -480,6 +493,9 @@ def save_scan_snapshot(
                 (text_excerpt or "")[:24000] or None,
                 json.dumps(facts or []),
                 json.dumps(page_offsets or []),
+                extraction_status,
+                (extraction_error or None),
+                retry_flag,
                 now,
             ),
         )
@@ -499,6 +515,9 @@ def _decode_snapshot(row: sqlite3.Row) -> dict[str, Any]:
     except (TypeError, json.JSONDecodeError):
         data["page_offsets"] = []
     data["text_excerpt"] = data.get("text_excerpt") or ""
+    data["extraction_status"] = data.get("extraction_status") or None
+    data["extraction_error"] = data.get("extraction_error") or None
+    data["extraction_retry_done"] = bool(data.get("extraction_retry_done") or 0)
     return data
 
 
@@ -628,12 +647,10 @@ def list_case_snapshots(case_id: str) -> list[dict[str, Any]]:
 
 
 def save_text_excerpt(document_id: str, case_id: str, excerpt: str) -> None:
+    """Cache OCR text for case chat. Does not run or overwrite fact extraction."""
     text = (excerpt or "")[:24000]
     if not text:
         return
-    from app.fact_extract import extract_facts
-
-    facts_json = json.dumps(extract_facts(text))
     now = utcnow_iso()
     with connect() as conn:
         existing = conn.execute(
@@ -642,8 +659,8 @@ def save_text_excerpt(document_id: str, case_id: str, excerpt: str) -> None:
         ).fetchone()
         if existing:
             conn.execute(
-                "UPDATE scan_snapshots SET text_excerpt = ?, facts_json = ? WHERE document_id = ?",
-                (text, facts_json, document_id),
+                "UPDATE scan_snapshots SET text_excerpt = ? WHERE document_id = ?",
+                (text, document_id),
             )
             return
         conn.execute(
@@ -651,8 +668,9 @@ def save_text_excerpt(document_id: str, case_id: str, excerpt: str) -> None:
             INSERT INTO scan_snapshots (
                 id, document_id, case_id, entities_json, findings_summary_json,
                 text_fingerprint, excerpt_hashes_json, amounts_json, text_excerpt,
-                facts_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                facts_json, extraction_status, extraction_error,
+                extraction_retry_done, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 uuid.uuid4().hex,
@@ -664,9 +682,51 @@ def save_text_excerpt(document_id: str, case_id: str, excerpt: str) -> None:
                 "[]",
                 "[]",
                 text,
-                facts_json,
+                "[]",
+                None,
+                None,
+                0,
                 now,
             ),
+        )
+
+
+def update_snapshot_extraction(
+    document_id: str,
+    *,
+    facts: list[dict[str, Any]] | None = None,
+    extraction_status: str | None = None,
+    extraction_error: str | None = None,
+    extraction_retry_done: bool | None = None,
+) -> None:
+    """Patch extraction fields on an existing vault snapshot (backfill worker)."""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT id FROM scan_snapshots WHERE document_id = ?",
+            (document_id,),
+        ).fetchone()
+        if row is None:
+            return
+        sets: list[str] = []
+        args: list[Any] = []
+        if facts is not None:
+            sets.append("facts_json = ?")
+            args.append(json.dumps(facts))
+        if extraction_status is not None:
+            sets.append("extraction_status = ?")
+            args.append(extraction_status)
+        if extraction_error is not None:
+            sets.append("extraction_error = ?")
+            args.append(extraction_error[:300] if extraction_error else None)
+        if extraction_retry_done is not None:
+            sets.append("extraction_retry_done = ?")
+            args.append(1 if extraction_retry_done else 0)
+        if not sets:
+            return
+        args.append(document_id)
+        conn.execute(
+            f"UPDATE scan_snapshots SET {', '.join(sets)} WHERE document_id = ?",
+            tuple(args),
         )
 
 

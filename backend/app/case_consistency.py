@@ -19,7 +19,7 @@ import re
 from typing import Any
 
 from app.engines import finding
-from app.fact_extract import FACT_META, GOTCHA_KEYS, extract_facts
+from app.fact_extract import FACT_META, GOTCHA_KEYS
 from app.fact_graph import (
     cluster_key,
     fact_conflict_eligible,
@@ -178,9 +178,8 @@ def compare_to_case(
     del case_documents  # exhibit-letter title matching is not an interrupt (labels change)
     findings: list[Finding] = []
     matrix: list[dict[str, Any]] = []
+    # Stored facts only — never re-run AI extract on the new doc or priors here.
     facts = list(new_facts or [])
-    if not facts and new_text:
-        facts = extract_facts(new_text, page_offsets=new_page_offsets)
 
     # The recording number(s) the Complaint itself cites are what this case's
     # loan/monthly-payment/balance facts are actually "operative" for. An
@@ -231,8 +230,6 @@ def compare_to_case(
         prior_locs = {_norm(x) for x in (prior_entities.get("locations") or []) if x}
         prior_is_filing = _is_court_filing_kind(prior.get("doc_kind"))
         prior_facts = list(prior.get("facts") or [])
-        if not prior_facts:
-            prior_facts = extract_facts(prior.get("text_excerpt") or "")
         if complaint_crfns:
             prior_own_crfns = _crfns_in(prior.get("text_excerpt") or "")
             if prior_own_crfns and not (prior_own_crfns & complaint_crfns):
@@ -1249,8 +1246,6 @@ def fact_conflicts_from_packet(documents: list[dict[str, Any]]) -> list[dict[str
     runs at scan time. Reports still carry comparison.facts / text_excerpt — rebuild
     snapshots here so occupancy_start and peers surface on the case board.
     """
-    from app.fact_extract import extract_facts
-
     snaps: list[dict[str, Any]] = []
     for doc in documents or []:
         if not isinstance(doc, dict):
@@ -1265,9 +1260,8 @@ def fact_conflicts_from_packet(documents: list[dict[str, Any]]) -> list[dict[str
             or "document"
         )
         text = str(doc.get("text_excerpt") or doc.get("text") or "")
+        # Packet rebuild uses stored facts only — never inline extract_facts().
         facts = list(doc.get("facts") or [])
-        if not facts and text.strip():
-            facts = extract_facts(text)
         if not facts:
             continue
         snaps.append(

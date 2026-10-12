@@ -393,7 +393,7 @@ def run_gemini_stage(
     amounts = data.get("amounts") or extract_amounts(full_text)
     ai_fact_usage: dict[str, Any] = {}
     facts = list(data.get("local_facts") or [])
-    # Merge AI facts on top of local regex facts.
+    # Merge AI facts on top of local regex facts (this document only).
     facts = extract_facts(
         full_text,
         page_offsets=page_offsets,
@@ -403,6 +403,8 @@ def run_gemini_stage(
         doc_kind=doc_kind,
         scan_profile=profile,
     )
+    extraction_status = ai_fact_usage.get("extraction_status")
+    extraction_error = ai_fact_usage.get("extraction_error")
     update_job(
         job_id,
         stage="generating_report",
@@ -445,8 +447,41 @@ def run_gemini_stage(
             text_excerpt=full_text[:24000],
             facts=facts,
             page_offsets=page_offsets,
+            extraction_status=extraction_status,
+            extraction_error=extraction_error,
         )
         priors = cases_db.list_prior_snapshots(case_id, exclude_document_id=document_id)
+        from app.extraction_status import incomplete_prior_snapshots, priors_pending_message
+
+        incomplete_priors = incomplete_prior_snapshots(priors)
+        priors_pending_n = len(incomplete_priors)
+        try:
+            from app.fact_extract_backfill import (
+                enqueue_extraction_backfill,
+                register_compare_refresh_after_backfill,
+            )
+
+            queued_prior_ids = enqueue_extraction_backfill(
+                priors, scope="vault", case_id=case_id
+            )
+            if queued_prior_ids:
+                register_compare_refresh_after_backfill(
+                    scope="vault",
+                    anchor_document_id=document_id,
+                    waiting_prior_ids=queued_prior_ids,
+                    job_id=job_id,
+                    case_id=case_id,
+                    new_facts=facts,
+                    new_entities=entities,
+                    new_display_name=display_name or source.name,
+                    new_doc_kind=doc_kind,
+                    new_fingerprint=fingerprint,
+                    new_sha256=digest,
+                    new_text=full_text,
+                    new_page_offsets=page_offsets,
+                )
+        except Exception:
+            pass
         name = display_name or source.name
         consistency, fact_matrix = compare_to_case(
             new_document_id=document_id,
@@ -507,6 +542,8 @@ def run_gemini_stage(
             "gotcha_log": gotcha_log,
             "facts": facts,
             "fact_matrix": fact_matrix,
+            "priors_pending_extraction": priors_pending_n,
+            "priors_pending_message": priors_pending_message(priors_pending_n),
             "multimodal_ms": mm,
             "logo_chrome_ms": ch,
             "gotcha_verify_ms": gv,
@@ -594,15 +631,33 @@ def run_gemini_stage(
         "facts": facts,
         "timeline_context": timeline_context_from_facts(facts),
         "fact_matrix": fact_matrix,
+        "priors_pending_extraction": (
+            ((contextual.extras or {}).get("case_consistency") or {}).get(
+                "priors_pending_extraction"
+            )
+            or 0
+        ),
+        "priors_pending_message": (
+            ((contextual.extras or {}).get("case_consistency") or {}).get(
+                "priors_pending_message"
+            )
+        ),
         "scan_profile": profile,
         "doc_kind": doc_kind,
         "case_impact": impact_log,
         "ai_fact_extract_usage": ai_fact_usage,
+        "extraction_status": extraction_status,
+        "extraction_error": extraction_error,
         "skip_reason": (contextual.extras or {}).get("skip_reason")
         or (ai_fact_usage or {}).get("skipped"),
         "gemini_usage": {
             **((contextual.extras or {}).get("gemini_usage") or {}),
             "ai_fact_extract": ai_fact_usage,
+            # Priors never extract inside this scan; backfill is a separate worker.
+            "ai_fact_extract_calls": {
+                "scanned_document": int((ai_fact_usage or {}).get("calls") or 0),
+                "prior_documents": 0,
+            },
         },
         "text_excerpt": (full_text or "")[:24000],
     }
@@ -744,6 +799,8 @@ def run_gemini_stage(
             amounts=amounts,
             text_excerpt=full_text[:24000],
             facts=facts,
+            extraction_status=extraction_status,
+            extraction_error=extraction_error,
         )
         if case_id:
             cases_db.elevate_documents_for_fact_conflicts(case_id)

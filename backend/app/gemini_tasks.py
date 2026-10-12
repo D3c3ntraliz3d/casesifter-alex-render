@@ -113,20 +113,20 @@ def task_config(task: str) -> GeminiTaskConfig:
             key,
             primary=_model(settings.task_b_entity_primary, label="TASK_B_ENTITY_PRIMARY"),
             backup=_model(settings.task_b_entity_backup, label="TASK_B_ENTITY_BACKUP"),
-            thinking_level=_level(settings.task_b_entity_thinking_level, "medium"),
+            thinking_level=_level(settings.task_b_entity_thinking_level, "minimal"),
         )
     if key == TASK_C_CONTRA:
         return _task(
             key,
             primary=_model(settings.task_c_contra_primary, label="TASK_C_CONTRA_PRIMARY"),
             backup=_model(settings.task_c_contra_backup, label="TASK_C_CONTRA_BACKUP"),
-            thinking_level=_level(settings.task_c_contra_thinking_level, "high"),
+            thinking_level=_level(settings.task_c_contra_thinking_level, "minimal"),
         )
     return _task(
         key,
         primary=_model(settings.task_d_visual_primary, label="TASK_D_VISUAL_PRIMARY"),
         backup=_model(settings.task_d_visual_backup, label="TASK_D_VISUAL_BACKUP"),
-        thinking_level=_level(settings.task_d_visual_thinking_level, "medium"),
+        thinking_level=_level(settings.task_d_visual_thinking_level, "minimal"),
     )
 
 
