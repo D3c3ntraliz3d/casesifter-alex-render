@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import inspect
 import os
 
@@ -23,7 +24,6 @@ def _dependency_names(route: APIRoute) -> set[str]:
             walk(child)
 
     walk(route.dependant)
-    # Also inspect signature defaults (Depends(...)).
     try:
         sig = inspect.signature(route.endpoint)
     except (TypeError, ValueError):
@@ -38,8 +38,25 @@ def _dependency_names(route: APIRoute) -> set[str]:
     return names
 
 
-def test_analysis_mode_only_health_is_public():
-    from app.main import app
+def test_analysis_mode_only_health_is_public(monkeypatch):
+    """Reload settings+app so APP_MODE=analysis wins even if Settings() already ran."""
+    monkeypatch.setenv("APP_MODE", "analysis")
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv(
+        "FACT_MEMORY_MASTER_KEY",
+        "dGVzdC1tYXN0ZXIta2V5LTEyMzQ1Njc4OTBhYmNkZWY=",
+    )
+
+    from app.config import Settings
+    import app.config as config_mod
+    import app.main as main_mod
+
+    settings = Settings(app_mode="analysis")
+    monkeypatch.setattr(config_mod, "settings", settings)
+    monkeypatch.setattr("app.config.settings", settings)
+    monkeypatch.setattr("app.main.settings", settings)
+    importlib.reload(main_mod)
+    app = main_mod.app
 
     paths = {r.path for r in app.routes if isinstance(r, APIRoute)}
     assert "/api/health" in paths

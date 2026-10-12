@@ -11,12 +11,10 @@ Three tiers, each requiring more explicit opt-in than the last:
 2. Claim verification (needs GEMINI_API_KEY). Sends only a generated question,
    e.g. 'Was "Acme Freight, LLC" in operation on 2019-03-01?'. No document
    content is transmitted.
-3. Document analysis (needs CONTEXTUAL_MULTIMODAL=true in addition to the key).
-   Uploads the original file natively (the PDF or image itself, not a re-render)
-   along with the extracted text for comprehensive review: date logic, arithmetic,
-   text overlays, graphic manipulation, font mismatches. This transmits the exhibit
-   itself to a third party, so it is off by default and must be enabled deliberately.
-   Do not enable it for sealed, privileged, or otherwise restricted evidence.
+3. Document analysis / Task D visual (needs CONTEXTUAL_MULTIMODAL=true).
+   Bucket 1 (statements of fact / exhibits) only. Sends downscaled page JPEGs
+   (~1024px long side) for sources ≤15 MB; Files API ``fileUri`` when the source
+   is over 15 MB. Transmits exhibit imagery to a third party — off by default.
 
 Evidentiary weight. A language model's assertion is a research lead, not proof.
 Every model-sourced finding is capped at medium severity, has its confidence
@@ -517,6 +515,17 @@ def _run(
         # Tier 3 multimodal fraud review is for exhibits only.
         from app.config import gemini_model_is_valid
 
+        from app.ai_triage import BUCKET_FULL, triage_document_ai
+
+        triage = triage_document_ai(text, document_label=filename or doc_kind)
+        extras["ai_bucket"] = triage.bucket
+        extras["ai_bucket_reason"] = triage.reason
+        visual_ok = (
+            settings.contextual_multimodal
+            and not court_filing
+            and triage.bucket == BUCKET_FULL
+        )
+
         if settings.contextual_multimodal and not court_filing and not gemini_model_is_valid(
             settings.gemini_model
         ):
@@ -525,12 +534,14 @@ def _run(
                 "^gemini-[\\w.-]+$ validation"
             )
             extras["document_analysis"] = {"status": "refused", "reason": "invalid_model"}
-        elif settings.contextual_multimodal and not court_filing:
+        elif visual_ok:
             import time as _time
 
             from app.gemini_review_state import note_ai_review_failure
 
             t_mm = _time.perf_counter()
+            extras["doc_kind"] = doc_kind
+            extras["filename"] = filename
             document_findings, status = _run_document_analysis(text, source_file, extras)
             extras["multimodal_ms"] = int((_time.perf_counter() - t_mm) * 1000)
             findings.extend(document_findings)
@@ -563,6 +574,14 @@ def _run(
             extras["document_analysis"] = "skipped_court_filing"
             extras["external_verification"] = "skipped_court_filing"
             return findings, extras
+        elif settings.contextual_multimodal and triage.bucket != BUCKET_FULL:
+            extras["document_analysis"] = f"skipped_ai_bucket_{triage.bucket}"
+            logger.info(
+                "contextual_logic visual skip ai_bucket=%s reason=%s doc=%s",
+                triage.bucket,
+                triage.reason,
+                (filename or "-")[:80],
+            )
         else:
             extras["document_analysis"] = "disabled"
 
@@ -1010,6 +1029,183 @@ def _finalize_gemini_usage(extras: dict[str, Any]) -> None:
     extras.pop("_gemini_usage_lock", None)
 
 
+# Visual (Task D) page selection / resolution.
+# Cue pages are detected from *embedded PDF text* (pypdf extract_text) — keyword
+# regex only, not vision/OCR. Scan-only pages with no text layer are not auto-selected
+# beyond first/last (or all pages when ≤10).
+_VISUAL_ALL_PAGES_MAX = 10
+_VISUAL_LONG_SIDE_DEFAULT = 1024
+_VISUAL_LONG_SIDE_EXHIBIT = 2048  # statements/bills/letters — keep font/size cues
+_VISUAL_JPEG_QUALITY = 80
+_SIGNATURE_PAGE_RE = re.compile(
+    r"(?i)\b("
+    r"signature|signed\s+by|notary\s+public|\bjurat\b|\bseal\b|"
+    r"subscribed\s+and\s+sworn|sworn\s+to\s+before\s+me|"
+    r"before\s+me\s+(?:this|the)\s+\d"
+    r")\b"
+)
+_LOGO_LETTERHEAD_PAGE_RE = re.compile(
+    r"(?i)\b("
+    r"letterhead|\blogo\b|account\s+statement|billing\s+statement|"
+    r"customer\s+service|www\.|http"
+    r")\b"
+)
+# Explicit consumer/financial kinds always get hi-res. "letter"/"exhibit" need
+# statement/bank cues or letterhead keywords (below).
+_EXHIBIT_HIRES_KINDS = frozenset(
+    {
+        "bill",
+        "statement",
+        "invoice",
+        "receipt",
+        "bank",
+        "loan",
+        "bank_statement",
+        "loan_statement",
+    }
+)
+_BANK_LOAN_TEXT_RE = re.compile(
+    r"(?i)\b("
+    r"principal\s+balance|loan\s+number|mortgage\s+statement|"
+    r"checking\s+account|savings\s+account|bank\s+statement|"
+    r"monthly\s+statement|payment\s+coupon"
+    r")\b"
+)
+
+
+def _visual_long_side_px(
+    text: str,
+    *,
+    doc_kind: str | None = None,
+    filename: str = "",
+) -> int:
+    """2048 for statements/bills/bank-loan/letterhead letters; 1024 otherwise."""
+    from app.scan_profile import looks_like_statement_text
+
+    kind = (doc_kind or "").strip().lower()
+    if kind in _EXHIBIT_HIRES_KINDS:
+        return _VISUAL_LONG_SIDE_EXHIBIT
+    if looks_like_statement_text(text) or _BANK_LOAN_TEXT_RE.search(text or ""):
+        return _VISUAL_LONG_SIDE_EXHIBIT
+    hay = f"{filename or ''} {text or ''}"[:4000]
+    # Letters (or unlabeled exhibits) with letterhead / account-statement chrome.
+    if _LOGO_LETTERHEAD_PAGE_RE.search(hay) and kind in {"", "letter", "exhibit"}:
+        return _VISUAL_LONG_SIDE_EXHIBIT
+    return _VISUAL_LONG_SIDE_DEFAULT
+
+
+def _pdf_page_texts(path: Path) -> list[str]:
+    from app.ingestion import open_pdf_reader
+
+    reader = open_pdf_reader(path)
+    out: list[str] = []
+    for page in reader.pages:
+        try:
+            out.append(page.extract_text() or "")
+        except Exception:
+            out.append("")
+    return out
+
+
+def _select_visual_page_indices(page_texts: list[str]) -> list[int]:
+    """0-based page indices for Task D.
+
+    ≤10 pages → all. Longer → first + last + pages whose *embedded text* matches
+    signature/notary/jurat/seal or logo/letterhead keywords (not image detection).
+    """
+    n = len(page_texts)
+    if n <= 0:
+        return []
+    if n <= _VISUAL_ALL_PAGES_MAX:
+        return list(range(n))
+    selected = {0, n - 1}
+    for idx, text in enumerate(page_texts):
+        if _SIGNATURE_PAGE_RE.search(text) or _LOGO_LETTERHEAD_PAGE_RE.search(text):
+            selected.add(idx)
+    return sorted(selected)
+
+
+def _downscale_jpeg_b64(image, *, long_side: int = _VISUAL_LONG_SIDE_DEFAULT) -> tuple[str, int]:
+    """Return (base64 jpeg, raw byte size) with long side capped at ``long_side``."""
+    import io
+
+    from PIL import Image
+
+    img = image.convert("RGB") if hasattr(image, "convert") else image
+    w, h = img.size
+    longest = max(w, h) or 1
+    if longest > long_side:
+        scale = long_side / float(longest)
+        img = img.resize(
+            (max(1, int(w * scale)), max(1, int(h * scale))),
+            Image.Resampling.LANCZOS,
+        )
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=_VISUAL_JPEG_QUALITY, optimize=True)
+    raw = buf.getvalue()
+    return base64.b64encode(raw).decode("ascii"), len(raw)
+
+
+def _render_visual_page_parts(
+    source_file: Path,
+    page_indices: list[int],
+    *,
+    long_side: int = _VISUAL_LONG_SIDE_DEFAULT,
+) -> tuple[list[dict[str, Any]], list[int], int]:
+    """Render selected pages → inline image parts. Returns (parts, 1-based pages, payload_bytes)."""
+    from app.ingestion import iter_pdf_pages, load_image
+
+    parts: list[dict[str, Any]] = []
+    pages_1based: list[int] = []
+    payload_bytes = 0
+    suffix = source_file.suffix.lower()
+
+    if suffix in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".tif", ".tiff", ".bmp"}:
+        img = load_image(source_file)
+        b64, nbytes = _downscale_jpeg_b64(img, long_side=long_side)
+        parts.append({"inline_data": {"mime_type": "image/jpeg", "data": b64}})
+        pages_1based.append(1)
+        payload_bytes += nbytes
+        return parts, pages_1based, payload_bytes
+
+    if suffix != ".pdf" or not page_indices:
+        return parts, pages_1based, payload_bytes
+
+    wanted = set(page_indices)
+    # Render denser when targeting 2048 so downscale keeps font detail.
+    render_scale = 3.0 if long_side >= 1800 else 2.0
+    max_needed = max(page_indices) + 1
+    for idx, img in enumerate(
+        iter_pdf_pages(source_file, max_pages=max_needed, scale=render_scale)
+    ):
+        if idx not in wanted:
+            continue
+        b64, nbytes = _downscale_jpeg_b64(img, long_side=long_side)
+        parts.append({"inline_data": {"mime_type": "image/jpeg", "data": b64}})
+        pages_1based.append(idx + 1)
+        payload_bytes += nbytes
+        if len(parts) >= len(wanted):
+            break
+    return parts, pages_1based, payload_bytes
+
+
+def _write_selected_pages_pdf(source: Path, indices: list[int], dest: Path) -> int:
+    """Copy selected pages into a new PDF. Returns page count written."""
+    from pypdf import PdfReader, PdfWriter
+
+    reader = PdfReader(str(source), strict=False)
+    writer = PdfWriter()
+    written = 0
+    for i in indices:
+        if 0 <= i < len(reader.pages):
+            writer.add_page(reader.pages[i])
+            written += 1
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with open(dest, "wb") as handle:
+        writer.write(handle)
+    return written
+
+
 def analyze_document(
     text: str,
     file_base64: str | None,
@@ -1017,25 +1213,47 @@ def analyze_document(
     extras: dict[str, Any] | None = None,
     *,
     file_ref: dict[str, Any] | None = None,
+    image_parts: list[dict[str, Any]] | None = None,
     page_offset: int = 0,
     chunk_id: str = "full",
+    pages_sent: list[int] | None = None,
+    payload_bytes: int | None = None,
 ) -> dict[str, Any]:
-    """Tier 3: send the original file and extracted text to Gemini for alteration review.
+    """Tier 3 visual fraud review.
 
-    ``file_ref`` is a Gemini Files API ``file_data`` part (preferred for large PDFs).
-    ``page_offset`` is added to every finding page (chunk page 1 → original page
-    ``1 + page_offset``).
+    Prefer ``image_parts`` (downscaled page JPEGs). ``file_ref`` is Files API for a
+    *selected-pages* PDF only when those images exceed the inline size cap — never
+    the full source exhibit. Legacy ``file_base64`` remains as a fallback.
     """
     parts: list[dict[str, Any]] = [
         {"text": FRAUD_PROMPT.format(text=(text or "")[: settings.contextual_max_chars])}
     ]
     file_sent: str | None = None
-    if file_ref is not None:
+    if image_parts:
+        parts.extend(image_parts)
+        file_sent = "image/jpeg"
+    elif file_ref is not None:
         parts.append(file_ref)
         file_sent = (file_ref.get("file_data") or {}).get("mime_type") or mime_type or "application/pdf"
     elif file_base64 and mime_type:
         parts.append({"inline_data": {"mime_type": mime_type, "data": file_base64}})
         file_sent = mime_type
+
+    est_payload = int(payload_bytes or 0)
+    if est_payload <= 0 and file_base64:
+        est_payload = int(len(file_base64) * 0.75)
+    pages_label = pages_sent or []
+    logger.info(
+        "gemini visual payload pages=%s page_count=%s payload_bytes=%s transport=%s chunk_id=%s",
+        pages_label,
+        len(pages_label),
+        est_payload,
+        "images" if image_parts else ("files_api" if file_ref else ("inline_file" if file_base64 else "text")),
+        chunk_id,
+    )
+    if extras is not None:
+        extras["document_analysis_pages_sent"] = list(pages_label)
+        extras["document_analysis_payload_bytes"] = est_payload
 
     from app.gemini_tasks import TASK_D_VISUAL, task_config
 
@@ -1073,23 +1291,21 @@ def analyze_document(
         "overall_note": str(parsed.get("overall_note", ""))[:500],
         "file_sent": file_sent,
         "model": settings.gemini_model,
+        "pages_sent": list(pages_label),
+        "payload_bytes": est_payload,
     }
 
 
 def _run_document_analysis(
     text: str, source_file: Path | None, extras: dict[str, Any]
 ) -> tuple[list[Finding], str]:
-    """Send the exhibit to Gemini: inline ≤15 MB, Files API for larger PDFs, chunk if needed."""
-    from app.gemini_inflight import acquire as acquire_inflight
-    from app.gemini_inflight import release as release_inflight
-    from app.gemini_review_state import note_ai_review_failure, note_partial_failure
-    from app.pdf_chunks import (
-        FILES_API_MAX_MB,
-        FILES_API_MAX_PAGES,
-        needs_split,
-        pdf_page_count,
-        split_pdf,
-    )
+    """Task D visual: always selected page images — never the full source PDF.
+
+    Files API is used only when the *selected-page* payload still exceeds the
+    inline upload limit; then we upload a slim PDF of those pages only.
+    """
+    from app.gemini_review_state import note_ai_review_failure
+    from app.pdf_chunks import pdf_page_count
 
     if source_file is None:
         if not (text or "").strip():
@@ -1102,19 +1318,20 @@ def _run_document_analysis(
         return _findings_from_analysis_result(result, text, source_file, extras)
 
     suffix = source_file.suffix.lower()
-    mime_type = NATIVE_MIME_TYPES.get(suffix)
-    if mime_type is None:
-        extras["document_analysis_note"] = (
-            f"{suffix or 'this format'} has no native Gemini equivalent; analyzed text only."
-        )
-        if not (text or "").strip():
-            return [], "no_content"
-        try:
-            result = analyze_document(text, None, None, extras)
-        except Exception as exc:
-            extras["document_analysis_error"] = str(exc)
-            return [_verification_unavailable(exc, stage="document analysis")], "error"
-        return _findings_from_analysis_result(result, text, source_file, extras)
+    if suffix not in NATIVE_MIME_TYPES and suffix != ".pdf":
+        # Allow common image suffixes already in NATIVE_MIME_TYPES; reject others.
+        if suffix not in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".tif", ".tiff", ".bmp"}:
+            extras["document_analysis_note"] = (
+                f"{suffix or 'this format'} has no native Gemini equivalent; analyzed text only."
+            )
+            if not (text or "").strip():
+                return [], "no_content"
+            try:
+                result = analyze_document(text, None, None, extras)
+            except Exception as exc:
+                extras["document_analysis_error"] = str(exc)
+                return [_verification_unavailable(exc, stage="document analysis")], "error"
+            return _findings_from_analysis_result(result, text, source_file, extras)
 
     try:
         size = int(source_file.stat().st_size)
@@ -1130,12 +1347,11 @@ def _run_document_analysis(
             return [_verification_unavailable(exc2, stage="document analysis")], "error"
         return _findings_from_analysis_result(result, text, source_file, extras)
 
-    inline_limit = settings.contextual_max_upload_mb * 1024 * 1024
-
-    # PDFs: page count can force Files API / chunking even when under the inline size cap.
+    extras["document_analysis_size_mb"] = round(size / 1048576, 2)
+    page_count = 1
     if suffix == ".pdf":
         try:
-            pages = pdf_page_count(source_file)
+            page_count = pdf_page_count(source_file)
         except Exception as exc:
             extras["document_analysis_note"] = f"Could not read PDF page count: {exc}"
             note_ai_review_failure("file_not_sent")
@@ -1147,75 +1363,170 @@ def _run_document_analysis(
                 extras["document_analysis_error"] = str(exc2)
                 return [_verification_unavailable(exc2, stage="document analysis")], "error"
             return _findings_from_analysis_result(result, text, source_file, extras)
+        extras["document_analysis_pages"] = page_count
 
-        extras["document_analysis_pages"] = pages
-        extras["document_analysis_size_mb"] = round(size / 1048576, 2)
+    doc_kind = str((extras.get("doc_kind") or "") or "") or None
+    filename = str((extras.get("filename") or "") or "")
+    # Prefer values stashed by _run when present.
+    return _run_document_analysis_page_images(
+        text,
+        source_file,
+        extras,
+        page_count=page_count,
+        doc_kind=doc_kind,
+        filename=filename,
+    )
 
-        if needs_split(
-            source_file,
-            size_bytes=size,
-            pages=pages,
-            max_mb=FILES_API_MAX_MB,
-            max_pages=FILES_API_MAX_PAGES,
-        ):
-            extras["document_analysis_transport"] = "files_api_chunked"
-            return _run_document_analysis_chunked(text, source_file, extras)
 
-        if size <= inline_limit:
-            return _run_document_analysis_inline(text, source_file, mime_type, size, extras)
+def _run_document_analysis_page_images(
+    text: str,
+    source_file: Path,
+    extras: dict[str, Any],
+    *,
+    page_count: int,
+    doc_kind: str | None = None,
+    filename: str = "",
+) -> tuple[list[Finding], str]:
+    """Selected page JPEGs for Task D; Files API only if those pages exceed inline limit."""
+    import tempfile
 
-        # Single Files API upload (inline < size ≤ 50 MB, pages ≤ 1000).
+    from app.gemini_inflight import acquire as acquire_inflight
+    from app.gemini_inflight import release as release_inflight
+    from app.gemini_review_state import note_ai_review_failure
+
+    suffix = source_file.suffix.lower()
+    long_side = _visual_long_side_px(text, doc_kind=doc_kind, filename=filename)
+    extras["document_analysis_long_side_px"] = long_side
+    inline_limit = settings.contextual_max_upload_mb * 1024 * 1024
+
+    try:
+        if suffix == ".pdf":
+            texts = _pdf_page_texts(source_file)
+            if not texts and page_count > 0:
+                texts = [""] * page_count
+            indices = _select_visual_page_indices(texts)
+        else:
+            indices = [0]
+        image_parts, pages_sent, payload_bytes = _render_visual_page_parts(
+            source_file, indices, long_side=long_side
+        )
+    except Exception as exc:
+        extras["document_analysis_error"] = str(exc)[:300]
+        note_ai_review_failure("file_not_sent")
+        if not (text or "").strip():
+            return [], "no_content"
+        try:
+            result = analyze_document(text, None, None, extras)
+        except Exception as exc2:
+            extras["document_analysis_error"] = str(exc2)
+            return [_verification_unavailable(exc2, stage="document analysis")], "error"
+        return _findings_from_analysis_result(result, text, source_file, extras)
+
+    extras["document_analysis_pages_selected"] = list(pages_sent)
+
+    if not image_parts and suffix != ".pdf":
+        extras["document_analysis_note"] = "Could not render page images; analyzed text only."
+        note_ai_review_failure("file_not_sent")
+        if not (text or "").strip():
+            return [], "no_content"
+        try:
+            result = analyze_document(text, None, None, extras)
+        except Exception as exc:
+            extras["document_analysis_error"] = str(exc)
+            return [_verification_unavailable(exc, stage="document analysis")], "error"
+        return _findings_from_analysis_result(result, text, source_file, extras)
+
+    # Selected-page payload still over inline cap → Files API on a slim page subset PDF.
+    if suffix == ".pdf" and (not image_parts or payload_bytes > inline_limit):
         from app.gemini_files import delete_file, file_part, upload_file_streaming, wait_file_active
 
-        extras["document_analysis_transport"] = "files_api"
+        tmp_dir = Path(tempfile.mkdtemp(prefix="cs-visual-pages-"))
+        slim = tmp_dir / "selected_pages.pdf"
         file_obj = None
         held = False
-        payload_bytes = size
         try:
-            if not acquire_inflight(payload_bytes, timeout=600):
-                extras["document_analysis_note"] = "Gemini inflight byte cap busy; analyzed text only."
+            written = _write_selected_pages_pdf(source_file, indices, slim)
+            if written <= 0:
+                raise RuntimeError("selected-pages PDF empty")
+            slim_size = int(slim.stat().st_size)
+            extras["document_analysis_transport"] = "files_api_selected_pages"
+            extras["document_analysis_selected_pdf_bytes"] = slim_size
+            if not acquire_inflight(slim_size, timeout=600):
+                extras["document_analysis_note"] = (
+                    "Gemini inflight byte cap busy; analyzed text only."
+                )
                 note_ai_review_failure("file_not_sent")
                 if not (text or "").strip():
                     return [], "no_content"
                 result = analyze_document(text, None, None, extras)
                 return _findings_from_analysis_result(result, text, source_file, extras)
             held = True
-            file_obj = upload_file_streaming(source_file, mime_type=mime_type)
+            file_obj = upload_file_streaming(slim, mime_type="application/pdf")
             file_obj = wait_file_active(file_obj)
             result = analyze_document(
                 text,
                 None,
-                mime_type,
+                "application/pdf",
                 extras,
-                file_ref=file_part(file_obj, mime_type=mime_type),
+                file_ref=file_part(file_obj, mime_type="application/pdf"),
+                pages_sent=pages_sent or [i + 1 for i in indices],
+                payload_bytes=slim_size,
             )
         except Exception as exc:
-            extras["document_analysis_error"] = str(exc)
+            extras["document_analysis_error"] = str(exc)[:300]
             note_ai_review_failure("error")
             return [_verification_unavailable(exc, stage="document analysis")], "error"
         finally:
             delete_file(file_obj)
             if held:
-                release_inflight(payload_bytes)
-
+                release_inflight(int(extras.get("document_analysis_selected_pdf_bytes") or 0))
+            try:
+                slim.unlink(missing_ok=True)
+                tmp_dir.rmdir()
+            except OSError:
+                pass
         return _findings_from_analysis_result(result, text, source_file, extras)
 
-    # Non-PDF: inline only; oversize → text-only + file_not_sent.
-    if size <= inline_limit:
-        return _run_document_analysis_inline(text, source_file, mime_type, size, extras)
+    if not image_parts:
+        extras["document_analysis_note"] = "Could not render page images; analyzed text only."
+        note_ai_review_failure("file_not_sent")
+        if not (text or "").strip():
+            return [], "no_content"
+        try:
+            result = analyze_document(text, None, None, extras)
+        except Exception as exc:
+            extras["document_analysis_error"] = str(exc)
+            return [_verification_unavailable(exc, stage="document analysis")], "error"
+        return _findings_from_analysis_result(result, text, source_file, extras)
 
-    extras["document_analysis_note"] = (
-        f"File is {size / 1048576:.1f} MB, over the {settings.contextual_max_upload_mb} MB "
-        "inline upload limit; analyzed text only."
-    )
-    note_ai_review_failure("file_not_sent")
-    if not (text or "").strip():
-        return [], "no_content"
+    held = False
     try:
-        result = analyze_document(text, None, None, extras)
+        if payload_bytes and not acquire_inflight(payload_bytes, timeout=600):
+            extras["document_analysis_note"] = "Gemini inflight byte cap busy; analyzed text only."
+            note_ai_review_failure("file_not_sent")
+            if not (text or "").strip():
+                return [], "no_content"
+            result = analyze_document(text, None, None, extras)
+            return _findings_from_analysis_result(result, text, source_file, extras)
+        held = True
+        extras["document_analysis_transport"] = "page_images"
+        result = analyze_document(
+            text,
+            None,
+            "image/jpeg",
+            extras,
+            image_parts=image_parts,
+            pages_sent=pages_sent,
+            payload_bytes=payload_bytes,
+        )
     except Exception as exc:
         extras["document_analysis_error"] = str(exc)
+        note_ai_review_failure("error")
         return [_verification_unavailable(exc, stage="document analysis")], "error"
+    finally:
+        if held:
+            release_inflight(payload_bytes)
+
     return _findings_from_analysis_result(result, text, source_file, extras)
 
 
@@ -1480,30 +1791,29 @@ RETRYABLE_GEMINI_STATUSES = frozenset({429, 500, 502, 503, 504})
 GEMINI_BUSY_MESSAGE = "Gemini busy, retrying…"
 
 
-# Primary: 1 try + 3 retries (~20–30s total backoff), then backup.
-_PRIMARY_MAX_ATTEMPTS = 4
+# Primary: 1 try + 2 retries (backoff 2s then 4s + jitter), then backup immediately.
+# Backup: 3 attempts with the same short backoff.
+_PRIMARY_MAX_ATTEMPTS = 3
 _BACKUP_MAX_ATTEMPTS = 3
-# Sleeps between primary attempts (3 gaps) sum to ~20–30s with jitter.
-_PRIMARY_BACKOFF_BASES = (5.0, 8.0, 12.0)
+_SHORT_BACKOFF_BASES = (2.0, 4.0)
 
 
 def gemini_retry_delay(attempt: int, headers, *, code: int = 503) -> float:
-    """Backoff + jitter. Primary gaps target ~20–30s total; backup uses shorter expo."""
+    """Short backoff + jitter: 2s then 4s between attempts (primary and backup)."""
     retry_after = headers.get("Retry-After") if headers else None
     try:
         if retry_after is not None:
             delay = float(retry_after)
-            return min(120.0, max(1.0, delay + random.uniform(0.25, 2.0)))
+            return min(30.0, max(1.0, delay + random.uniform(0.1, 0.75)))
     except (TypeError, ValueError):
         pass
-    if attempt < len(_PRIMARY_BACKOFF_BASES):
-        base = _PRIMARY_BACKOFF_BASES[attempt]
-        return min(45.0, max(1.0, base + random.uniform(0.5, 3.0)))
-    # Backup (or overflow): shorter expo so we do not stall the scan.
-    base = 3.0 if int(code) == 429 else 4.0
-    delay = base * (2 ** max(0, attempt - len(_PRIMARY_BACKOFF_BASES)))
-    delay += random.uniform(0.5, 3.0)
-    return min(60.0, max(1.0, delay))
+    idx = max(0, int(attempt))
+    if idx < len(_SHORT_BACKOFF_BASES):
+        base = _SHORT_BACKOFF_BASES[idx]
+    else:
+        # Overflow (e.g. 429 storms): stay short — do not reintroduce 20–30s stalls.
+        base = 4.0 if int(code) != 429 else 3.0
+    return min(15.0, max(1.0, base + random.uniform(0.1, 0.75)))
 
 
 def _notify_gemini_busy(job_id: str) -> None:

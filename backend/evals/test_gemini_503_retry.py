@@ -84,9 +84,9 @@ def test_persistent_503_fails_after_primary_and_backup(post, monkeypatch):
     monkeypatch.setattr(post.urllib.request, "urlopen", fake_urlopen)
     with pytest.raises(RuntimeError, match="503"):
         _call(post)
-    # 4 primary + 3 backup
-    assert calls["n"] == 7
-    assert sum(1 for m in models if "gemini-3.6-flash" in m) == 4
+    # 3 primary + 3 backup
+    assert calls["n"] == 6
+    assert sum(1 for m in models if "gemini-3.6-flash" in m) == 3
     assert sum(1 for m in models if "gemini-3.5-flash-lite" in m) == 3
     assert get_ai_review_failure() == "error"
 
@@ -115,32 +115,30 @@ def test_400_is_not_retried(post, monkeypatch):
     assert calls["n"] == 1
 
 
-def test_three_primary_retries_then_backup(post, monkeypatch):
+def test_two_primary_retries_then_backup(post, monkeypatch):
     models: list[str] = []
 
     def fake_urlopen(req, timeout=None):
         full = getattr(req, "full_url", str(req))
         models.append(full)
-        if len(models) < 5:
+        if len(models) < 4:
             raise _http_error(503)
         return _Resp({"ok": True})
 
     monkeypatch.setattr(post.urllib.request, "urlopen", fake_urlopen)
     assert _call(post) == {"ok": True}
-    assert len(models) == 5
-    assert all("gemini-3.6-flash" in m for m in models[:4])
-    assert "gemini-3.5-flash-lite" in models[4]
+    # 3 primary attempts then 1st backup succeeds
+    assert len(models) == 4
+    assert all("gemini-3.6-flash" in m for m in models[:3])
+    assert "gemini-3.5-flash-lite" in models[3]
 
 
-def test_retry_delay_primary_targets_20_30s_band(post, monkeypatch):
-    monkeypatch.setattr(post.random, "uniform", lambda a, b: 1.0)
+def test_retry_delay_short_2s_then_4s(post, monkeypatch):
+    monkeypatch.setattr(post.random, "uniform", lambda a, b: 0.0)
     d0 = post.gemini_retry_delay(0, {}, code=503)
     d1 = post.gemini_retry_delay(1, {}, code=503)
-    d2 = post.gemini_retry_delay(2, {}, code=503)
-    assert 5.0 <= d0 <= 10.0
-    assert 8.0 <= d1 <= 14.0
-    assert 12.0 <= d2 <= 20.0
-    assert 20.0 <= (d0 + d1 + d2) <= 35.0
+    assert d0 == pytest.approx(2.0)
+    assert d1 == pytest.approx(4.0)
 
 
 def test_busy_message_posted_during_503_retry(post, monkeypatch):
@@ -212,14 +210,15 @@ def test_scan_summary_counts_503_and_fallback(post, monkeypatch):
     def fake_urlopen(req, timeout=None):
         full = getattr(req, "full_url", str(req))
         models.append(full)
-        if len(models) < 5:
+        if len(models) < 4:
             raise _http_error(503)
         return _Resp({"ok": True}, headers={"x-gemini-service-tier": "standard"})
 
     monkeypatch.setattr(post.urllib.request, "urlopen", fake_urlopen)
     assert _call(post) == {"ok": True}
     snap = gemini_timing.snapshot()
-    assert snap["http_503"] == 4
+    # 3 primary 503s then backup success
+    assert snap["http_503"] == 3
     assert snap["fallback_count"] == 1
     assert snap["calls"] == 1
 
