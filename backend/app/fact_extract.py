@@ -430,11 +430,21 @@ def _finalize_facts(
 ) -> list[dict[str, Any]]:
     from app.page_anchors import enrich_fact_anchors
 
+    from app.extraction_status import derive_extraction_status
+
     anchored = enrich_fact_anchors(facts, text, page_offsets)
     if not enable_ai:
         if ai_usage_out is not None:
             ai_usage_out.clear()
-            ai_usage_out.update({"skipped": "local_stage", "calls": 0, "total_tokens": 0, "step": "ai_fact_extract"})
+            ai_usage_out.update(
+                {
+                    "skipped": "local_stage",
+                    "calls": 0,
+                    "total_tokens": 0,
+                    "step": "ai_fact_extract",
+                    "extraction_status": None,
+                }
+            )
         return anchored
     # Additive Gemini pass (no-op without API key). Regex remains the baseline.
     try:
@@ -449,6 +459,10 @@ def _finalize_facts(
             scan_profile=scan_profile,
             chunk_id="full",
         )
+        status, err = derive_extraction_status(usage, enable_ai=True)
+        usage["extraction_status"] = status
+        if err:
+            usage["extraction_error"] = err
         if ai_usage_out is not None:
             ai_usage_out.clear()
             ai_usage_out.update(usage)
@@ -464,9 +478,24 @@ def _finalize_facts(
             anchored.append(rec)
             if len(anchored) >= limit:
                 break
-    except Exception:
-        if ai_usage_out is not None and not ai_usage_out:
-            ai_usage_out.update({"skipped": "exception", "calls": 0, "total_tokens": 0, "step": "ai_fact_extract"})
+    except Exception as exc:
+        status, err = derive_extraction_status(
+            {"skipped": "exception", "error": str(exc)[:200]},
+            enable_ai=True,
+        )
+        if ai_usage_out is not None:
+            ai_usage_out.clear()
+            ai_usage_out.update(
+                {
+                    "skipped": "exception",
+                    "calls": 0,
+                    "total_tokens": 0,
+                    "step": "ai_fact_extract",
+                    "error": str(exc)[:200],
+                    "extraction_status": status,
+                    "extraction_error": err,
+                }
+            )
     return anchored
 
 

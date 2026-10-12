@@ -662,7 +662,26 @@ def _persist_pipeline_result(
             user_id=firm_ctx.get("user_id"),
             report=report_dict,
             source_size=byte_length,
+            extraction_status=comparison.get("extraction_status"),
+            extraction_error=comparison.get("extraction_error"),
+            extraction_retry_done=bool(comparison.get("extraction_retry_done")),
         )
+        try:
+            from app.fact_extract_backfill import enqueue_extraction_backfill
+
+            priors = store.list_prior_snapshots(
+                firm_ctx["firm_id"],
+                matter_id,
+                exclude_document_id=result.get("document_id"),
+            )
+            enqueue_extraction_backfill(
+                priors,
+                scope="matter",
+                firm_id=firm_ctx["firm_id"],
+                matter_id=matter_id,
+            )
+        except Exception:
+            logger.exception("Failed to enqueue fact-extract backfill for matter=%s", matter_id)
         logger.info(
             "Persisted facts for matter=%s job=%s persisted=%s deduped=%s",
             matter_id,

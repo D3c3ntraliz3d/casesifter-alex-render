@@ -95,6 +95,12 @@ def _startup() -> None:
     ensure_sweeper()
     ensure_watchdog()
     try:
+        from app.fact_extract_backfill import ensure_extract_backfill_worker
+
+        ensure_extract_backfill_worker()
+    except Exception as exc:
+        logger.warning("Fact-extract backfill worker init failed: %s", exc)
+    try:
         from app.scan_executor import ensure_scan_executor
         from app.gemini_executor import ensure_gemini_executor
 

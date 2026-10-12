@@ -740,6 +740,9 @@ class FactMemoryStore:
         source_bytes: bytes | None = None,
         mime_type: str | None = None,
         source_size: int | None = None,
+        extraction_status: str | None = None,
+        extraction_error: str | None = None,
+        extraction_retry_done: bool = False,
     ) -> dict[str, Any]:
         """Persist facts, findings, and exhibit metadata. Exhibit bytes are not stored."""
         byte_length = None
@@ -824,6 +827,21 @@ class FactMemoryStore:
 
             # Cap excerpt for vault-compat priors (encrypted). Prefer empty if firm opts out of snippets.
             excerpt = (text_excerpt or "")[:24000] if store_snippets else ""
+            status = extraction_status
+            err = extraction_error
+            retry_done = bool(extraction_retry_done)
+            if isinstance(report, dict):
+                cmp = report.get("comparison") if isinstance(report.get("comparison"), dict) else {}
+                if status is None:
+                    status = cmp.get("extraction_status") or report.get("extraction_status")
+                if err is None:
+                    err = cmp.get("extraction_error") or report.get("extraction_error")
+                if not retry_done:
+                    retry_done = bool(
+                        cmp.get("extraction_retry_done")
+                        if "extraction_retry_done" in cmp
+                        else report.get("extraction_retry_done")
+                    )
             snapshot = {
                 "document_id": doc.id,
                 "display_name": display_name or original_filename,
@@ -841,6 +859,9 @@ class FactMemoryStore:
                     for f in (findings or [])[:40]
                     if isinstance(f, dict)
                 ],
+                "extraction_status": status,
+                "extraction_error": (str(err)[:300] if err else None),
+                "extraction_retry_done": retry_done,
             }
             doc.snapshot_enc = enc.encrypt_json(fernet, snapshot)
             if not existing:
@@ -979,6 +1000,79 @@ class FactMemoryStore:
                 "fact_count": len(facts or []),
                 "finding_count": stored_findings,
             }
+
+    def update_document_extraction(
+        self,
+        firm_id: str,
+        matter_id: str,
+        document_id: str,
+        *,
+        facts: list[dict[str, Any]] | None = None,
+        extraction_status: str | None = None,
+        extraction_error: str | None = None,
+        extraction_retry_done: bool | None = None,
+    ) -> bool:
+        """Patch facts + extraction status on an existing matter document (backfill)."""
+        with self.session() as s:
+            doc = s.execute(
+                select(Document).where(
+                    Document.id == document_id,
+                    Document.firm_id == firm_id,
+                    Document.matter_id == matter_id,
+                )
+            ).scalar_one_or_none()
+            if doc is None:
+                return False
+            fernet = self._fernet(s, firm_id)
+            firm = s.get(Firm, firm_id)
+            store_snippets = bool(firm.store_snippets) if firm is not None else True
+            snap = enc.decrypt_json(fernet, doc.snapshot_enc) or {}
+            if facts is not None:
+                snap["facts"] = facts
+                for old in list(doc.facts):
+                    s.delete(old)
+                s.flush()
+                for fact in facts:
+                    if not isinstance(fact, dict):
+                        continue
+                    attr = str(fact.get("key") or fact.get("attribute") or "unknown")
+                    value = fact.get("display") or fact.get("value")
+                    value_norm = fact.get("value")
+                    snippet = None
+                    if store_snippets:
+                        raw_snip = fact.get("quote") or fact.get("snippet") or ""
+                        snippet = str(raw_snip)[:300] if raw_snip else None
+                    s.add(
+                        Fact(
+                            id=_new_id(),
+                            matter_id=matter_id,
+                            firm_id=firm_id,
+                            document_id=doc.id,
+                            entity_id=None,
+                            attribute=attr,
+                            value_enc=enc.encrypt_text(
+                                fernet, None if value is None else str(value)
+                            ),
+                            value_normalized_enc=enc.encrypt_text(
+                                fernet,
+                                None if value_norm is None else str(value_norm),
+                            ),
+                            page=fact.get("page"),
+                            snippet_enc=enc.encrypt_text(fernet, snippet),
+                            confidence=float(fact.get("confidence") or 0) or None,
+                            created_at=_utcnow(),
+                            fact_blob_enc=enc.encrypt_json(fernet, fact),
+                        )
+                    )
+            if extraction_status is not None:
+                snap["extraction_status"] = extraction_status
+            if extraction_error is not None:
+                snap["extraction_error"] = extraction_error[:300] if extraction_error else None
+            if extraction_retry_done is not None:
+                snap["extraction_retry_done"] = bool(extraction_retry_done)
+            doc.snapshot_enc = enc.encrypt_json(fernet, snap)
+            s.commit()
+            return True
 
     def _upsert_entities(
         self,
