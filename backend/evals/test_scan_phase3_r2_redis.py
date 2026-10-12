@@ -325,6 +325,12 @@ def test_worker_main_enables_ephemeral_report_key(monkeypatch):
 
     monkeypatch.setattr(storage_mod, "_report_fernet_override", None)
     monkeypatch.setattr("app.worker_auth.require_worker_token_configured", lambda: None)
+    probed = {"n": 0}
+
+    def _probe():
+        probed["n"] += 1
+
+    monkeypatch.setattr("app.gemini_tasks.startup_validate_and_probe", _probe)
 
     def stop_loop(*a, **k):
         raise KeyboardInterrupt
@@ -332,3 +338,4 @@ def test_worker_main_enables_ephemeral_report_key(monkeypatch):
     monkeypatch.setattr("worker.pool.run_worker_pool", stop_loop)
     wm.main()
     assert storage_mod._report_fernet_override is not None
+    assert probed["n"] == 1, "scan worker must run models.get / TASK_* validation on startup"

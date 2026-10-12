@@ -14,6 +14,7 @@ from typing import Any
 from app.config import settings
 from app.fact_extract import _date
 from app.page_anchors import enrich_fact_anchors, locate_quote
+from app.scan_profile import boilerplate_skip_reason
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,12 @@ AI_MAX_CHARS = 12_000
 
 
 def _empty_usage(*, skipped: str | None = None) -> dict[str, Any]:
+    try:
+        from app.gemini_tasks import TASK_A_EXTRACT, task_config
+
+        model = task_config(TASK_A_EXTRACT).primary
+    except Exception:
+        model = settings.gemini_model
     usage: dict[str, Any] = {
         "prompt_tokens": 0,
         "candidates_tokens": 0,
@@ -76,8 +83,9 @@ def _empty_usage(*, skipped: str | None = None) -> dict[str, Any]:
         "total_tokens": 0,
         "calls": 0,
         "facts_added": 0,
-        "model": settings.gemini_model,
+        "model": model,
         "step": "ai_fact_extract",
+        "chunk_id": "full",
     }
     if skipped:
         usage["skipped"] = skipped
@@ -90,6 +98,9 @@ def extract_ai_facts(
     page_offsets: list[dict[str, int]] | None = None,
     limit: int = AI_MAX_FACTS,
     document_label: str | None = None,
+    doc_kind: str | None = None,
+    scan_profile: str | None = None,
+    chunk_id: str = "full",
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Call Gemini when configured; return (facts, usage). No-op without a key."""
     body = (text or "").strip()
@@ -98,6 +109,30 @@ def extract_ai_facts(
         return [], _empty_usage(skipped="empty_text")
     if not settings.gemini_api_key:
         return [], _empty_usage(skipped="no_api_key")
+
+    skip = boilerplate_skip_reason(
+        body, filename=label, display_name=label, doc_kind=doc_kind
+    )
+    if skip:
+        usage = _empty_usage(skipped=skip)
+        usage["chunk_id"] = chunk_id
+        logger.info(
+            "ai_fact_extract[%s] skipped=%s chunk_id=%s profile=%s",
+            label,
+            skip,
+            chunk_id,
+            scan_profile or "-",
+        )
+        return [], usage
+    if (scan_profile or "").strip().lower() == "court_filing":
+        usage = _empty_usage(skipped="court_filing")
+        usage["chunk_id"] = chunk_id
+        logger.info(
+            "ai_fact_extract[%s] skipped=court_filing chunk_id=%s",
+            label,
+            chunk_id,
+        )
+        return [], usage
 
     try:
         from app.engines.contextual_logic import (
@@ -110,8 +145,13 @@ def extract_ai_facts(
         logger.info("ai_fact_extract[%s] import skipped: %s", label, exc)
         return [], _empty_usage(skipped="import_error")
 
+    from app.gemini_tasks import TASK_A_EXTRACT, task_config
+
+    extract_cfg = task_config(TASK_A_EXTRACT)
     snippet = body[:AI_MAX_CHARS]
     usage = _empty_usage()
+    usage["chunk_id"] = chunk_id
+    usage["model"] = extract_cfg.primary
     try:
         response = _post_gemini(
             {
@@ -122,16 +162,24 @@ def extract_ai_facts(
                     }
                 ],
                 "generationConfig": _generation_config(
-                    FACT_SCHEMA, settings.gemini_claim_thinking_level
+                    FACT_SCHEMA, extract_cfg.thinking_level, model=extract_cfg.primary
                 ),
             },
             timeout=max(20, int(settings.gemini_timeout_s or 20)),
+            task=TASK_A_EXTRACT,
+            step="ai_fact_extract",
+            chunk_id=chunk_id,
         )
         usage.update(_usage_from_body(response))
         usage["calls"] = 1
         parsed = _parse_json_payload(response)
     except Exception as exc:
-        logger.info("ai_fact_extract[%s] skipped: %s", label, exc)
+        logger.info(
+            "ai_fact_extract[%s] skipped: %s chunk_id=%s",
+            label,
+            exc,
+            chunk_id,
+        )
         usage["skipped"] = "gemini_error"
         usage["error"] = str(exc)[:200]
         _log_usage(label, usage)
@@ -158,7 +206,7 @@ def extract_ai_facts(
 def _log_usage(document_label: str, usage: dict[str, Any]) -> None:
     logger.info(
         "ai_fact_extract[%s] tokens prompt=%s candidates=%s thoughts=%s total=%s "
-        "calls=%s facts_added=%s skipped=%s model=%s",
+        "calls=%s facts_added=%s skipped=%s model=%s chunk_id=%s",
         document_label,
         usage.get("prompt_tokens", 0),
         usage.get("candidates_tokens", 0),
@@ -168,6 +216,7 @@ def _log_usage(document_label: str, usage: dict[str, Any]) -> None:
         usage.get("facts_added", 0),
         usage.get("skipped") or "-",
         usage.get("model") or settings.gemini_model,
+        usage.get("chunk_id") or "full",
     )
 
 

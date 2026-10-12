@@ -45,15 +45,34 @@ class Settings(BaseSettings):
     ela_quality: int = 90
     ela_scale: int = 18
 
-    # Contextual engine, tier 2: claim verification. Off until a key is supplied.
-    # Sends only generated questions to a third party, never document content.
+    # Contextual / multimodal Gemini. Off until a key is supplied.
     gemini_api_key: str | None = None
-    gemini_model: str = "gemini-2.5-flash"
     gemini_timeout_s: int = 20
     contextual_max_chars: int = 40_000
     contextual_max_claims: int = 5
     contextual_min_confidence: int = 70
     contextual_window: int = 400
+
+    # Per-task model config (env-overridable). Do not use shutdown gemini-2.0-flash.
+    # Task A — AI fact extract (near-instant; never Batch API).
+    task_a_extract_primary: str = "gemini-3.6-flash"
+    task_a_extract_backup: str = "gemini-3.5-flash-lite"
+    task_a_extract_thinking_level: str = "minimal"
+    # Task B — entity / issuer timeline claims (questions only).
+    task_b_entity_primary: str = "gemini-3.8-flash"
+    task_b_entity_backup: str = "gemini-3.6-flash"
+    task_b_entity_thinking_level: str = "medium"
+    # Task C — contradiction / gotcha candidates + Gemini verify path.
+    task_c_contra_primary: str = "gemini-3.8-flash"
+    task_c_contra_backup: str = "gemini-3.6-flash"
+    task_c_contra_thinking_level: str = "high"
+    # Task D — multimodal visual / historical fraud + logo chrome.
+    task_d_visual_primary: str = "gemini-3.8-flash"
+    task_d_visual_backup: str = "gemini-3.6-flash"
+    task_d_visual_thinking_level: str = "medium"
+    # generateContent ``service_tier`` (REST GenerateContentRequest.serviceTier).
+    # Applied to Task A only. standard (omit) | priority | flex — never Batch for scans.
+    gemini_service_tier: str = "standard"
 
     # Contextual engine, tier 3: full document analysis. Requires a second, deliberate
     # opt-in because it uploads the original file and extracted text to Google.
@@ -64,10 +83,11 @@ class Settings(BaseSettings):
     contextual_max_upload_mb: int = 15
     contextual_max_ai_findings: int = 12
     gemini_document_timeout_s: int = 90
-    # Cap Gemini "thinking" to cut latency and token burn. Gemini 3.x uses thinkingLevel
-    # (minimal|low|medium|high). Gemini 2.5 Flash uses thinkingBudget (0 disables).
-    gemini_thinking_level: str = "minimal"
-    gemini_claim_thinking_level: str = "minimal"
+
+    @property
+    def gemini_model(self) -> str:
+        """Compat alias — Task D visual primary (multimodal path)."""
+        return (self.task_d_visual_primary or "").strip()
 
     # Hybrid control plane. "open" unlocks scans locally; "license" needs LICENSE_KEY;
     # "cloud" expects login against CLOUD_CONTROL_URL (stubbed when URL is empty).
@@ -145,7 +165,7 @@ class Settings(BaseSettings):
     # Concurrent local PDF/OCR processes. Keep at 1 on small Render plans.
     scan_max_concurrent: int = 1
     # Gemini stage (web process threads). Independent of local process slots.
-    # Keep low on 512 MB until the plan is upgraded to 2 GB.
+    # Cap at 2 while Google 503/overloaded rates are high (was 3 in pilot).
     gemini_max_concurrent: int = 2
     # Cap total base64/PDF payload bytes in flight across Gemini calls (MB).
     gemini_max_inflight_mb: int = 60

@@ -400,6 +400,8 @@ def run_gemini_stage(
         ai_usage_out=ai_fact_usage,
         document_label=display_name or source.name,
         enable_ai=True,
+        doc_kind=doc_kind,
+        scan_profile=profile,
     )
     update_job(
         job_id,
@@ -596,6 +598,8 @@ def run_gemini_stage(
         "doc_kind": doc_kind,
         "case_impact": impact_log,
         "ai_fact_extract_usage": ai_fact_usage,
+        "skip_reason": (contextual.extras or {}).get("skip_reason")
+        or (ai_fact_usage or {}).get("skipped"),
         "gemini_usage": {
             **((contextual.extras or {}).get("gemini_usage") or {}),
             "ai_fact_extract": ai_fact_usage,
@@ -670,8 +674,8 @@ def run_gemini_stage(
         pass
 
     gemini_wall = time.monotonic() - gemini_started
-    gemini_snap = gemini_timing.snapshot()
-    gemini_s = float(gemini_snap.get("gemini_s") or 0.0)
+    gemini_summary = gemini_timing.log_scan_summary(job_id=job_id)
+    gemini_s = float(gemini_summary.get("gemini_s") or 0.0)
     other_s = round(max(0.0, gemini_wall - gemini_s), 2)
     total_s = round(local_s + gemini_wall, 2)
     timing = {
@@ -679,9 +683,13 @@ def run_gemini_stage(
         "gemini_s": round(gemini_s, 2),
         "other_s": other_s,
         "total_s": total_s,
-        "gemini_calls": gemini_snap.get("calls"),
+        "gemini_calls": gemini_summary.get("calls"),
+        "gemini_http_503": gemini_summary.get("http_503"),
+        "gemini_fallbacks": gemini_summary.get("fallback_count"),
+        "gemini_by_task_model_served_tier": gemini_summary.get("by_task_model_tier"),
     }
     comparison["timing"] = timing
+    comparison["gemini_scan_summary"] = gemini_summary
 
     if ai_review == "incomplete":
         range_note = ""

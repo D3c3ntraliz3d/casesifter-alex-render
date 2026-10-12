@@ -105,9 +105,16 @@ def _recompute_process_main(payload: dict[str, Any]) -> None:
     try:
         from app.fact_memory.store import FactMemoryStore, reset_store
 
-        # Fresh store in the child (spawn-safe).
+        # Fresh store in the child (spawn-safe). Prefer absolute values from the
+        # parent — Windows spawn does not always see pytest monkeypatched env.
+        db_url = str(payload.get("database_url") or "").strip() or None
+        if db_url and db_url.startswith("sqlite:///"):
+            os.environ["FACT_MEMORY_SQLITE_PATH"] = db_url[len("sqlite:///") :]
+        master_key = str(payload.get("master_key") or "").strip()
+        if master_key:
+            os.environ["FACT_MEMORY_MASTER_KEY"] = master_key
         reset_store()
-        store = FactMemoryStore()
+        store = FactMemoryStore(database_url=db_url) if db_url else FactMemoryStore()
 
         write_progress(percent=1, message="Starting recompute", updated=0, total=0)
 
@@ -201,12 +208,20 @@ def start_recompute_job(
         _JOBS[job_id] = row
     _atomic_write_json(progress_path, row)
 
+    database_url = (os.environ.get("DATABASE_URL") or "").strip()
+    if not database_url:
+        sqlite_path = (os.environ.get("FACT_MEMORY_SQLITE_PATH") or "").strip()
+        if sqlite_path:
+            database_url = f"sqlite:///{sqlite_path}"
+    master_key = (os.environ.get("FACT_MEMORY_MASTER_KEY") or "").strip() or None
     payload = {
         "job_id": job_id,
         "firm_id": firm_id,
         "matter_id": matter_id,
         "user_id": user_id,
         "progress_path": str(progress_path),
+        "database_url": database_url or None,
+        "master_key": master_key,
     }
 
     def _scans_ahead() -> int:

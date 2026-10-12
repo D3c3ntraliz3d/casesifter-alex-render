@@ -30,6 +30,7 @@ import base64
 import hashlib
 import json
 import logging
+import random
 import re
 import threading
 import time
@@ -47,6 +48,11 @@ from app.config import settings
 from app.engines import finding, timed_module
 from app.finding_policy import is_header_or_arrears_noise, is_recorded_instrument_math_noise
 from app.models import Finding, ModuleResult
+from app.scan_profile import (
+    PROFILE_COURT_FILING,
+    boilerplate_skip_reason,
+    is_issuer_check_document,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -452,12 +458,27 @@ def _run(
     *,
     scan_profile: str = "forensic",
 ) -> tuple[list[Finding], dict[str, Any]]:
-    court_filing = scan_profile == "court_filing"
+    court_filing = scan_profile == PROFILE_COURT_FILING
+    filename = str((doc_meta or {}).get("filename") or "")
+    doc_kind = str((doc_meta or {}).get("doc_kind") or "") or None
+    skip_reason = boilerplate_skip_reason(
+        text, filename=filename, display_name=filename, doc_kind=doc_kind
+    )
     entities = extract_entities(text)
     # File-creation vs body-date checks are exhibit-authenticity signals; pleadings are
     # routinely e-filed years after the caption date.
-    findings = [] if court_filing else check_internal_timeline(entities, doc_meta)
-    claims = build_claims(entities)
+    findings = [] if (court_filing or skip_reason) else check_internal_timeline(entities, doc_meta)
+    run_issuer = (
+        not skip_reason
+        and is_issuer_check_document(
+            text,
+            scan_profile=scan_profile,
+            doc_kind=doc_kind,
+            filename=filename,
+            display_name=filename,
+        )
+    )
+    claims = build_claims(entities, text=text) if run_issuer else []
 
     extras: dict[str, Any] = {
         "entities": entities.summary(),
@@ -475,6 +496,17 @@ def _run(
             "calls": 0,
         },
     }
+    if skip_reason:
+        extras["skip_reason"] = skip_reason
+        extras["external_verification"] = f"skipped_{skip_reason}"
+        extras["document_analysis"] = f"skipped_{skip_reason}"
+        logger.info(
+            "contextual_logic skip_reason=%s doc=%s profile=%s",
+            skip_reason,
+            (filename or "-")[:80],
+            scan_profile,
+        )
+        return findings, extras
 
     if not settings.gemini_api_key:
         return findings, extras
@@ -489,7 +521,8 @@ def _run(
             settings.gemini_model
         ):
             logger.error(
-                "Refusing multimodal Gemini calls: GEMINI_MODEL failed ^gemini-[\\w.-]+$ validation"
+                "Refusing multimodal Gemini calls: TASK_D_VISUAL_PRIMARY failed "
+                "^gemini-[\\w.-]+$ validation"
             )
             extras["document_analysis"] = {"status": "refused", "reason": "invalid_model"}
         elif settings.contextual_multimodal and not court_filing:
@@ -560,7 +593,7 @@ def _run(
                     findings.append(_verification_unavailable(error))
                     saw_error = True
                 continue
-            record = {"question": claim.question, **verdict}
+            record = _verification_record(claim, verdict)
             extras["verifications"].append(record)
             contradiction = _finding_from_verdict(claim, verdict)
             if contradiction:
@@ -731,14 +764,42 @@ def _span_overlaps_any(start: int, end: int, spans: list[tuple[int, int]]) -> bo
     return any(start < span_end and end > span_start for span_start, span_end in spans)
 
 
-def build_claims(entities: Entities) -> list[Claim]:
-    """One claim per organization, so a five-date invoice does not yield five near-identical questions.
+# Party/caption/attorney cues — never treat these orgs as statement issuers.
+_CAPTION_PARTY_CUE_RE = re.compile(
+    r"(?i)\b("
+    r"plaintiff|defendant|petitioner|respondent|index\s+no|against|"
+    r"attorney\s+for|counsel\s+for|esq\.?|law\s+office|please\s+take\s+notice|"
+    r"summons|complaint|notice\s+of\s+motion"
+    r")\b"
+)
+_LETTERHEAD_CHARS = 1800
 
-    The location is the one nearest that organization's own mention rather than nearest
-    the date, which otherwise attaches a party to the counterparty's address. The date is
-    the earliest mentioned near any occurrence of the organization, since the earliest date
-    is what a not-yet-existing entity would contradict. If no date is nearby (common on
-    multi-page scanned exhibits), fall back to the earliest body date in the file.
+
+def _is_letterhead_issuer(name: str, mentions: list[Mention], text: str) -> bool:
+    """True when the org is a known statement issuer in the header, not a caption party."""
+    canonical = _canonical_issuer(name)
+    known = {n.lower() for n in KNOWN_ISSUERS} | {
+        _canonical_issuer(n).lower() for n in KNOWN_ISSUERS
+    }
+    if canonical.lower() not in known and name.lower() not in known:
+        return False
+    body = text or ""
+    for mention in mentions:
+        if mention.start > _LETTERHEAD_CHARS:
+            continue
+        left = max(0, mention.start - 160)
+        right = min(len(body), mention.start + len(mention.text) + 160)
+        if _CAPTION_PARTY_CUE_RE.search(body[left:right]):
+            continue
+        return True
+    return False
+
+
+def build_claims(entities: Entities, text: str = "") -> list[Claim]:
+    """One claim per letterhead issuer on a statement-like exhibit.
+
+    Only known utility/bank issuers named in the document header are checked —
+    never caption parties, defendants, or attorney-block entities.
     """
     by_org: dict[str, list[Mention]] = {}
     for mention in entities.organizations:
@@ -751,6 +812,14 @@ def build_claims(entities: Entities) -> list[Claim]:
     for name, mentions in by_org.items():
         if name.lower() in ORG_STOPWORDS or name.lower() == "account services":
             continue
+        if text and not _is_letterhead_issuer(name, mentions, text):
+            continue
+        if not text:
+            # Callers without text keep legacy behavior only for known issuers.
+            if _canonical_issuer(name).lower() not in {
+                _canonical_issuer(n).lower() for n in KNOWN_ISSUERS
+            }:
+                continue
         anchor = mentions[0]
         location = _nearest(entities.locations, anchor.start)
         if name in NY_MARKET_ISSUERS:
@@ -876,26 +945,33 @@ def check_internal_timeline(entities: Entities, doc_meta: dict[str, Any]) -> lis
     return findings
 
 
-def _thinking_config(level: str) -> dict[str, Any]:
+def _thinking_config(level: str, *, model: str | None = None) -> dict[str, Any]:
     """Cap Gemini thinking. Gemini 3.x uses thinkingLevel; 2.5 Flash uses thinkingBudget."""
+    from app.gemini_tasks import VALID_THINKING_LEVELS
+
     level = (level or "minimal").strip().lower()
-    if level not in {"minimal", "low", "medium", "high"}:
+    if level not in VALID_THINKING_LEVELS:
         level = "minimal"
-    model = (settings.gemini_model or "").lower()
-    if "2.5" in model:
+    model_l = (model or settings.gemini_model or "").lower()
+    if "2.5" in model_l:
         # 0 disables thinking on 2.5 Flash when the caller asks for minimal.
         budget = 0 if level == "minimal" else {"low": 512, "medium": 2048, "high": 8192}.get(level, 0)
         return {"thinkingConfig": {"thinkingBudget": budget}}
     return {"thinkingConfig": {"thinkingLevel": level}}
 
 
-def _generation_config(schema: dict[str, Any], thinking_level: str) -> dict[str, Any]:
+def _generation_config(
+    schema: dict[str, Any],
+    thinking_level: str,
+    *,
+    model: str | None = None,
+) -> dict[str, Any]:
     config: dict[str, Any] = {
         "temperature": 0,
         "responseMimeType": "application/json",
         "responseSchema": schema,
     }
-    config.update(_thinking_config(thinking_level))
+    config.update(_thinking_config(thinking_level, model=model))
     return config
 
 
@@ -942,6 +1018,7 @@ def analyze_document(
     *,
     file_ref: dict[str, Any] | None = None,
     page_offset: int = 0,
+    chunk_id: str = "full",
 ) -> dict[str, Any]:
     """Tier 3: send the original file and extracted text to Gemini for alteration review.
 
@@ -960,14 +1037,20 @@ def analyze_document(
         parts.append({"inline_data": {"mime_type": mime_type, "data": file_base64}})
         file_sent = mime_type
 
+    from app.gemini_tasks import TASK_D_VISUAL, task_config
+
+    visual = task_config(TASK_D_VISUAL)
     body = _post_gemini(
         {
             "contents": [{"role": "user", "parts": parts}],
             "generationConfig": _generation_config(
-                FRAUD_SCHEMA, settings.gemini_thinking_level
+                FRAUD_SCHEMA, visual.thinking_level, model=visual.primary
             ),
         },
         timeout=settings.gemini_document_timeout_s,
+        task=TASK_D_VISUAL,
+        step="document_analysis",
+        chunk_id=chunk_id,
     )
     _accumulate_gemini_usage(extras, body)
     parsed = _parse_json_payload(body)
@@ -1255,6 +1338,7 @@ def _run_document_analysis_chunked(
                     local_extras,
                     file_ref=file_part(file_obj, mime_type="application/pdf"),
                     page_offset=offset,
+                    chunk_id=f"p{chunk.page_start}-{chunk.page_end}",
                 )
                 with lock:
                     merged_findings.extend(result.get("findings") or [])
@@ -1393,29 +1477,136 @@ def _encode_source_file(source_file: Path | None) -> tuple[str | None, str | Non
 
 
 RETRYABLE_GEMINI_STATUSES = frozenset({429, 500, 502, 503, 504})
+GEMINI_BUSY_MESSAGE = "Gemini busy, retrying…"
 
 
-def _post_gemini(payload: dict[str, Any], timeout: int | None = None) -> dict[str, Any]:
+# Primary: 1 try + 3 retries (~20–30s total backoff), then backup.
+_PRIMARY_MAX_ATTEMPTS = 4
+_BACKUP_MAX_ATTEMPTS = 3
+# Sleeps between primary attempts (3 gaps) sum to ~20–30s with jitter.
+_PRIMARY_BACKOFF_BASES = (5.0, 8.0, 12.0)
+
+
+def gemini_retry_delay(attempt: int, headers, *, code: int = 503) -> float:
+    """Backoff + jitter. Primary gaps target ~20–30s total; backup uses shorter expo."""
+    retry_after = headers.get("Retry-After") if headers else None
+    try:
+        if retry_after is not None:
+            delay = float(retry_after)
+            return min(120.0, max(1.0, delay + random.uniform(0.25, 2.0)))
+    except (TypeError, ValueError):
+        pass
+    if attempt < len(_PRIMARY_BACKOFF_BASES):
+        base = _PRIMARY_BACKOFF_BASES[attempt]
+        return min(45.0, max(1.0, base + random.uniform(0.5, 3.0)))
+    # Backup (or overflow): shorter expo so we do not stall the scan.
+    base = 3.0 if int(code) == 429 else 4.0
+    delay = base * (2 ** max(0, attempt - len(_PRIMARY_BACKOFF_BASES)))
+    delay += random.uniform(0.5, 3.0)
+    return min(60.0, max(1.0, delay))
+
+
+def _notify_gemini_busy(job_id: str) -> None:
+    """Surface a non-terminal busy message while retries are still in flight."""
+    if not job_id:
+        return
+    try:
+        from app.storage import update_job
+
+        update_job(job_id, status="running", message=GEMINI_BUSY_MESSAGE)
+    except Exception:
+        logger.debug("gemini busy progress update failed job=%s", job_id[:8], exc_info=True)
+    try:
+        from app.v1_analysis import _update_durable_job
+
+        _update_durable_job(job_id, status="running", message=GEMINI_BUSY_MESSAGE, error=None)
+    except Exception:
+        logger.debug("gemini busy durable update failed job=%s", job_id[:8], exc_info=True)
+
+
+def _post_gemini(
+    payload: dict[str, Any],
+    timeout: int | None = None,
+    *,
+    task: str,
+    step: str = "gemini",
+    chunk_id: str = "-",
+) -> dict[str, Any]:
     from app.gemini_cancel import CancelledError, current_job_id, is_cancelled
     from app.gemini_review_state import note_ai_review_failure, reason_for_http_status
-    from app.gemini_timing import GeminiTimer
+    from app.gemini_tasks import service_tier_for_task, task_config
+    from app.gemini_timing import GeminiTimer, note_fallback, note_http_503, note_success
 
     if is_cancelled():
         raise CancelledError("Gemini stage cancelled.")
 
-    url = GEMINI_ENDPOINT.format(model=settings.gemini_model)
-    body_bytes = json.dumps(payload).encode("utf-8")
-    max_attempts = 5
+    cfg = task_config(task)
+    primary = cfg.primary
+    backup = cfg.backup
+    thinking_level = cfg.thinking_level
+    model = primary
+    on_backup = False
+    primary_failures = 0
+    backup_failures = 0
+    requested_tier = service_tier_for_task(task) or "standard"
     last_err: Exception | None = None
     last_reason = "error"
     # Prefer document timeout when caller omits; never hang unbounded.
     http_timeout = timeout if timeout is not None else settings.gemini_timeout_s
     job = current_job_id() or ""
     job_prefix = job[:8] if job else "-"
+    step_label = (step or "gemini")[:48]
+    chunk_label = str(chunk_id or "-")[:64]
+    task_label = cfg.task
+    global_attempt = 0
+
     with GeminiTimer():
-        for attempt in range(max_attempts):
+        while True:
             if is_cancelled():
                 raise CancelledError("Gemini stage cancelled.")
+            if not on_backup and primary_failures >= _PRIMARY_MAX_ATTEMPTS:
+                if backup and backup != primary:
+                    on_backup = True
+                    model = backup
+                    note_fallback()
+                    logger.warning(
+                        "gemini failover to backup task=%s model=%s after %s primary attempts "
+                        "thinking_level=%s requested_tier=%s chunk_id=%s job=%s",
+                        task_label,
+                        model,
+                        primary_failures,
+                        thinking_level,
+                        requested_tier,
+                        chunk_label,
+                        job_prefix,
+                    )
+                else:
+                    break
+            if on_backup and backup_failures >= _BACKUP_MAX_ATTEMPTS:
+                break
+
+            global_attempt += 1
+            attempt_on_model = (backup_failures if on_backup else primary_failures) + 1
+            max_on_model = _BACKUP_MAX_ATTEMPTS if on_backup else _PRIMARY_MAX_ATTEMPTS
+            url = GEMINI_ENDPOINT.format(model=model)
+            req_payload = dict(payload)
+            # generateContent accepts service_tier (REST GenerateContentRequest.serviceTier).
+            if requested_tier != "standard":
+                req_payload["service_tier"] = requested_tier
+            body_bytes = json.dumps(req_payload).encode("utf-8")
+            logger.info(
+                "gemini request task=%s step=%s chunk_id=%s attempt=%s/%s "
+                "model=%s thinking_level=%s requested_tier=%s job=%s",
+                task_label,
+                step_label,
+                chunk_label,
+                attempt_on_model,
+                max_on_model,
+                model,
+                thinking_level,
+                requested_tier,
+                job_prefix,
+            )
             request = urllib.request.Request(
                 url,
                 data=body_bytes,
@@ -1427,49 +1618,112 @@ def _post_gemini(payload: dict[str, Any], timeout: int | None = None) -> dict[st
             )
             try:
                 with urllib.request.urlopen(request, timeout=http_timeout) as response:
-                    return json.loads(response.read().decode("utf-8"))
+                    raw = response.read().decode("utf-8")
+                    try:
+                        served = (
+                            response.headers.get("x-gemini-service-tier") or ""
+                        ).strip().lower()
+                    except Exception:
+                        served = ""
+                    served = served or "unknown"
+                    logger.info(
+                        "gemini response task=%s step=%s chunk_id=%s attempt=%s/%s "
+                        "model=%s thinking_level=%s requested_tier=%s served_tier=%s job=%s",
+                        task_label,
+                        step_label,
+                        chunk_label,
+                        attempt_on_model,
+                        max_on_model,
+                        model,
+                        thinking_level,
+                        requested_tier,
+                        served,
+                        job_prefix,
+                    )
+                    if requested_tier == "priority" and served == "standard":
+                        logger.warning(
+                            "gemini priority overflow downgraded to standard "
+                            "task=%s chunk_id=%s job=%s",
+                            task_label,
+                            chunk_label,
+                            job_prefix,
+                        )
+                    note_success(
+                        task=task_label,
+                        model=model,
+                        requested_tier=requested_tier,
+                        served_tier=served,
+                    )
+                    return json.loads(raw)
             except urllib.error.HTTPError as exc:
-                # Log status only — never document/request content.
+                try:
+                    err_served = (
+                        exc.headers.get("x-gemini-service-tier") if exc.headers else ""
+                    ) or ""
+                    err_served = str(err_served).strip().lower() or "-"
+                except Exception:
+                    err_served = "-"
+                if exc.code == 503:
+                    note_http_503()
                 logger.warning(
-                    "gemini non-200 status=%s attempt=%s/%s job=%s",
+                    "gemini non-200 status=%s task=%s step=%s chunk_id=%s attempt=%s/%s "
+                    "model=%s thinking_level=%s requested_tier=%s served_tier=%s job=%s",
                     exc.code,
-                    attempt + 1,
-                    max_attempts,
+                    task_label,
+                    step_label,
+                    chunk_label,
+                    attempt_on_model,
+                    max_on_model,
+                    model,
+                    thinking_level,
+                    requested_tier,
+                    err_served,
                     job_prefix,
                 )
                 detail = exc.read().decode("utf-8", errors="replace")[:300]
                 reason = reason_for_http_status(exc.code)
-                # Billing / permission errors are not retryable.
                 if exc.code in (402, 403):
                     logger.error(
-                        "gemini non-retryable status=%s attempt=%s/%s job=%s",
+                        "gemini non-retryable status=%s task=%s attempt=%s job=%s",
                         exc.code,
-                        attempt + 1,
-                        max_attempts,
+                        task_label,
+                        attempt_on_model,
                         job_prefix,
                     )
                     note_ai_review_failure(reason)
                     raise RuntimeError(f"Gemini returned HTTP {exc.code}: {detail}") from exc
-                # 429 = our quota; 500/502/503/504 = Google overloaded or hiccuping.
-                # Both are transient: back off and retry instead of failing the review.
-                if exc.code in RETRYABLE_GEMINI_STATUSES and attempt + 1 < max_attempts:
-                    # Honor Retry-After when present; otherwise exponential backoff.
-                    retry_after = exc.headers.get("Retry-After") if exc.headers else None
-                    base = 1.5 if exc.code == 429 else 2.0
-                    try:
-                        delay = float(retry_after) if retry_after else (base * (2**attempt))
-                    except (TypeError, ValueError):
-                        delay = base * (2**attempt)
-                    delay = min(60.0, max(0.5, delay))
+                if exc.code not in RETRYABLE_GEMINI_STATUSES:
+                    note_ai_review_failure(reason)
+                    raise RuntimeError(f"Gemini returned HTTP {exc.code}: {detail}") from exc
+
+                if on_backup:
+                    backup_failures += 1
+                else:
+                    primary_failures += 1
+                last_err = RuntimeError(f"Gemini returned HTTP {exc.code}: {detail}")
+                last_reason = reason
+                more_primary = (not on_backup) and primary_failures < _PRIMARY_MAX_ATTEMPTS
+                more_backup = on_backup and backup_failures < _BACKUP_MAX_ATTEMPTS
+                will_failover = (
+                    (not on_backup)
+                    and primary_failures >= _PRIMARY_MAX_ATTEMPTS
+                    and backup
+                    and backup != primary
+                )
+                if more_primary or more_backup or will_failover:
+                    _notify_gemini_busy(job)
+                    delay = gemini_retry_delay(
+                        max(0, global_attempt - 1),
+                        exc.headers,
+                        code=exc.code,
+                    )
                     time.sleep(delay)
-                    last_err = RuntimeError(f"Gemini returned HTTP {exc.code}: {detail}")
-                    last_reason = reason
                     continue
-                note_ai_review_failure(reason)
-                raise RuntimeError(f"Gemini returned HTTP {exc.code}: {detail}") from exc
+                break
             except urllib.error.URLError as exc:
                 note_ai_review_failure("error")
                 raise RuntimeError(f"Could not reach Gemini: {exc.reason}") from exc
+
     if last_err is not None:
         note_ai_review_failure(last_reason)
         raise last_err
@@ -1496,13 +1750,19 @@ def _parse_json_payload(body: dict[str, Any]) -> dict[str, Any]:
 
 def verify_claim(question: str, extras: dict[str, Any] | None = None) -> dict[str, Any]:
     """Tier 2: ask Gemini to adjudicate one claim. Sends the question only, no document content."""
+    from app.gemini_tasks import TASK_B_ENTITY, task_config
+
+    entity = task_config(TASK_B_ENTITY)
     body = _post_gemini(
         {
             "contents": [{"role": "user", "parts": [{"text": PROMPT.format(question=question)}]}],
             "generationConfig": _generation_config(
-                VERDICT_SCHEMA, settings.gemini_claim_thinking_level
+                VERDICT_SCHEMA, entity.thinking_level, model=entity.primary
             ),
-        }
+        },
+        task=TASK_B_ENTITY,
+        step="issuer_check",
+        chunk_id="claim",
     )
     _accumulate_gemini_usage(extras, body)
     parsed = _parse_json_payload(body)
@@ -1519,7 +1779,7 @@ def verify_claim(question: str, extras: dict[str, Any] | None = None) -> dict[st
         "model_confidence": max(0.0, min(100.0, model_confidence)),
         "reasoning": str(parsed.get("reasoning", ""))[:600],
         "basis": str(parsed.get("basis", ""))[:200],
-        "model": settings.gemini_model,
+        "model": entity.primary,
     }
 
 
@@ -1635,7 +1895,27 @@ def _finding_from_analysis(
     )
 
 
+def _verification_record(claim: Claim, verdict: dict[str, Any]) -> dict[str, Any]:
+    """Sanitize claim-check output for the report. Unverifiable is informational only."""
+    status = str(verdict.get("verdict") or "unverifiable").lower()
+    record: dict[str, Any] = {
+        "question": claim.question,
+        "organization": claim.organization,
+        "verdict": status,
+        "model": verdict.get("model"),
+        "basis": verdict.get("basis"),
+        "reasoning": verdict.get("reasoning"),
+    }
+    if status == "unverifiable":
+        # Neutral — never show a confidence % next to "unverifiable" (reads as suspicious).
+        record["informational"] = True
+        return record
+    record["model_confidence"] = verdict.get("model_confidence")
+    return record
+
+
 def _finding_from_verdict(claim: Claim, verdict: dict[str, Any]) -> Finding | None:
+    # supported / unverifiable never raise severity or become red flags.
     if verdict["verdict"] != "contradicted":
         return None
     if verdict["model_confidence"] < settings.contextual_min_confidence:
@@ -1666,6 +1946,7 @@ def _finding_from_verdict(claim: Claim, verdict: dict[str, Any]) -> Finding | No
             "model_confidence": verdict["model_confidence"],
             "basis": verdict.get("basis"),
             "ai_generated": True,
+            "analysis_type": "historical_impossibility",
         },
         recommended_action=(
             "Treat this as a research lead only. Confirm against the Secretary of State registry or "

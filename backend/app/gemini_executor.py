@@ -36,7 +36,7 @@ _ROLLING_GEMINI_S: deque[float] = deque(maxlen=24)
 def _max_ahead() -> int:
     from app.config import settings
 
-    return max(1, int(settings.gemini_max_concurrent or 4))
+    return max(1, int(settings.gemini_max_concurrent or 2))
 
 
 def _stage_timeout_s() -> float:

@@ -1481,6 +1481,9 @@ def _ask_candidates(claims: list[dict[str, Any]], evidence: list[dict[str, Any]]
         f"- {item['source']}: " + " | ".join(item["snippets"][:3]) for item in evidence[:8]
     )
     try:
+        from app.gemini_tasks import TASK_C_CONTRA, task_config
+
+        contra = task_config(TASK_C_CONTRA)
         body = _post_gemini(
             {
                 "contents": [
@@ -1489,9 +1492,14 @@ def _ask_candidates(claims: list[dict[str, Any]], evidence: list[dict[str, Any]]
                         "parts": [{"text": CANDIDATE_PROMPT.format(claims=claim_block, evidence=ev_block)}],
                     }
                 ],
-                "generationConfig": _generation_config(CANDIDATE_SCHEMA, settings.gemini_thinking_level),
+                "generationConfig": _generation_config(
+                    CANDIDATE_SCHEMA, contra.thinking_level, model=contra.primary
+                ),
             },
             timeout=max(settings.gemini_timeout_s, 40),
+            task=TASK_C_CONTRA,
+            step="gotcha_candidates",
+            chunk_id="candidates",
         )
         parsed = _parse_json_payload(body)
     except Exception:

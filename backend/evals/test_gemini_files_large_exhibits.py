@@ -56,7 +56,7 @@ def test_20mb_pdf_uses_files_api_and_deletes(tmp_path, monkeypatch):
         if file_obj:
             deleted.append(str(file_obj.get("name") if isinstance(file_obj, dict) else file_obj))
 
-    def fake_analyze(text, file_base64, mime_type, extras=None, *, file_ref=None, page_offset=0):
+    def fake_analyze(text, file_base64, mime_type, extras=None, *, file_ref=None, page_offset=0, chunk_id="full"):
         assert file_base64 is None
         assert file_ref is not None
         assert file_ref["file_data"]["file_uri"]
@@ -119,7 +119,7 @@ def test_planted_forgery_on_page_900_reports_page_900(tmp_path, monkeypatch):
     source = tmp_path / "long.pdf"
     _blank_pdf(source, 1200)
 
-    def fake_analyze(text, file_base64, mime_type, extras=None, *, file_ref=None, page_offset=0):
+    def fake_analyze(text, file_base64, mime_type, extras=None, *, file_ref=None, page_offset=0, chunk_id="full"):
         # Spec: plant on chunk-local page 300 with offset 600 → original page 900.
         findings = []
         if page_offset == 600:
@@ -191,7 +191,7 @@ def test_failed_chunk_marks_partial(tmp_path, monkeypatch):
 
     calls = {"n": 0}
 
-    def fake_analyze(text, file_base64, mime_type, extras=None, *, file_ref=None, page_offset=0):
+    def fake_analyze(text, file_base64, mime_type, extras=None, *, file_ref=None, page_offset=0, chunk_id="full"):
         calls["n"] += 1
         if page_offset == 0:
             raise RuntimeError("chunk boom")

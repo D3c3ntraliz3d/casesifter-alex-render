@@ -50,16 +50,42 @@ services:
         value: "30"
       - key: ANALYSIS_API_KEYS
         sync: false
-      # Keys + model live only in Dashboard (sync:false) so blueprint sync cannot overwrite.
+      # Keys live only in Dashboard (sync:false) so blueprint sync cannot overwrite.
       - key: GEMINI_API_KEY
-        sync: false
-      - key: GEMINI_MODEL
         sync: false
       - key: CONTEXTUAL_MULTIMODAL
         value: "true"
       - key: OCR_MAX_PAGES
         value: "40"
+      # Per-task Gemini models (no gemini-2.0-flash).
+      - key: TASK_A_EXTRACT_PRIMARY
+        value: "gemini-3.6-flash"
+      - key: TASK_A_EXTRACT_BACKUP
+        value: "gemini-3.5-flash-lite"
+      - key: TASK_A_EXTRACT_THINKING_LEVEL
+        value: "minimal"
+      - key: TASK_B_ENTITY_PRIMARY
+        value: "gemini-3.8-flash"
+      - key: TASK_B_ENTITY_BACKUP
+        value: "gemini-3.6-flash"
+      - key: TASK_B_ENTITY_THINKING_LEVEL
+        value: "medium"
+      - key: TASK_C_CONTRA_PRIMARY
+        value: "gemini-3.8-flash"
+      - key: TASK_C_CONTRA_BACKUP
+        value: "gemini-3.6-flash"
+      - key: TASK_C_CONTRA_THINKING_LEVEL
+        value: "high"
+      - key: TASK_D_VISUAL_PRIMARY
+        value: "gemini-3.8-flash"
+      - key: TASK_D_VISUAL_BACKUP
+        value: "gemini-3.6-flash"
+      - key: TASK_D_VISUAL_THINKING_LEVEL
+        value: "medium"
+      - key: GEMINI_SERVICE_TIER
+        value: "standard"
       # Concurrency / memory caps: Dashboard-owned after Standard upgrade.
+      # Keep GEMINI_MAX_CONCURRENT=2 while Google 503/overloaded rates are high.
       - key: SCAN_MAX_CONCURRENT
         sync: false
       - key: GEMINI_MAX_CONCURRENT
@@ -174,8 +200,33 @@ services:
       # Pipeline settings (same values as the analysis service).
       - key: GEMINI_API_KEY
         sync: false
-      - key: GEMINI_MODEL
-        sync: false
+      # Per-task Gemini models (no gemini-2.0-flash). Same as casesifter-analysis.
+      - key: TASK_A_EXTRACT_PRIMARY
+        value: "gemini-3.6-flash"
+      - key: TASK_A_EXTRACT_BACKUP
+        value: "gemini-3.5-flash-lite"
+      - key: TASK_A_EXTRACT_THINKING_LEVEL
+        value: "minimal"
+      - key: TASK_B_ENTITY_PRIMARY
+        value: "gemini-3.8-flash"
+      - key: TASK_B_ENTITY_BACKUP
+        value: "gemini-3.6-flash"
+      - key: TASK_B_ENTITY_THINKING_LEVEL
+        value: "medium"
+      - key: TASK_C_CONTRA_PRIMARY
+        value: "gemini-3.8-flash"
+      - key: TASK_C_CONTRA_BACKUP
+        value: "gemini-3.6-flash"
+      - key: TASK_C_CONTRA_THINKING_LEVEL
+        value: "high"
+      - key: TASK_D_VISUAL_PRIMARY
+        value: "gemini-3.8-flash"
+      - key: TASK_D_VISUAL_BACKUP
+        value: "gemini-3.6-flash"
+      - key: TASK_D_VISUAL_THINKING_LEVEL
+        value: "medium"
+      - key: GEMINI_SERVICE_TIER
+        value: "standard"
       - key: GEMINI_MAX_CONCURRENT
         sync: false
       - key: GEMINI_MAX_INFLIGHT_MB

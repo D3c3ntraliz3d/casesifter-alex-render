@@ -73,7 +73,7 @@ def _health_payload() -> dict:
         "build": "analysis-lockdown-v3",
         "git_commit_source": "RENDER_GIT_COMMIT",
         "scan_max_concurrent": max(1, int(settings.scan_max_concurrent or 1)),
-        "gemini_max_concurrent": max(1, int(settings.gemini_max_concurrent or 4)),
+        "gemini_max_concurrent": max(1, int(settings.gemini_max_concurrent or 2)),
         "gemini_max_inflight_mb": max(16, int(settings.gemini_max_inflight_mb or 150)),
     }
     if git_commit:

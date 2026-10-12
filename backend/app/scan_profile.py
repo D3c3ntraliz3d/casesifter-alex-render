@@ -81,6 +81,40 @@ STATEMENT_HINT_RE = re.compile(
     r")"
 )
 
+# Known procedural / form filings — skip issuer checks and AI fact extraction.
+# Caption chrome alone is NOT enough (blank NYSCEF scans stay forensic).
+BOILERPLATE_FILING_RE = re.compile(
+    r"(?i)("
+    r"notice\s+of\s+electronic\s+filing|"
+    r"notification\s+of\s+electronic\s+filing|"
+    r"consent\s+to\s+(?:electronic\s+)?e-?filing|"
+    r"consent\s+to\s+electronic\s+filing|"
+    r"e-?filing\s+consent|"
+    r"notice\s+of\s+appearance|"
+    r"request\s+for\s+judicial\s+intervention|"
+    r"\brji\b|"
+    r"affidavit\s+of\s+service|"
+    r"affirmation\s+of\s+service|"
+    r"proof\s+of\s+service|"
+    r"document\s+cover\s+sheet|"
+    r"civil\s+cover\s+sheet|"
+    r"nyscef\s+(?:case\s+)?confirmation|"
+    r"confirmation\s+notice"
+    r")"
+)
+
+BOILERPLATE_NAME_RE = re.compile(
+    r"(?i)("
+    r"consent.*e-?fil|"
+    r"e-?fil.*consent|"
+    r"notice\s+of\s+appearance|"
+    r"\brji\b|"
+    r"affidavit\s+of\s+service|"
+    r"affirmation\s+of\s+service|"
+    r"cover\s+sheet"
+    r")"
+)
+
 # Evidence packets — full fraudulent-document forensics.
 EXHIBIT_KINDS = frozenset(
     {
@@ -126,6 +160,71 @@ def looks_like_statement_text(text: str) -> bool:
 
 def looks_like_pleading_caption(text: str) -> bool:
     return bool(PLEADING_CAPTION_RE.search((text or "")[:8000]))
+
+
+def boilerplate_skip_reason(
+    text: str = "",
+    *,
+    filename: str = "",
+    display_name: str = "",
+    doc_kind: str | None = None,
+) -> str | None:
+    """Return a stable skip token when the file is a known form/boilerplate filing.
+
+    Used to skip issuer/authorization Gemini checks and AI fact extraction.
+    Does not reclassify scan-heavy exhibits that merely carry an e-filing stamp.
+    """
+    kind = (doc_kind or "").strip().lower()
+    if kind in {
+        "proof_of_service",
+        "rji",
+        "notice",
+        "calendar",
+    }:
+        # Explicit procedural kinds — still confirm body/name for notices.
+        if kind != "notice":
+            return f"boilerplate_kind_{kind}"
+    hay_name = f"{filename or ''} {display_name or ''}"
+    if BOILERPLATE_NAME_RE.search(hay_name):
+        return "boilerplate_filename"
+    head = (text or "")[:12000]
+    if not head.strip():
+        return None
+    # Statement-like body wins — a stamped utility bill is not boilerplate.
+    if looks_like_statement_text(head):
+        return None
+    match = BOILERPLATE_FILING_RE.search(head)
+    if match:
+        token = re.sub(r"[^a-z0-9]+", "_", match.group(0).lower()).strip("_")[:48]
+        return f"boilerplate_{token or 'filing'}"
+    if kind == "notice" and looks_like_pleading_caption(head):
+        return "boilerplate_kind_notice"
+    return None
+
+
+def is_issuer_check_document(
+    text: str,
+    *,
+    scan_profile: str = PROFILE_FORENSIC,
+    doc_kind: str | None = None,
+    filename: str = "",
+    display_name: str = "",
+) -> bool:
+    """Issuer/authorization checks only for statement/bill/invoice/letter exhibits."""
+    if scan_profile == PROFILE_COURT_FILING:
+        return False
+    if boilerplate_skip_reason(
+        text, filename=filename, display_name=display_name, doc_kind=doc_kind
+    ):
+        return False
+    kind = (doc_kind or "").strip().lower()
+    if kind in COURT_FILING_KINDS:
+        return False
+    if kind in {"bill", "statement", "invoice", "letter", "receipt"}:
+        return True
+    if kind in EXHIBIT_KINDS or not kind:
+        return looks_like_statement_text(text)
+    return False
 
 
 def infer_profile_from_text(text: str) -> str | None:
@@ -218,12 +317,11 @@ def finalize_scan_profile(
        NYSCEF uploads are blank-kind by default; promoting them to court_filing
        cleared whole matters in under a second with document_analysis skipped.
 
-    ``peek_text`` is reserved for callers / statement hints already applied in
-    ``resolve_scan_profile``.
     """
-    del peek_text  # statement hints handled in resolve_scan_profile
     origin = origin or {}
     if is_scan_media(suffix, origin):
+        # Scan-heavy media stays forensic for forgery lanes, but known form notices
+        # still skip Gemini issuer/fact extract via boilerplate_skip_reason at call sites.
         return PROFILE_FORENSIC
     if looks_like_exhibit_filename(filename) or looks_like_exhibit_filename(display_name):
         return PROFILE_FORENSIC
@@ -233,6 +331,12 @@ def finalize_scan_profile(
         return PROFILE_COURT_FILING
     if kind in EXHIBIT_KINDS:
         return PROFILE_FORENSIC
+
+    # Native-text blank-kind form notices (e-filing consent, RJI, cover sheet, …).
+    if boilerplate_skip_reason(
+        peek_text, filename=filename, display_name=display_name, doc_kind=doc_kind
+    ):
+        return PROFILE_COURT_FILING
 
     return apply_media_override(profile, suffix=suffix, origin=origin)
 

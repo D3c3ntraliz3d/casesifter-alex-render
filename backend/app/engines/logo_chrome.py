@@ -143,14 +143,20 @@ def run_logo_chrome_check(
     if not parts:
         return []
     try:
+        from app.gemini_tasks import TASK_D_VISUAL, task_config
+
+        visual = task_config(TASK_D_VISUAL)
         body = _post_gemini(
             {
                 "contents": [{"role": "user", "parts": parts}],
                 "generationConfig": _generation_config(
-                    CHROME_SCHEMA, settings.gemini_thinking_level
+                    CHROME_SCHEMA, visual.thinking_level, model=visual.primary
                 ),
             },
             timeout=settings.gemini_document_timeout_s,
+            task=TASK_D_VISUAL,
+            step="logo_chrome",
+            chunk_id="full",
         )
         if extras is not None:
             _accumulate_gemini_usage(extras, body)
