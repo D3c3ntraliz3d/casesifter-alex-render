@@ -3961,6 +3961,23 @@ function ReportViewer({
                 {caseAlerts.length} case-consistency alert{caseAlerts.length === 1 ? "" : "s"} vs prior filings.
               </p>
             )}
+            {((report.comparison?.priors_pending_extraction
+              || report.comparison?.case_consistency?.priors_pending_extraction
+              || 0) > 0) && (
+              <div className="ai-review-banner" style={{ marginTop: 8 }}>
+                <div>
+                  <p>Cross-document comparison incomplete</p>
+                  <p className="footnote">
+                    {report.comparison?.priors_pending_message
+                      || report.comparison?.case_consistency?.priors_pending_message
+                      || `${report.comparison?.priors_pending_extraction
+                        || report.comparison?.case_consistency?.priors_pending_extraction
+                      } earlier documents not yet included in cross-document comparison`}
+                    . Comparison will refresh automatically when extraction finishes.
+                  </p>
+                </div>
+              </div>
+            )}
             {hiddenCrossDoc > 0 && (
               <p className="footnote" style={{ marginTop: 4 }}>
                 Labeled fact mismatches (rate, payment, dates) are listed once on the case page,
@@ -4239,6 +4256,16 @@ function ReportViewer({
 
           {tab === "comparison" && (
             <>
+              {((report.comparison?.priors_pending_extraction
+                || report.comparison?.case_consistency?.priors_pending_extraction
+                || 0) > 0) && (
+                <p className="footnote" style={{ marginBottom: 12 }}>
+                  {report.comparison?.priors_pending_message
+                    || report.comparison?.case_consistency?.priors_pending_message
+                    || "Earlier documents not yet included in cross-document comparison"}
+                  .
+                </p>
+              )}
               <h3 className="serif">Facts in this document</h3>
               {(report.comparison?.facts || []).length === 0 ? (
                 <p className="footnote">No labeled loan dates, rates, or amounts were extracted from this file.</p>

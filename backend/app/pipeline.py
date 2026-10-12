@@ -451,10 +451,35 @@ def run_gemini_stage(
             extraction_error=extraction_error,
         )
         priors = cases_db.list_prior_snapshots(case_id, exclude_document_id=document_id)
-        try:
-            from app.fact_extract_backfill import enqueue_extraction_backfill
+        from app.extraction_status import incomplete_prior_snapshots, priors_pending_message
 
-            enqueue_extraction_backfill(priors, scope="vault", case_id=case_id)
+        incomplete_priors = incomplete_prior_snapshots(priors)
+        priors_pending_n = len(incomplete_priors)
+        try:
+            from app.fact_extract_backfill import (
+                enqueue_extraction_backfill,
+                register_compare_refresh_after_backfill,
+            )
+
+            queued_prior_ids = enqueue_extraction_backfill(
+                priors, scope="vault", case_id=case_id
+            )
+            if queued_prior_ids:
+                register_compare_refresh_after_backfill(
+                    scope="vault",
+                    anchor_document_id=document_id,
+                    waiting_prior_ids=queued_prior_ids,
+                    job_id=job_id,
+                    case_id=case_id,
+                    new_facts=facts,
+                    new_entities=entities,
+                    new_display_name=display_name or source.name,
+                    new_doc_kind=doc_kind,
+                    new_fingerprint=fingerprint,
+                    new_sha256=digest,
+                    new_text=full_text,
+                    new_page_offsets=page_offsets,
+                )
         except Exception:
             pass
         name = display_name or source.name
@@ -517,6 +542,8 @@ def run_gemini_stage(
             "gotcha_log": gotcha_log,
             "facts": facts,
             "fact_matrix": fact_matrix,
+            "priors_pending_extraction": priors_pending_n,
+            "priors_pending_message": priors_pending_message(priors_pending_n),
             "multimodal_ms": mm,
             "logo_chrome_ms": ch,
             "gotcha_verify_ms": gv,
@@ -604,6 +631,17 @@ def run_gemini_stage(
         "facts": facts,
         "timeline_context": timeline_context_from_facts(facts),
         "fact_matrix": fact_matrix,
+        "priors_pending_extraction": (
+            ((contextual.extras or {}).get("case_consistency") or {}).get(
+                "priors_pending_extraction"
+            )
+            or 0
+        ),
+        "priors_pending_message": (
+            ((contextual.extras or {}).get("case_consistency") or {}).get(
+                "priors_pending_message"
+            )
+        ),
         "scan_profile": profile,
         "doc_kind": doc_kind,
         "case_impact": impact_log,

@@ -466,6 +466,29 @@ class FactMemoryStore:
             fernet = self._fernet(s, firm_id)
             return enc.decrypt_json(fernet, doc.report_enc)
 
+    def update_document_report(
+        self,
+        firm_id: str,
+        matter_id: str,
+        document_id: str,
+        report: dict[str, Any],
+    ) -> bool:
+        """Replace the encrypted report blob (e.g. after compare refresh)."""
+        with self.session() as s:
+            doc = s.execute(
+                select(Document).where(
+                    Document.id == document_id,
+                    Document.firm_id == firm_id,
+                    Document.matter_id == matter_id,
+                )
+            ).scalar_one_or_none()
+            if doc is None:
+                return False
+            fernet = self._fernet(s, firm_id)
+            doc.report_enc = enc.encrypt_json(fernet, report)
+            s.commit()
+            return True
+
     def get_document(
         self, firm_id: str, document_id: str
     ) -> dict[str, Any] | None:

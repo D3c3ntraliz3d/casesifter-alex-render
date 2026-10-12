@@ -8,7 +8,9 @@ from app.extraction_status import (
     STATUS_FAILED,
     STATUS_SKIPPED_BOILERPLATE,
     derive_extraction_status,
+    incomplete_prior_snapshots,
     needs_extraction_backfill,
+    priors_pending_message,
 )
 
 
@@ -211,5 +213,87 @@ def test_backfill_enqueue_dedupes(monkeypatch):
     ]
     n1 = bf.enqueue_extraction_backfill(snaps, scope="vault", case_id="c1")
     n2 = bf.enqueue_extraction_backfill(snaps, scope="vault", case_id="c1")
-    assert n1 == 1
-    assert n2 == 0
+    assert n1 == ["d1"]
+    assert n2 == []
+
+
+def test_priors_pending_message_and_incomplete_list():
+    assert priors_pending_message(0) is None
+    assert "1 earlier document not yet" in (priors_pending_message(1) or "")
+    assert "3 earlier documents not yet" in (priors_pending_message(3) or "")
+    snaps = [
+        {
+            "document_id": "a",
+            "text_excerpt": "x",
+            "extraction_status": STATUS_FAILED,
+            "extraction_retry_done": False,
+        },
+        {
+            "document_id": "b",
+            "text_excerpt": "y",
+            "extraction_status": STATUS_EXTRACTED_OK,
+        },
+    ]
+    assert [s["document_id"] for s in incomplete_prior_snapshots(snaps)] == ["a"]
+
+
+def test_backfill_yields_when_live_scans_busy(monkeypatch):
+    from app import fact_extract_backfill as bf
+
+    monkeypatch.setattr(bf, "_pending", bf.deque())
+    monkeypatch.setattr(bf, "_queued_ids", set())
+    monkeypatch.setattr(bf, "_refresh_waits", [])
+    monkeypatch.setattr(bf, "ensure_extract_backfill_worker", lambda: None)
+    monkeypatch.setattr(bf, "live_scans_busy", lambda: True)
+
+    processed = {"n": 0}
+
+    def boom(_job):
+        processed["n"] += 1
+
+    monkeypatch.setattr(bf, "_process", boom)
+    bf.enqueue_extraction_backfill(
+        [
+            {
+                "document_id": "d9",
+                "text_excerpt": "Account statement",
+                "extraction_status": STATUS_FAILED,
+                "extraction_retry_done": False,
+            }
+        ],
+        scope="vault",
+        case_id="c1",
+    )
+    # Simulate one loop iteration under busy scans — must not process.
+    assert bf.live_scans_busy() is True
+    assert len(bf._pending) == 1
+    assert processed["n"] == 0
+
+
+def test_compare_refresh_runs_when_waiting_priors_done(monkeypatch):
+    from app import fact_extract_backfill as bf
+
+    monkeypatch.setattr(bf, "_pending", bf.deque())
+    monkeypatch.setattr(bf, "_queued_ids", set())
+    monkeypatch.setattr(bf, "_refresh_waits", [])
+    monkeypatch.setattr(bf, "ensure_extract_backfill_worker", lambda: None)
+
+    ran = {"n": 0}
+
+    def fake_refresh(wait):
+        ran["n"] += 1
+        assert wait.anchor_document_id == "anchor"
+        assert wait.waiting_prior_ids == set()
+
+    monkeypatch.setattr(bf, "_run_compare_refresh", fake_refresh)
+    bf.register_compare_refresh_after_backfill(
+        scope="vault",
+        anchor_document_id="anchor",
+        waiting_prior_ids={"p1", "p2"},
+        case_id="c1",
+        job_id="a" * 32,
+    )
+    bf._on_prior_backfill_done("p1")
+    assert ran["n"] == 0
+    bf._on_prior_backfill_done("p2")
+    assert ran["n"] == 1

@@ -667,19 +667,56 @@ def _persist_pipeline_result(
             extraction_retry_done=bool(comparison.get("extraction_retry_done")),
         )
         try:
-            from app.fact_extract_backfill import enqueue_extraction_backfill
+            from app.extraction_status import incomplete_prior_snapshots, priors_pending_message
+            from app.fact_extract_backfill import (
+                enqueue_extraction_backfill,
+                register_compare_refresh_after_backfill,
+            )
 
+            anchor_id = result.get("document_id")
             priors = store.list_prior_snapshots(
                 firm_ctx["firm_id"],
                 matter_id,
-                exclude_document_id=result.get("document_id"),
+                exclude_document_id=anchor_id,
             )
-            enqueue_extraction_backfill(
+            incomplete = incomplete_prior_snapshots(priors)
+            pending_n = len(incomplete)
+            if pending_n and isinstance(report_dict.get("comparison"), dict):
+                cc = dict(report_dict["comparison"].get("case_consistency") or {})
+                cc["priors_pending_extraction"] = pending_n
+                cc["priors_pending_message"] = priors_pending_message(pending_n)
+                report_dict["comparison"]["case_consistency"] = cc
+                report_dict["comparison"]["priors_pending_extraction"] = pending_n
+                report_dict["comparison"]["priors_pending_message"] = (
+                    priors_pending_message(pending_n)
+                )
+                if anchor_id:
+                    store.update_document_report(
+                        firm_ctx["firm_id"], matter_id, anchor_id, report_dict
+                    )
+            queued_prior_ids = enqueue_extraction_backfill(
                 priors,
                 scope="matter",
                 firm_id=firm_ctx["firm_id"],
                 matter_id=matter_id,
             )
+            if queued_prior_ids and anchor_id:
+                register_compare_refresh_after_backfill(
+                    scope="matter",
+                    anchor_document_id=anchor_id,
+                    waiting_prior_ids=queued_prior_ids,
+                    job_id=job_id,
+                    firm_id=firm_ctx["firm_id"],
+                    matter_id=matter_id,
+                    new_facts=facts if isinstance(facts, list) else [],
+                    new_entities=entities if isinstance(entities, dict) else {},
+                    new_display_name=display_name or source.name,
+                    new_doc_kind=doc_kind,
+                    new_fingerprint=comparison.get("text_fingerprint"),
+                    new_sha256=digest,
+                    new_text=(comparison.get("text_excerpt") or "")[:24000],
+                    new_page_offsets=comparison.get("page_offsets"),
+                )
         except Exception:
             logger.exception("Failed to enqueue fact-extract backfill for matter=%s", matter_id)
         logger.info(

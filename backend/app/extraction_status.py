@@ -63,3 +63,20 @@ def needs_extraction_backfill(snap: dict[str, Any] | None) -> bool:
         text = str(snap.get("text_excerpt") or "").strip()
         return bool(text)
     return False
+
+
+def incomplete_prior_snapshots(priors: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Priors still pending/failed extraction — not yet fully in cross-doc compare."""
+    out: list[dict[str, Any]] = []
+    for snap in priors or []:
+        if needs_extraction_backfill(snap):
+            out.append(snap)
+    return out
+
+
+def priors_pending_message(count: int) -> str | None:
+    n = int(count or 0)
+    if n <= 0:
+        return None
+    noun = "document" if n == 1 else "documents"
+    return f"{n} earlier {noun} not yet included in cross-document comparison"
