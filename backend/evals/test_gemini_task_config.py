@@ -18,15 +18,19 @@ def test_default_task_matrix():
     assert a.thinking_level == "minimal"
 
     b = task_config(TASK_B_ENTITY)
-    assert b.primary == "gemini-3.8-flash"
-    assert b.thinking_level == "medium"
+    assert b.primary == "gemini-3.6-flash"
+    assert b.backup == "gemini-3.5-flash-lite"
+    assert b.thinking_level == "minimal"
 
     c = task_config(TASK_C_CONTRA)
-    assert c.thinking_level == "high"
+    assert c.primary == "gemini-3.6-flash"
+    assert c.backup == "gemini-3.5-flash-lite"
+    assert c.thinking_level == "minimal"
 
     d = task_config(TASK_D_VISUAL)
-    assert d.primary == "gemini-3.8-flash"
-    assert d.backup == "gemini-3.6-flash"
+    assert d.primary == "gemini-3.6-flash"
+    assert d.backup == "gemini-3.5-flash-lite"
+    assert d.thinking_level == "minimal"
 
 
 def test_invalid_thinking_level_flagged(monkeypatch):
