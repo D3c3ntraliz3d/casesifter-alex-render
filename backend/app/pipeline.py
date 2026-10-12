@@ -594,7 +594,7 @@ def run_gemini_stage(
             "ephemeral_peers": True,
         }
 
-    findings = triage_findings(findings, profile)
+    findings = triage_findings(findings, profile, full_text=full_text, page_offsets=page_offsets)
     findings, impact_log = apply_case_impact_judge(findings)
     update_job(
         job_id,

@@ -84,6 +84,15 @@ const RISK = {
   red: "High risk",
 };
 
+function reportRiskLabel(report) {
+  const drivers = report?.comparison?.score_drivers || [];
+  const floor = drivers.find((row) => row && row.type === "critical_floor");
+  if (floor && Number(floor.floor) >= 95) {
+    return "Critical risk — strong indicators of alteration";
+  }
+  return RISK[report?.risk_level] || report?.risk_level || "";
+}
+
 const DOC_KIND_OPTIONS = [
   ["complaint", "Complaint"],
   ["answer", "Answer"],
@@ -3954,7 +3963,7 @@ function ReportViewer({
             <h2 className="serif" style={{ margin: "4px 0 8px" }}>{documentName || report.audit.filename}</h2>
             <span className={`risk ${report.risk_level}`}>
               <ShieldAlert size={16} />
-              {RISK[report.risk_level]} · {report.risk_score}/100
+              {reportRiskLabel(report)} · {report.risk_score}/100
             </span>
             {caseAlerts.length > 0 && (
               <p className="footnote" style={{ marginTop: 8 }}>

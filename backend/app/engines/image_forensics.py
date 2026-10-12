@@ -495,7 +495,7 @@ def _solid_overlay_finding(
     return finding(
         fid=f"img-solid-overlay-{prefix}",
         category="image",
-        severity="high",
+        severity="critical",
         title=f"Solid white overlay covering content on {label}",
         explanation=(
             f"A near-uniform pure-white rectangle (~{frac:.0%} of the page body, {bw}×{bh}px) "

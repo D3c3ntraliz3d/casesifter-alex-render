@@ -17,9 +17,12 @@ Three tiers, each requiring more explicit opt-in than the last:
    is over 15 MB. Transmits exhibit imagery to a third party — off by default.
 
 Evidentiary weight. A language model's assertion is a research lead, not proof.
-Every model-sourced finding is capped at medium severity, has its confidence
-discounted, and carries ai_generated=True so the report labels it for the reader.
-No model output can drive a report to red on its own.
+Model-sourced findings are capped at medium severity and discounted confidence,
+and carry ai_generated=True so the report labels them. Concealment overlays,
+temporal impossibility, issuer anachronism, irreconcilable statement arithmetic,
+and font or text-layer mismatches inside amount, date, or name fields are
+promoted to critical afterward and can set the risk floor by themselves.
+Other model output cannot.
 """
 
 from __future__ import annotations
@@ -44,7 +47,11 @@ from dateutil import parser as dateparser
 
 from app.config import settings
 from app.engines import finding, timed_module
-from app.finding_policy import is_header_or_arrears_noise, is_recorded_instrument_math_noise
+from app.finding_policy import (
+    is_field_scoped_font_mismatch,
+    is_header_or_arrears_noise,
+    is_recorded_instrument_math_noise,
+)
 from app.models import Finding, ModuleResult
 from app.scan_profile import (
     PROFILE_COURT_FILING,
@@ -2106,7 +2113,8 @@ ANALYSIS_TITLES = {
     "logo_chrome_mismatch": "Logo / chrome mismatch on statement",
 }
 
-# The model may propose any severity; nothing it reports is allowed above medium.
+# The model may propose any severity. Ordinary observations stay at medium.
+# Critical forgery classes are promoted later in apply_forgery_severity.
 SEVERITY_CAP = {"info": "info", "low": "low", "medium": "medium", "high": "medium", "critical": "medium"}
 
 
@@ -2128,7 +2136,9 @@ def _finding_from_analysis(
     analysis_type = str(item.get("analysis_type", "")).strip().lower()
     if analysis_type not in ANALYSIS_TYPES:
         return None
-    if analysis_type in {"font_mismatch", "logical_inconsistency", "spelling_anomaly"}:
+    if analysis_type in {"logical_inconsistency", "spelling_anomaly"}:
+        return None
+    if analysis_type == "font_mismatch" and not is_field_scoped_font_mismatch(item):
         return None
 
     observation = str(item.get("observation", "")).strip()
@@ -2231,8 +2241,9 @@ def _finding_from_verdict(claim: Claim, verdict: dict[str, Any]) -> Finding | No
     if verdict["model_confidence"] < settings.contextual_min_confidence:
         return None
 
-    # Capped: a model assertion is a research lead, never proof, so it cannot drive
-    # the report to red on its own.
+    # Discounted confidence. Issuer anachronism is still a critical class and the
+    # risk floor applies after promotion; the number here is not averaged down by
+    # clean checks.
     confidence = min(60.0, verdict["model_confidence"] * 0.7)
     where = f" at {claim.location}" if claim.location else ""
     return finding(
@@ -2255,8 +2266,9 @@ def _finding_from_verdict(claim: Claim, verdict: dict[str, Any]) -> Finding | No
             "model": verdict["model"],
             "model_confidence": verdict["model_confidence"],
             "basis": verdict.get("basis"),
-            "ai_generated": True,
             "analysis_type": "historical_impossibility",
+            "ai_generated": True,
+            "quoted_evidence": f"{claim.organization} on {claim.date_iso}"[:300],
         },
         recommended_action=(
             "Treat this as a research lead only. Confirm against the Secretary of State registry or "

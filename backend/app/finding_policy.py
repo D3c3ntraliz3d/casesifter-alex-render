@@ -173,7 +173,234 @@ def is_recorded_instrument_math_noise(
     return looks_like_recorded_instrument(text, name, doc_kind) or bool(RECORDED_BODY.search(blob))
 
 
+# Legitimate filing redactions, not concealment. 22 NYCRR §202.5(e) is the
+# New York rule that requires confidential personal information to be redacted.
+COURT_REDACTION_RE = re.compile(
+    r"(?i)("
+    r"redacted\s+per\s+22\s*nycrr|"
+    r"22\s*nycrr\s*(?:§|sec(?:tion)?\.?)?\s*202\.5|"
+    r"redacted\s+pursuant\s+to"
+    r")"
+)
+
+# Temporal impossibility: a due date or period that cannot exist on this statement.
+TEMPORAL_IMPOSSIBILITY_RE = re.compile(
+    r"(?i)("
+    r"cannot coexist|"
+    r"cannot belong|"
+    r"cannot fall|"
+    r"precedes its own|"
+    r"starts after it ends|"
+    r"years\s+(?:after|before|apart|later|earlier)|"
+    r"due date.{0,80}(?:cannot|impossible|years)"
+    r")"
+)
+
+# Font or text-layer mismatch inside an amount, date, or name field.
+FIELD_FONT_RE = re.compile(
+    r"(?i)("
+    r"\b(?:amount|balance|total|payment|fee|sum)\b.{0,60}"
+    r"\b(?:font|typeface|text\s+layer|type\s+style)\b"
+    r"|"
+    r"\b(?:font|typeface|text\s+layer|type\s+style)\b.{0,60}"
+    r"\b(?:amount|balance|total|payment|fee)\b"
+    r"|"
+    r"\b(?:due\s+date|statement\s+date|billing\s+date|invoice\s+date|"
+    r"account\s+name|customer\s+name|payee|name\s+field)\b.{0,60}"
+    r"\b(?:font|typeface|text\s+layer|type\s+style|mismatch)\b"
+    r"|"
+    r"\b(?:font|typeface|text\s+layer)\b.{0,60}"
+    r"\b(?:due\s+date|statement\s+date|billing\s+date|account\s+name|"
+    r"customer\s+name|name\s+field)\b"
+    r")"
+)
+
+
+def _analysis_type(item: Finding | dict) -> str:
+    if isinstance(item, Finding):
+        return str((item.evidence or {}).get("analysis_type") or "")
+    return str(item.get("analysis_type") or (item.get("evidence") or {}).get("analysis_type") or "")
+
+
+def _search_blob(item: Finding | dict) -> str:
+    extra = ""
+    if isinstance(item, Finding):
+        extra = item.why_suspicious or ""
+    elif isinstance(item, dict):
+        extra = str(item.get("why_suspicious") or "")
+    return f"{finding_blob(item)} {extra}"
+
+
+def is_field_scoped_font_mismatch(item: Finding | dict) -> bool:
+    """Mismatched type or text layer inside an amount, date, or name field."""
+    blob = _search_blob(item)
+    if HEADER_NOISE_RE.search(blob):
+        return False
+    analysis = _analysis_type(item)
+    looks_like_font = analysis == "font_mismatch" or bool(
+        re.search(r"(?i)text\s+layer|typeface|\bfont\b", blob)
+    )
+    if not looks_like_font:
+        return False
+    return bool(FIELD_FONT_RE.search(blob))
+
+
+def is_concealment_overlay(item: Finding | dict) -> bool:
+    """White box or redaction-style overlay hiding original text."""
+    if isinstance(item, Finding) and str(item.id).startswith("img-ela-"):
+        return False
+    if isinstance(item, Finding) and str(item.id).startswith("img-solid-overlay-"):
+        return True
+    analysis = _analysis_type(item)
+    if analysis == "text_overlay":
+        return True
+    blob = _search_blob(item).lower()
+    if any(token in blob for token in ("white overlay", "whiteout", "white-out", "solid white")):
+        return analysis in {"", "graphic_manipulation", "text_overlay"}
+    return False
+
+
+def is_legitimate_court_redaction(text: str) -> bool:
+    return bool(COURT_REDACTION_RE.search(text or ""))
+
+
+def is_temporal_impossibility(item: Finding | dict) -> bool:
+    if isinstance(item, Finding) and str(item.id).startswith("txt-stmtdate-"):
+        return True
+    if _analysis_type(item) != "date_inconsistency":
+        return False
+    return bool(TEMPORAL_IMPOSSIBILITY_RE.search(_search_blob(item)))
+
+
+def is_critical_forgery(item: Finding | dict, *, page_text: str = "") -> bool:
+    """Strong forgery indicators. These set the risk floor by themselves.
+
+    Legitimate court redactions are expected and are not concealment.
+    """
+    if is_concealment_overlay(item):
+        blob = _search_blob(item)
+        if is_legitimate_court_redaction(blob) or is_legitimate_court_redaction(page_text):
+            return False
+        return True
+    if is_temporal_impossibility(item):
+        return True
+    if _analysis_type(item) == "historical_impossibility":
+        return True
+    if _analysis_type(item) == "math_error" and not is_recorded_instrument_math_noise(item):
+        return True
+    if is_field_scoped_font_mismatch(item):
+        return True
+    return False
+
+
+def text_for_page(
+    full_text: str,
+    page: int | None,
+    page_offsets: list[dict] | None = None,
+) -> str:
+    """Page text for the redaction exclusion. Empty when the page cannot be isolated."""
+    body = full_text or ""
+    if page and page_offsets:
+        starts = sorted(page_offsets, key=lambda entry: int(entry.get("start") or 0))
+        for index, entry in enumerate(starts):
+            if int(entry.get("page") or 0) != int(page):
+                continue
+            start = int(entry.get("start") or 0)
+            end = int(starts[index + 1]["start"]) if index + 1 < len(starts) else len(body)
+            return body[start:end]
+    if page and "\f" in body:
+        parts = body.split("\f")
+        if 1 <= int(page) <= len(parts):
+            return parts[int(page) - 1]
+    if page == 1 and "\f" not in body and not page_offsets:
+        return body
+    return ""
+
+
+def apply_forgery_severity(
+    findings: list[Finding],
+    full_text: str = "",
+    page_offsets: list[dict] | None = None,
+) -> list[Finding]:
+    """Promote strong forgery indicators to critical. Court redactions stay informational."""
+    out: list[Finding] = []
+    for item in findings:
+        page_text = text_for_page(full_text, item.page, page_offsets)
+        if is_concealment_overlay(item) and (
+            is_legitimate_court_redaction(_search_blob(item))
+            or is_legitimate_court_redaction(page_text)
+        ):
+            evidence = dict(item.evidence or {})
+            evidence["legitimate_court_redaction"] = True
+            evidence["case_impact"] = "noise"
+            out.append(
+                item.model_copy(
+                    update={
+                        "severity": "info",
+                        "confidence": min(item.confidence, 35.0),
+                        "evidence": evidence,
+                    }
+                )
+            )
+            continue
+        if item.severity != "info" and is_critical_forgery(item, page_text=page_text):
+            if item.severity != "critical":
+                out.append(item.model_copy(update={"severity": "critical"}))
+            else:
+                out.append(item)
+            continue
+        out.append(item)
+    return out
+
+
+def forgery_risk_band(findings: list[Finding]) -> tuple[str | None, int, list[Finding]]:
+    """Return (band, floor, critical findings).
+
+    band is "critical" (floor 95), "high" (floor 85), or None.
+    Clean checks are not in this set and cannot lower the floor.
+    """
+    actionable = [
+        item
+        for item in findings
+        if item.severity != "info" and item.confidence >= 40 and is_material_finding(item)
+    ]
+    critical: list[Finding] = []
+    other_high = 0
+    for item in actionable:
+        if is_critical_forgery(item, page_text=""):
+            critical.append(item)
+        elif item.severity == "high":
+            other_high += 1
+    keys = {
+        (
+            str((item.evidence or {}).get("analysis_type") or item.id),
+            item.page,
+        )
+        for item in critical
+    }
+    if len(keys) >= 2 or (critical and other_high):
+        return "critical", 95, critical
+    if critical:
+        return "high", 85, critical
+    return None, 0, []
+
+
+def _deterministic_due_date_impossibility(item: Finding | dict) -> bool:
+    """Body due date the statement-date checker already accepted.
+
+    A nearby NYSCEF line or the words "past due" are ordinary on a utility bill.
+    They must not erase a due date that cannot belong to the statement date.
+    """
+    if not isinstance(item, Finding):
+        return False
+    if not str(item.id).startswith("txt-stmtdate-"):
+        return False
+    return "due date" in (item.title or "").lower()
+
+
 def is_header_or_arrears_noise(item: Finding | dict) -> bool:
+    if _deterministic_due_date_impossibility(item):
+        return False
     blob = finding_blob(item)
     if HEADER_NOISE_RE.search(blob):
         return True
@@ -182,6 +409,9 @@ def is_header_or_arrears_noise(item: Finding | dict) -> bool:
         analysis = str((item.evidence or {}).get("analysis_type") or "")
     else:
         analysis = str(item.get("analysis_type") or "")
+    # Field-level font / text-layer mismatches are forgery indicators, not nuance.
+    if is_field_scoped_font_mismatch(item):
+        return False
     if analysis in NUANCE_AI_TYPES:
         return True
     if analysis == "date_inconsistency" and (
@@ -242,6 +472,8 @@ def is_material_finding(item: Finding) -> bool:
         return item.severity in {"medium", "high", "critical"}
     if analysis == "date_inconsistency" and item.severity in {"medium", "high", "critical"}:
         return True
+    if is_field_scoped_font_mismatch(item) and item.severity in {"medium", "high", "critical"}:
+        return True
     if analysis == "math_error":
         # Require an arithmetic quote (digits) so clean synthetics without broken math stay quiet.
         quoted = str(evidence.get("quoted_evidence") or item.explanation or "")
@@ -295,10 +527,16 @@ def is_material_finding(item: Finding) -> bool:
     return False
 
 
-def triage_findings(findings: list[Finding], scan_profile: str) -> list[Finding]:
+def triage_findings(
+    findings: list[Finding],
+    scan_profile: str,
+    full_text: str = "",
+    page_offsets: list[dict] | None = None,
+) -> list[Finding]:
     """Drop header/nuance noise. Non-material leftovers become info so they cannot yellow a file."""
     del scan_profile  # reserved: court vs exhibit already encoded in is_material_finding
-    cleaned = drop_noise_findings(findings)
+    prepared = apply_forgery_severity(findings, full_text, page_offsets)
+    cleaned = drop_noise_findings(prepared)
     triaged: list[Finding] = []
     for item in cleaned:
         if is_material_finding(item) or item.severity == "info":
