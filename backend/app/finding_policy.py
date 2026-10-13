@@ -196,6 +196,33 @@ TEMPORAL_IMPOSSIBILITY_RE = re.compile(
     r")"
 )
 
+# CRITICAL temporal class is statement-body chronology only — not allonge vs note.
+STATEMENT_TEMPORAL_HOOK_RE = re.compile(
+    r"(?i)("
+    r"statement\s+date|bill\s+date|invoice\s+date|billing\s+date|"
+    r"due\s+date|payment\s+due|pay\s+by|"
+    r"service\s+period|billing\s+period"
+    r")"
+)
+
+# CRITICAL math is consumer-statement arithmetic, not loan amortization / default notices.
+CONSUMER_STATEMENT_MATH_RE = re.compile(
+    r"(?i)("
+    r"account\s*(?:number|no\.?)|amount\s*due|statement\s*date|"
+    r"previous\s*balance|opening\s+balance|closing\s+balance|ending\s+balance|"
+    r"bank\s+statement|utility\s+(?:bill|statement)|telecom|"
+    r"\bcitibank\b|\bverizon\b|national\s+grid|con\s*edison|keyspan"
+    r")"
+)
+LOAN_MATH_NOISE_RE = re.compile(
+    r"(?i)("
+    r"amortization|reinstatement|notice\s+of\s+default|"
+    r"unpaid\s+installments|accrued\s+late\s+charges|"
+    r"line\s+of\s+credit|\ballonge\b|mortgage\s+statement|"
+    r"principal\s+balance|cure\s+amount"
+    r")"
+)
+
 # Font or text-layer mismatch inside an amount, date, or name field.
 FIELD_FONT_RE = re.compile(
     r"(?i)("
@@ -265,11 +292,28 @@ def is_legitimate_court_redaction(text: str) -> bool:
 
 
 def is_temporal_impossibility(item: Finding | dict) -> bool:
+    """Due date / period that cannot exist on a consumer statement body."""
     if isinstance(item, Finding) and str(item.id).startswith("txt-stmtdate-"):
         return True
     if _analysis_type(item) != "date_inconsistency":
         return False
-    return bool(TEMPORAL_IMPOSSIBILITY_RE.search(_search_blob(item)))
+    blob = _search_blob(item)
+    # Allonge vs note, filing stamp vs body, etc. are not this class.
+    if not STATEMENT_TEMPORAL_HOOK_RE.search(blob):
+        return False
+    return bool(TEMPORAL_IMPOSSIBILITY_RE.search(blob))
+
+
+def is_critical_math_error(item: Finding | dict) -> bool:
+    """Arithmetic that cannot reconcile on a bank/utility/telecom statement."""
+    if _analysis_type(item) != "math_error":
+        return False
+    if is_recorded_instrument_math_noise(item):
+        return False
+    blob = _search_blob(item)
+    if LOAN_MATH_NOISE_RE.search(blob) and not CONSUMER_STATEMENT_MATH_RE.search(blob):
+        return False
+    return bool(CONSUMER_STATEMENT_MATH_RE.search(blob))
 
 
 def is_critical_forgery(item: Finding | dict, *, page_text: str = "") -> bool:
@@ -286,7 +330,7 @@ def is_critical_forgery(item: Finding | dict, *, page_text: str = "") -> bool:
         return True
     if _analysis_type(item) == "historical_impossibility":
         return True
-    if _analysis_type(item) == "math_error" and not is_recorded_instrument_math_noise(item):
+    if is_critical_math_error(item):
         return True
     if is_field_scoped_font_mismatch(item):
         return True

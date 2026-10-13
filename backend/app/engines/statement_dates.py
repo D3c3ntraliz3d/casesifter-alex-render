@@ -244,12 +244,27 @@ def _near_court_stamp(block: str, at: int) -> bool:
     A body date on the next line is not stamp furniture. An 80-character window
     was dropping statement dates that sit directly under a NYSCEF header, which
     hid the April 2007 / December 2011 due-date catch on e-filed exhibits.
+
+    The NYSCEF / FILED / RECEIVED stamp date must never be used as a statement
+    date or due date, even when OCR glues the stamp onto the same visual line
+    as bill labels.
     """
     line_start = block.rfind("\n", 0, at) + 1
     line_end = block.find("\n", at)
     if line_end < 0:
         line_end = len(block)
-    return bool(COURT_STAMP.search(block[line_start:line_end]))
+    line = block[line_start:line_end]
+    if COURT_STAMP.search(line):
+        return True
+    # Same physical stamp band when newlines were lost: FILED/NYSCEF within
+    # ~50 chars before this date token, still on the stamp phrase.
+    window = block[max(0, at - 50) : at]
+    return bool(
+        re.search(
+            r"(?i)(?:FILED:|RECEIVED\s+NYSCEF|NYSCEF\s+DOC|INDEX\s+NO\.?)\s*[^.\n]{0,40}$",
+            window,
+        )
+    )
 
 
 def _parse_date(raw: str) -> date | None:

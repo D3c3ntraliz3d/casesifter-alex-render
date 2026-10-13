@@ -8,7 +8,7 @@ stays under 50.
 from __future__ import annotations
 
 from app.engines.statement_dates import find_statement_date_conflicts
-from app.finding_policy import triage_findings
+from app.finding_policy import is_material_finding, triage_findings
 from app.models import Finding
 from app.report.scoring import executive_summary, risk_banner, score_risk
 
@@ -36,6 +36,33 @@ Account number 100200
 Amount due $40.00
 Statement date April 16, 2007
 Due date May 7, 2007
+"""
+
+# Genuine 2007 bill filed years later. The 2023 NYSCEF stamp must not become
+# a statement date or due date and must not create a temporal impossibility.
+GENUINE_BILL_WITH_2023_STAMP = """FILED: BRONX COUNTY CLERK 03/15/2023 10:22 AM
+INDEX NO. 820292/2023E
+NYSCEF DOC. NO. 41
+RECEIVED NYSCEF: 03/15/2023
+Con Edison
+Account number 44122918
+Amount due $92.40
+Statement date April 16, 2007
+Service period April 1, 2007 - April 30, 2007
+Due date May 16, 2007
+"""
+
+# Ordinary arrears language with a coherent current bill cycle.
+GENUINE_BILL_WITH_PAST_DUE = """Verizon
+Account number 551209
+Amount due $214.18
+Previous balance $140.00
+Past due amount $140.00
+Payment received $0.00
+Statement date June 5, 2023
+Service period May 1, 2023 - May 31, 2023
+Due date June 26, 2023
+The installment payment is still due from the March 2023 billing cycle.
 """
 
 
@@ -229,3 +256,86 @@ def test_court_redaction_legend_is_not_concealment():
     other, _, other_score, _ = _score([_overlay(2)], REDACTION_PAGE + "\f" + CLEAN_BILL)
     assert other_score >= 85
     assert any(item.severity == "critical" and item.page == 2 for item in other)
+
+
+def test_nyscef_stamp_date_never_becomes_statement_or_due_date():
+    """A genuine old bill filed with a 2023 stamp must stay quiet."""
+    hits = find_statement_date_conflicts(
+        GENUINE_BILL_WITH_2023_STAMP,
+        scan_profile="forensic",
+        source="Exhibit S-12",
+    )
+    assert hits == [], [item.title for item in hits]
+    # Stamp-only packaging findings must not floor the score either.
+    packaging = [
+        _finding(
+            "md-year-gap",
+            severity="low",
+            title="File year differs from body year",
+            explanation="NYSCEF filing year 2023 vs statement date April 16, 2007.",
+            why="Ordinary e-filing of an older exhibit.",
+            confidence=50,
+            category="metadata",
+        ),
+        _finding(
+            "txt-date-vs-file",
+            severity="medium",
+            title="Body date older than file date",
+            explanation="Statement date April 16, 2007; FILED stamp March 15, 2023.",
+            why="Courts routinely file older bills years later.",
+            confidence=55,
+            category="text",
+            analysis_type="date_inconsistency",
+            evidence={"quoted_evidence": "FILED: 03/15/2023 vs Statement date April 16, 2007"},
+        ),
+    ]
+    triaged, _, score, summary = _score([*hits, *packaging], GENUINE_BILL_WITH_2023_STAMP)
+    assert score < 50, score
+    assert all(item.severity != "critical" for item in triaged)
+    assert not any(
+        (item.evidence or {}).get("analysis_type") == "date_inconsistency"
+        and item.severity in {"medium", "high", "critical"}
+        and is_material_finding(item)
+        for item in triaged
+    )
+    assert "Critical risk" not in summary
+
+
+def test_past_due_arrears_wording_with_normal_dates_is_not_critical():
+    """Previous balance / past due on a coherent current bill is not forgery."""
+    hits = find_statement_date_conflicts(
+        GENUINE_BILL_WITH_PAST_DUE,
+        scan_profile="forensic",
+        source="Exhibit S-18",
+    )
+    assert hits == [], [item.title for item in hits]
+    soft = [
+        _finding(
+            "img-ela-page-1",
+            severity="info",
+            title="Uneven recompression on scanned page",
+            confidence=32,
+            page=1,
+            category="image",
+            evidence={"scan_heavy": True, "ela_score": 22},
+        ),
+        _finding(
+            "ctx-arrears-note",
+            severity="medium",
+            title="Past-due balance cited on current statement",
+            explanation="Past due amount $140.00 from the March 2023 billing cycle.",
+            why="Ordinary arrears language on a utility bill.",
+            confidence=60,
+            analysis_type="date_inconsistency",
+            evidence={
+                "quoted_evidence": "Past due amount $140.00. The installment payment is still due from March 2023.",
+                "ai_generated": True,
+            },
+        ),
+    ]
+    triaged, _, score, summary = _score([*hits, *soft], GENUINE_BILL_WITH_PAST_DUE)
+    assert all(item.severity != "critical" for item in triaged), [
+        (item.severity, item.title) for item in triaged
+    ]
+    assert score < 50, score
+    assert "Critical risk" not in summary
