@@ -211,6 +211,34 @@ def test_s71_style_fraudulently_edited_utility_bill_scores_100():
     assert "proof of fraud" not in summary
 
 
+def test_s71_solo_statement_finding_scores_100_without_tainted_gotcha():
+    """A cold standalone rescan still floors when Gemini flags the forged statement."""
+    soft = _finding(
+        "ctx-ai-maturity",
+        severity="medium",
+        title="Date inconsistency: Wells Fargo Mortgage Statement Maturity Date Anomaly on Page 1",
+        explanation=(
+            "The Account Information block lists the Maturity date (month/year) as 12/36 "
+            "on a billing statement dated 11/18/24."
+        ),
+        why="Issuer statements do not print an impossible maturity month.",
+        confidence=60,
+        page=1,
+        analysis_type="date_inconsistency",
+        evidence={
+            "quoted_evidence": "Maturity date (month/year) 12/36. Statement date 11/18/24.",
+            "ai_generated": True,
+        },
+    )
+    # Weighted medium alone used to land near Moderate (~10–58). Must be 100.
+    triaged, level, score, summary = _score([soft, _info("clean-a"), _info("clean-b")])
+    assert score == 100, score
+    assert level == "red"
+    assert risk_banner(level, triaged) == "Critical risk — strong indicators of alteration"
+    assert any(item.severity == "critical" for item in triaged)
+    assert "100% forged" not in summary
+
+
 def test_national_grid_and_citibank_forgeries_clear_85_and_clean_exhibit_stays_under_50():
     grid = [
         _finding(

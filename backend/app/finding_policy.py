@@ -201,7 +201,20 @@ STATEMENT_TEMPORAL_HOOK_RE = re.compile(
     r"(?i)("
     r"statement\s+date|bill\s+date|invoice\s+date|billing\s+date|"
     r"due\s+date|payment\s+due|pay\s+by|"
-    r"service\s+period|billing\s+period"
+    r"service\s+period|billing\s+period|maturity\s+date"
+    r")"
+)
+
+# Consumer / mortgage statement chrome — forged-bill findings live here.
+STATEMENT_FORGERY_HOOK_RE = re.compile(
+    r"(?i)("
+    r"statement\s+date|bill\s+date|invoice\s+date|billing\s+date|"
+    r"due\s+date|payment\s+due|maturity\s+date|"
+    r"account\s*(?:number|no\.?)|amount\s*due|previous\s*balance|"
+    r"mortgage\s+statement|billing\s+statement|account\s+statement|"
+    r"bank\s+statement|utility\s+(?:bill|statement)|telecom|"
+    r"\bverizon\b|\bcitibank\b|national\s+grid|con\s*edison|wells\s+fargo|"
+    r"keyspan|pseg"
     r")"
 )
 
@@ -340,7 +353,9 @@ def is_critical_forgery(item: Finding | dict, *, page_text: str = "") -> bool:
 def is_forged_exhibit_signal(item: Finding | dict, *, page_text: str = "") -> bool:
     """True when the exhibit itself appears forged or fraudulently edited.
 
-    Any such material finding floors the document score at 100.
+    Any such material finding floors the document score at 100. Standalone
+    Gemini findings on a utility/mortgage statement count even when the case
+    board has not yet attached a tainted-support gotcha.
     """
     if is_critical_forgery(item, page_text=page_text):
         return True
@@ -353,16 +368,23 @@ def is_forged_exhibit_signal(item: Finding | dict, *, page_text: str = "") -> bo
         evidence = nested or item
         title = str(item.get("title") or "")
         severity = str(item.get("severity") or "")
+    if severity not in {"medium", "high", "critical"}:
+        return False
     if evidence.get("tainted_support"):
         return True
     if "fraudulently edited" in title.lower():
         return True
+    analysis = _analysis_type(item)
     # Bought-template / leftover chrome on a consumer statement is exhibit forgery.
-    if _analysis_type(item) == "template_fabrication" and severity in {
-        "medium",
-        "high",
-        "critical",
-    }:
+    if analysis == "template_fabrication":
+        return True
+    # Material statement-body fraud classes (overlay, date, math, chrome, era).
+    if analysis in MAJOR_AI_TYPES and STATEMENT_FORGERY_HOOK_RE.search(_search_blob(item)):
+        if is_header_or_arrears_noise(item):
+            return False
+        return True
+    # Deterministic whiteout / paste on a scanned statement page.
+    if isinstance(item, Finding) and str(item.id).startswith("img-solid-overlay-"):
         return True
     return False
 
