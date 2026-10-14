@@ -147,8 +147,7 @@ def test_s41_due_date_survives_nyscef_header_and_past_due_language():
 def test_s41_verizon_overlay_and_due_date_score_at_the_top():
     dates = find_statement_date_conflicts(S41_PAGE, scan_profile="forensic", source="Exhibit S-41")
     triaged, level, score, summary = _score([_overlay(2), *dates, _info("clean-1"), _info("clean-2")], S41_PAGE)
-    assert score >= 85
-    assert score >= 95
+    assert score == 100
     assert level == "red"
     assert risk_banner(level, triaged) == "Critical risk — strong indicators of alteration"
     assert summary.startswith("Critical risk — strong indicators of alteration")
@@ -159,13 +158,57 @@ def test_s41_verizon_overlay_and_due_date_score_at_the_top():
     assert any(item.severity == "critical" and item.page == 2 for item in triaged)
 
 
-def test_clean_checks_do_not_lower_a_critical_overlay():
-    alone, _, score_alone, _ = _score([_overlay(2)])
+def test_clean_checks_do_not_lower_a_forged_exhibit():
+    alone, _, score_alone, summary_alone = _score([_overlay(2)])
     with_clean, _, score_clean, _ = _score([_overlay(2), *[_info(f"c{i}") for i in range(6)]])
-    assert score_alone >= 85
-    assert score_clean >= score_alone
-    assert risk_banner("red", alone) == "High risk"
-    assert "Critical risk" not in executive_summary("red", "Exhibit S-41", alone)
+    assert score_alone == 100
+    assert score_clean == 100
+    assert risk_banner("red", alone) == "Critical risk — strong indicators of alteration"
+    assert summary_alone.startswith("Critical risk — strong indicators of alteration")
+
+
+def test_s71_style_fraudulently_edited_utility_bill_scores_100():
+    """Exhibit S_71 pattern: tainted forged-statement gotcha must floor at 100."""
+    forged = _finding(
+        "ctx-gotcha-s71",
+        severity="high",
+        title="Exhibit appears fraudulently edited",
+        explanation=(
+            "The Account Information block lists the 'Maturity date (month/year)' as "
+            "'12/36' on a billing statement dated '11/18/24'."
+        ),
+        why="A mortgage statement with an impossible maturity date is not a genuine issuer print.",
+        confidence=90,
+        page=1,
+        category="gotcha",
+        analysis_type="date_inconsistency",
+        evidence={
+            "gotcha": True,
+            "verified": True,
+            "tainted_support": True,
+            "quoted_evidence": "Maturity date (month/year) 12/36",
+            "material": True,
+            "evidence_tier": 1,
+        },
+    )
+    soft = _finding(
+        "ctx-ai-maturity",
+        severity="medium",
+        title="Date inconsistency: Wells Fargo Mortgage Statement Maturity Date Anomaly on Page 1",
+        explanation="Maturity date (month/year) 12/36 on a statement dated 11/18/24.",
+        why="Issuer statements do not print an impossible maturity month.",
+        confidence=60,
+        page=1,
+        analysis_type="date_inconsistency",
+        evidence={"quoted_evidence": "Maturity date (month/year) 12/36", "ai_generated": True},
+    )
+    triaged, level, score, summary = _score([forged, soft, _info("clean-1")])
+    assert score == 100
+    assert level == "red"
+    assert risk_banner(level, triaged) == "Critical risk — strong indicators of alteration"
+    assert any((item.evidence or {}).get("tainted_support") for item in triaged)
+    assert "100% forged" not in summary
+    assert "proof of fraud" not in summary
 
 
 def test_national_grid_and_citibank_forgeries_clear_85_and_clean_exhibit_stays_under_50():
@@ -236,8 +279,8 @@ def test_national_grid_and_citibank_forgeries_clear_85_and_clean_exhibit_stays_u
     _, _, grid_score, grid_summary = _score(grid)
     _, _, citi_score, citi_summary = _score(citi)
     _, _, clean_score, clean_summary = _score(clean, CLEAN_BILL)
-    assert grid_score >= 85
-    assert citi_score >= 85
+    assert grid_score == 100
+    assert citi_score == 100
     assert clean_score < 50
     assert "100% forged" not in grid_summary
     assert "proof of fraud" not in grid_summary
@@ -254,7 +297,7 @@ def test_court_redaction_legend_is_not_concealment():
     assert "Critical risk" not in summary
     # The legend on page 1 does not excuse an overlay on a different page.
     other, _, other_score, _ = _score([_overlay(2)], REDACTION_PAGE + "\f" + CLEAN_BILL)
-    assert other_score >= 85
+    assert other_score == 100
     assert any(item.severity == "critical" and item.page == 2 for item in other)
 
 

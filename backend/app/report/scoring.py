@@ -51,8 +51,8 @@ def score_risk_details(
 ) -> tuple[RiskLevel, int, list[dict[str, object]]]:
     """Return score, level, and score_drivers.
 
-    A critical forgery indicator sets a floor. Clean checks are not averaged in
-    and cannot pull that floor back down.
+    An exhibit that appears forged floors at 100. Clean checks are not averaged
+    in and cannot pull that floor back down.
     """
     actionable = [
         f
@@ -93,8 +93,8 @@ def score_risk_details(
                 "critical_count": len(critical),
                 "score": score,
                 "explanation": (
-                    "A critical forgery indicator sets the score floor. "
-                    "Clean checks do not lower a score set by a critical finding."
+                    "An exhibit that appears forged floors the score at 100. "
+                    "Clean checks do not lower that floor."
                 ),
             }
         )
@@ -111,7 +111,7 @@ def score_risk_details(
 
 
 def risk_banner(level: str, findings: list[Finding]) -> str:
-    """Attorney-facing label. The 95 floor reads as critical risk."""
+    """Attorney-facing label. Forged exhibits read as critical risk."""
     band, _floor, _critical = forgery_risk_band(findings)
     if band == "critical":
         return CRITICAL_RISK_LABEL

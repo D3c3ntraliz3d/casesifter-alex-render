@@ -87,7 +87,7 @@ const RISK = {
 function reportRiskLabel(report) {
   const drivers = report?.comparison?.score_drivers || [];
   const floor = drivers.find((row) => row && row.type === "critical_floor");
-  if (floor && Number(floor.floor) >= 95) {
+  if (floor && Number(floor.floor) >= 100) {
     return "Critical risk — strong indicators of alteration";
   }
   return RISK[report?.risk_level] || report?.risk_level || "";

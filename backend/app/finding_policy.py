@@ -337,6 +337,36 @@ def is_critical_forgery(item: Finding | dict, *, page_text: str = "") -> bool:
     return False
 
 
+def is_forged_exhibit_signal(item: Finding | dict, *, page_text: str = "") -> bool:
+    """True when the exhibit itself appears forged or fraudulently edited.
+
+    Any such material finding floors the document score at 100.
+    """
+    if is_critical_forgery(item, page_text=page_text):
+        return True
+    if isinstance(item, Finding):
+        evidence = item.evidence or {}
+        title = item.title or ""
+        severity = item.severity
+    else:
+        nested = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
+        evidence = nested or item
+        title = str(item.get("title") or "")
+        severity = str(item.get("severity") or "")
+    if evidence.get("tainted_support"):
+        return True
+    if "fraudulently edited" in title.lower():
+        return True
+    # Bought-template / leftover chrome on a consumer statement is exhibit forgery.
+    if _analysis_type(item) == "template_fabrication" and severity in {
+        "medium",
+        "high",
+        "critical",
+    }:
+        return True
+    return False
+
+
 def text_for_page(
     full_text: str,
     page: int | None,
@@ -387,7 +417,7 @@ def apply_forgery_severity(
                 )
             )
             continue
-        if item.severity != "info" and is_critical_forgery(item, page_text=page_text):
+        if item.severity != "info" and is_forged_exhibit_signal(item, page_text=page_text):
             if item.severity != "critical":
                 out.append(item.model_copy(update={"severity": "critical"}))
             else:
@@ -398,34 +428,20 @@ def apply_forgery_severity(
 
 
 def forgery_risk_band(findings: list[Finding]) -> tuple[str | None, int, list[Finding]]:
-    """Return (band, floor, critical findings).
+    """Return (band, floor, forged findings).
 
-    band is "critical" (floor 95), "high" (floor 85), or None.
-    Clean checks are not in this set and cannot lower the floor.
+    Any exhibit that appears forged floors at 100. Clean checks cannot lower it.
     """
     actionable = [
         item
         for item in findings
         if item.severity != "info" and item.confidence >= 40 and is_material_finding(item)
     ]
-    critical: list[Finding] = []
-    other_high = 0
-    for item in actionable:
-        if is_critical_forgery(item, page_text=""):
-            critical.append(item)
-        elif item.severity == "high":
-            other_high += 1
-    keys = {
-        (
-            str((item.evidence or {}).get("analysis_type") or item.id),
-            item.page,
-        )
-        for item in critical
-    }
-    if len(keys) >= 2 or (critical and other_high):
-        return "critical", 95, critical
-    if critical:
-        return "high", 85, critical
+    forged: list[Finding] = [
+        item for item in actionable if is_forged_exhibit_signal(item, page_text="")
+    ]
+    if forged:
+        return "critical", 100, forged
     return None, 0, []
 
 
