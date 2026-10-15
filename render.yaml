@@ -303,6 +303,13 @@ services:
         value: "false"
       - key: CASESIFTER_INVITE_CODES
         sync: false
+      # Contact form → sales@casesifter.com (Resend). Set key in Dashboard.
+      - key: RESEND_API_KEY
+        sync: false
+      - key: CONTACT_TO_EMAIL
+        value: sales@casesifter.com
+      - key: CONTACT_FROM_EMAIL
+        value: CaseSifter <noreply@casesifter.com>
 
   - type: web
     name: casesifter-app

@@ -5,12 +5,15 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import html
 import json
 import math
 import os
 import secrets
 import time
 import uuid
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +46,12 @@ SINGLE_USER_EMAIL = (
 ).strip().lower()
 SINGLE_USER_PASSWORD = os.environ.get("CASESIFTER_SINGLE_USER_PASSWORD") or "Casesifter1"
 SINGLE_USER_NAME = (os.environ.get("CASESIFTER_SINGLE_USER_NAME") or "Liberty Group Funding").strip()
+
+CONTACT_TO_EMAIL = (os.environ.get("CONTACT_TO_EMAIL") or "sales@casesifter.com").strip().lower()
+CONTACT_FROM_EMAIL = (
+    os.environ.get("CONTACT_FROM_EMAIL") or "CaseSifter <noreply@casesifter.com>"
+).strip()
+RESEND_API_KEY = (os.environ.get("RESEND_API_KEY") or "").strip()
 
 
 def _is_production() -> bool:
@@ -168,6 +177,15 @@ class DiagnosticsBody(BaseModel):
 class CheckoutBody(BaseModel):
     trial: bool = False
     quantity: int = Field(default=1, ge=1, le=50)
+
+
+class ContactBody(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    firm: str = Field(min_length=1, max_length=200)
+    email: EmailStr
+    phone: str | None = Field(default=None, max_length=40)
+    reason: str = Field(min_length=1, max_length=80)
+    message: str | None = Field(default=None, max_length=5000)
 
 
 def _ensure_auth_db() -> None:
@@ -793,11 +811,105 @@ def health():
     payload = {
         "status": "ok",
         "stripe": bool(STRIPE_SECRET and STRIPE_PRICE_ID),
+        "contact_email": bool(RESEND_API_KEY and CONTACT_TO_EMAIL),
         "git_commit_source": "RENDER_GIT_COMMIT",
         "git_commit": git_commit,
         "git_commit_short": git_commit[:12] if git_commit else None,
     }
     return payload
+
+
+def _send_resend_email(
+    *,
+    to: str,
+    subject: str,
+    text: str,
+    html_body: str,
+    reply_to: str | None = None,
+) -> None:
+    if not RESEND_API_KEY:
+        raise HTTPException(503, "Contact email is not configured. Email sales@casesifter.com directly.")
+    payload: dict[str, Any] = {
+        "from": CONTACT_FROM_EMAIL,
+        "to": [to],
+        "subject": subject,
+        "text": text,
+        "html": html_body,
+    }
+    if reply_to:
+        payload["reply_to"] = reply_to
+    req = urllib.request.Request(
+        "https://api.resend.com/emails",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {RESEND_API_KEY}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "casesifter-control/1.0",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            if resp.status >= 300:
+                raise HTTPException(502, "Could not send your message. Try again or email sales@casesifter.com.")
+    except urllib.error.HTTPError as err:
+        try:
+            err.read()
+        except Exception:
+            pass
+        raise HTTPException(
+            502,
+            "Could not send your message. Try again or email sales@casesifter.com.",
+        ) from err
+    except urllib.error.URLError as err:
+        raise HTTPException(
+            502,
+            "Could not send your message. Try again or email sales@casesifter.com.",
+        ) from err
+
+
+@app.post("/v1/contact")
+def contact(body: ContactBody, request: Request):
+    """Marketing contact form → email to sales@casesifter.com."""
+    client = (request.client.host if request.client else "unknown") or "unknown"
+    _rate_limit(f"contact:{client}", limit=8, window_s=3600)
+    name = body.name.strip()
+    firm = body.firm.strip()
+    email = str(body.email).strip().lower()
+    phone = (body.phone or "").strip()
+    reason = body.reason.strip()
+    message = (body.message or "").strip()
+    if not name or not firm:
+        raise HTTPException(422, "Name and firm are required.")
+
+    subject = f"CaseSifter contact — {reason} — {firm}"
+    text = (
+        f"Name: {name}\n"
+        f"Firm: {firm}\n"
+        f"Email: {email}\n"
+        f"Phone: {phone or '(none)'}\n"
+        f"Reason: {reason}\n\n"
+        f"Message:\n{message or '(none)'}\n"
+    )
+    html_body = (
+        "<h2>New CaseSifter contact form</h2>"
+        f"<p><strong>Name:</strong> {html.escape(name)}<br>"
+        f"<strong>Firm:</strong> {html.escape(firm)}<br>"
+        f"<strong>Email:</strong> {html.escape(email)}<br>"
+        f"<strong>Phone:</strong> {html.escape(phone or '(none)')}<br>"
+        f"<strong>Reason:</strong> {html.escape(reason)}</p>"
+        f"<p><strong>Message</strong></p>"
+        f"<p>{html.escape(message or '(none)').replace(chr(10), '<br>')}</p>"
+    )
+    _send_resend_email(
+        to=CONTACT_TO_EMAIL,
+        subject=subject,
+        text=text,
+        html_body=html_body,
+        reply_to=email,
+    )
+    return {"ok": True, "message": "Thanks — we'll be in touch within one business day."}
 
 
 @app.post("/v1/signup")
