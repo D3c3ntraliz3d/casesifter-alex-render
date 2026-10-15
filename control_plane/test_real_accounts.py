@@ -55,7 +55,7 @@ def test_signup_closed(client):
         },
     )
     assert su.status_code == 403
-    assert "join@casesifter.com" in su.json()["detail"]
+    assert "Sales@casesifter.com" in su.json()["detail"]
 
 
 def test_wrong_password_rejected(client):

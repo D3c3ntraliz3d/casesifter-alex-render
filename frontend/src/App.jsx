@@ -3278,7 +3278,7 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
         </p>
         <p className="footnote" style={{ margin: "4px 0 0" }}>
           Firm access:{" "}
-          <a href="mailto:join@casesifter.com">join@casesifter.com</a>
+          <a href="mailto:Sales@casesifter.com">Sales@casesifter.com</a>
         </p>
         {entitlement.support_code ? (
           <p className="footnote" style={{ margin: "4px 0 0" }}>
@@ -3367,7 +3367,7 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
         <div className="case-form">
           <p className="plan-summary">
             Firm access is negotiated. For new seats or volume, email{" "}
-            <a href="mailto:join@casesifter.com">join@casesifter.com</a>.
+            <a href="mailto:Sales@casesifter.com">Sales@casesifter.com</a>.
           </p>
           <div className="actions">
             <button
@@ -3435,7 +3435,7 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
 
           <p className="plan-summary">
             Sign in with your firm account. Public signup is closed — for access, email{" "}
-            <a href="mailto:join@casesifter.com">join@casesifter.com</a>.
+            <a href="mailto:Sales@casesifter.com">Sales@casesifter.com</a>.
           </p>
 
           <div className="actions">
@@ -3507,7 +3507,7 @@ function TermsModal({ onClose }) {
           <h4>3. Billing</h4>
           <p>
             Firm access is priced per file and negotiated with each firm. Contact{" "}
-            <a href="mailto:join@casesifter.com">join@casesifter.com</a> for access and quotes.
+            <a href="mailto:Sales@casesifter.com">Sales@casesifter.com</a> for access and quotes.
             Product help:{" "}
             <a href="mailto:support@casesifter.com">support@casesifter.com</a>.
           </p>
@@ -3515,7 +3515,7 @@ function TermsModal({ onClose }) {
           <p>
             You may cancel firm access by emailing{" "}
             <a href="mailto:support@casesifter.com">support@casesifter.com</a> or{" "}
-            <a href="mailto:join@casesifter.com">join@casesifter.com</a>.
+            <a href="mailto:Sales@casesifter.com">Sales@casesifter.com</a>.
             Account closure can purge firm fact memory on request.
           </p>
           <h4>5. Acceptable use</h4>

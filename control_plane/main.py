@@ -804,7 +804,7 @@ def health():
 def signup(body: SignupBody, request: Request):
     raise HTTPException(
         403,
-        "Public signup is closed. Contact join@casesifter.com for firm access.",
+        "Public signup is closed. Contact Sales@casesifter.com for firm access.",
     )
 
 
