@@ -51,7 +51,12 @@ CONTACT_TO_EMAIL = (os.environ.get("CONTACT_TO_EMAIL") or "sales@casesifter.com"
 CONTACT_FROM_EMAIL = (
     os.environ.get("CONTACT_FROM_EMAIL") or "CaseSifter <noreply@casesifter.com>"
 ).strip()
-RESEND_API_KEY = (os.environ.get("RESEND_API_KEY") or "").strip()
+# Prefer RESEND_*; accept common RESEMD_* typo so a misnamed Dashboard key still works.
+RESEND_API_KEY = (
+    os.environ.get("RESEND_API_KEY")
+    or os.environ.get("RESEMD_API_KEY")
+    or ""
+).strip()
 
 
 def _is_production() -> bool:
