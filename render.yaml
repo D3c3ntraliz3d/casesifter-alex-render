@@ -352,16 +352,22 @@ services:
         - marketing/**
         - render.yaml
     routes:
-      # Desktop funnel retired — keep these even if CDN still has old binaries.
+      # Desktop funnel + retired marketing pages → contact (firm access).
       - type: redirect
         source: /download.html
-        destination: /signup.html
+        destination: /contact.html
       - type: redirect
         source: /downloads/*
-        destination: /signup.html
+        destination: /contact.html
       - type: redirect
         source: /assets/downloads.json
-        destination: /signup.html
+        destination: /contact.html
+      - type: redirect
+        source: /signup.html
+        destination: /contact.html
+      - type: redirect
+        source: /pricing.html
+        destination: /contact.html
     headers:
       - path: /*.html
         name: Cache-Control

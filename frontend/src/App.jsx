@@ -23,11 +23,7 @@ import {
   absorbSessionHandoff,
   loginCloud,
   logoutCloud,
-  openCheckoutUrl,
   reportProblem,
-  signupCloud,
-  startCheckout,
-  openBillingPortal,
   patchDocument,
   pickDesktopDocuments,
   getDesktopReport,
@@ -290,7 +286,6 @@ export default function App() {
   const [entitlement, setEntitlement] = useState(null);
   const [busy, setBusy] = useState(false);
   const [query, setQuery] = useState("");
-  const checkoutTrialStarted = useRef(false);
 
   function markAnalysisOffline(err) {
     if (!isHostedAnalysis() || !isAnalysisUnreachableError(err)) return false;
@@ -351,44 +346,6 @@ export default function App() {
     });
     refreshEntitlement();
   }, []);
-
-  // Post-signup: ?checkout=trial → start Stripe Checkout once when billing_state is none.
-  useEffect(() => {
-    if (!entitlement) return;
-    if (checkoutTrialStarted.current) return;
-    const signedIn = Boolean(entitlement.hasSession);
-    if (!signedIn) return;
-    if ((entitlement.billing_state || "none") !== "none") return;
-    let params;
-    try {
-      params = new URLSearchParams(window.location.search || "");
-    } catch {
-      return;
-    }
-    if (params.get("checkout") !== "trial") return;
-    checkoutTrialStarted.current = true;
-    params.delete("checkout");
-    const next = `${window.location.pathname}${params.toString() ? `?${params}` : ""}${window.location.hash || ""}`;
-    window.history.replaceState({}, "", next);
-    (async () => {
-      setError("");
-      try {
-        const session = await startCheckout(true, 1);
-        if (session?.url) {
-          openCheckoutUrl(session.url);
-          return;
-        }
-        if (session?.mode === "dev") {
-          setError(session.message || "Trial updated (Stripe not configured).");
-        }
-        await refreshEntitlement();
-      } catch (err) {
-        setError(err.message || "Could not start checkout.");
-        setView("account");
-        await refreshEntitlement();
-      }
-    })();
-  }, [entitlement]);
 
   // Desktop: refresh while any doc is queued/scanning so status flips show up.
   useEffect(() => {
@@ -650,22 +607,8 @@ export default function App() {
       return false;
     }
     if (!canCreateCase) {
-      setError("");
+      setError("Scans are locked for this account. Contact support@casesifter.com.");
       setView("account");
-      if (billingState === "none") {
-        try {
-          const session = await startCheckout(true, 1);
-          if (session?.url) {
-            openCheckoutUrl(session.url);
-          } else if (session?.mode === "dev") {
-            setError(session.message || "Trial updated (Stripe not configured).");
-            await refreshEntitlement();
-          }
-        } catch (err) {
-          setError(err.message || "Could not start checkout.");
-          await refreshEntitlement();
-        }
-      }
       return false;
     }
     if (analysisOffline) {
@@ -698,7 +641,7 @@ export default function App() {
             setView("account");
           }}
         >
-          Start 14-day trial
+          Scans locked
         </button>
       );
     }
@@ -1703,7 +1646,7 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
               setUploadNote(
                 queued
                   ? `Saved ${picked.length}. ${queued} analyzed; use Scan on the rest.`
-                  : `Saved ${picked.length}. Sign in / Start 14-day trial if scans are locked, then use Scan.`
+                  : `Saved ${picked.length}. Sign in if scans are locked, then use Scan.`
               );
             } else {
               setUploadNote(
@@ -3254,18 +3197,9 @@ function CaseRiskSummary({ byRisk, pendingCount, onOpenReport }) {
   );
 }
 
-const PLAN_SUMMARY = (
-  <>
-    <strong>$79/seat/month</strong>. Month-to-month, cancel anytime. A 14-day trial collects a card up front and converts to paid after 14 days unless you cancel.
-  </>
-);
-
 function AccountPanel({ entitlement, onRefresh, onError }) {
   const [email, setEmail] = useState(() => entitlement?.email || "");
   const [password, setPassword] = useState("");
-  const [name, setName] = useState("");
-  const [inviteCode, setInviteCode] = useState("");
-  const [acceptedTerms, setAcceptedTerms] = useState(false);
   const [license, setLicense] = useState("");
   const [problemNote, setProblemNote] = useState("");
   const [showTerms, setShowTerms] = useState(false);
@@ -3316,93 +3250,43 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
     }
   }
 
-  async function openCheckoutTrial() {
-    const session = await startCheckout(true, 1);
-    if (session?.url) {
-      openCheckoutUrl(session.url);
-      return;
-    }
-    if (session?.mode === "dev") {
-      onError(session.message || "Trial updated (Stripe not configured).");
-    }
-    await onRefresh();
-  }
-
-  async function startTrialSignedOut() {
-    if (!email || !email.includes("@")) throw new Error("Enter a valid work email.");
-    if (!password || password.length < 6) throw new Error("Password must be at least 6 characters.");
-    if (!acceptedTerms) {
-      throw new Error("Agree to the Terms of Service and Privacy Policy to continue.");
-    }
-    try {
-      await signupCloud(email, password, name.trim() || null, true, inviteCode.trim() || null);
-    } catch (err) {
-      const msg = String(err?.message || "");
-      if (/already exists/i.test(msg)) {
-        try {
-          await loginCloud(email, password);
-        } catch {
-          throw new Error(
-            "That email already has an account, but the password did not match. Sign in with the correct password, then start your trial.",
-          );
-        }
-      } else {
-        throw err;
-      }
-    }
-    await openCheckoutTrial();
-  }
-
-  async function manageBilling() {
-    if (!entitlement.has_billing_portal) {
-      throw new Error("No Stripe customer yet — start a 14-day trial first.");
-    }
-    const session = await openBillingPortal();
-    if (session?.url) {
-      openCheckoutUrl(session.url);
-      return;
-    }
-    throw new Error(session?.message || "Could not open billing portal.");
-  }
-
   function statusLine() {
-    if (billingState === "trialing" && entitlement.trial_days_left != null) {
-      const n = entitlement.trial_days_left;
-      return `Trial · ${n} day${n === 1 ? "" : "s"} left`;
-    }
-    if (billingState === "active") return "Subscription active";
+    if (billingState === "active") return "Access active";
     if (billingState === "past_due") return "Payment past due";
-    if (billingState === "canceled") return "Subscription canceled";
+    if (billingState === "canceled") return "Access canceled";
     if (billingState === "trialing") return "Trial active";
     return entitlement.active ? "Scans unlocked" : "Scans locked";
   }
 
   return (
     <div className="card">
-      <p className="kicker">Hybrid control plane</p>
-      <h2 className="serif" style={{ marginTop: 4 }}>Subscription</h2>
+      <p className="kicker">Account</p>
+      <h2 className="serif" style={{ marginTop: 4 }}>Sign in</h2>
       <p>
         Mode: <strong>{entitlement.mode}</strong>
         {" · "}
         {statusLine()}
         {signedIn && entitlement.email ? ` · ${entitlement.email}` : ""}
-        {entitlement.seats != null ? ` · ${entitlement.seats} seat${entitlement.seats === 1 ? "" : "s"}` : ""}
       </p>
       <p className="footnote">{entitlement.message}</p>
 
       <div className="priority-support">
-        <p className="priority-support-label">Priority support</p>
+        <p className="priority-support-label">Contact</p>
+        <p className="footnote" style={{ margin: "4px 0 0" }}>
+          Product help:{" "}
+          <a href="mailto:support@casesifter.com">support@casesifter.com</a>
+        </p>
+        <p className="footnote" style={{ margin: "4px 0 0" }}>
+          Firm access:{" "}
+          <a href="mailto:join@casesifter.com">join@casesifter.com</a>
+        </p>
         {entitlement.support_code ? (
           <p className="footnote" style={{ margin: "4px 0 0" }}>
             Support code: <strong>{entitlement.support_code}</strong> — quote this in email so we can find your account without case files.
           </p>
         ) : null}
         <p className="footnote" style={{ margin: "4px 0 0" }}>
-          Email:{" "}
-          <a href="mailto:support@casesifter.com">support@casesifter.com</a>
-        </p>
-        <p className="footnote" style={{ margin: "4px 0 0" }}>
-          For product help and billing. Do not paste document content or privileged filings into email.
+          Do not paste document content or privileged filings into email.
         </p>
       </div>
 
@@ -3481,43 +3365,11 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
 
       {entitlement.mode === "cloud" && signedIn && (
         <div className="case-form">
-          <p className="plan-summary">{PLAN_SUMMARY}</p>
-          {billingState === "past_due" && (
-            <p className="footnote" style={{ color: "var(--red)", marginTop: 8 }}>
-              Your payment is past due. Update your card in Manage billing to restore scans.
-            </p>
-          )}
+          <p className="plan-summary">
+            Firm access is negotiated. For new seats or volume, email{" "}
+            <a href="mailto:join@casesifter.com">join@casesifter.com</a>.
+          </p>
           <div className="actions">
-            {billingState === "none" && (
-              <button
-                className="btn gold"
-                type="button"
-                disabled={busy}
-                onClick={() => guard("trial", () => openCheckoutTrial())}
-              >
-                {working === "trial" ? "Opening checkout…" : "Start 14-day trial"}
-              </button>
-            )}
-            {(billingState === "canceled") && (
-              <button
-                className="btn gold"
-                type="button"
-                disabled={busy}
-                onClick={() => guard("trial", () => openCheckoutTrial())}
-              >
-                {working === "trial" ? "Opening checkout…" : "Start 14-day trial"}
-              </button>
-            )}
-            {(billingState === "trialing" || billingState === "active" || billingState === "past_due") && (
-              <button
-                className="btn secondary"
-                type="button"
-                disabled={busy || !entitlement.has_billing_portal}
-                onClick={() => guard("billing", () => manageBilling())}
-              >
-                {working === "billing" ? "Opening portal…" : "Manage billing"}
-              </button>
-            )}
             <button
               className="btn secondary"
               type="button"
@@ -3529,15 +3381,18 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
             >
               Sign out
             </button>
+            <button
+              className="btn secondary"
+              type="button"
+              onClick={() => setShowTerms(true)}
+            >
+              Terms
+            </button>
           </div>
           <p className="footnote">
-            {billingState === "none" || billingState === "canceled"
-              ? "Start 14-day trial opens Stripe Checkout (card required). CaseSifter never sees your card number."
-              : "Manage billing opens the Stripe Customer Portal. CaseSifter never sees or stores your card number."}
-            {" "}
             {isDesktopApp()
               ? "Files stay on this PC; analysis runs remotely and source files are deleted from our servers immediately after each scan."
-              : "Your PDFs are processed and deleted after analysis; we don't keep the files. We store an encrypted case index (key facts, short quotes and page references, and text excerpts used to compare documents) so your firm can find contradictions across filings. AI analysis is performed by Google Gemini under paid API terms (no training on your data; limited-period abuse logging). Large files are sent to Google’s Gemini file service for analysis and deleted immediately after; at most 48 hours if deletion fails. Short quotes from proposed findings are also sent to Anthropic’s Claude under its commercial API terms (no training on your data) to double-check findings before you see them. Only signed-in members of your firm can access your index."}
+              : "Your PDFs are processed and deleted after analysis; we don't keep the files. We store an encrypted case index so your firm can find contradictions across filings. AI analysis uses Google Gemini and Anthropic Claude under paid API terms."}
           </p>
         </div>
       )}
@@ -3556,16 +3411,6 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
           }}
         >
           <label>
-            Name <span className="field-optional">(optional)</span>
-            <input
-              type="text"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              autoComplete="name"
-              placeholder="Your name"
-            />
-          </label>
-          <label>
             Email
             <input
               type="email"
@@ -3573,7 +3418,7 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
               onChange={(e) => setEmail(e.target.value)}
               required
               autoComplete="email"
-              placeholder={entitlement.email || "you@firm.com"}
+              placeholder="admin@libertygroupfunding.com"
             />
           </label>
           <label>
@@ -3587,43 +3432,10 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
               autoComplete="current-password"
             />
           </label>
-          <label>
-            Invite code <span className="field-optional">(optional)</span>
-            <input
-              type="text"
-              value={inviteCode}
-              onChange={(e) => setInviteCode(e.target.value)}
-              autoComplete="off"
-              placeholder="Leave blank unless your firm sent one"
-            />
-          </label>
-
-          <div className="terms-row">
-            <input
-              id="account-accepted-terms"
-              type="checkbox"
-              checked={acceptedTerms}
-              onChange={(e) => setAcceptedTerms(e.target.checked)}
-            />
-            <label htmlFor="account-accepted-terms">
-              I agree to the{" "}
-              <button
-                type="button"
-                className="linkish"
-                onClick={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  setShowTerms(true);
-                }}
-              >
-                Terms of Service and Privacy Policy
-              </button>
-              .
-            </label>
-          </div>
 
           <p className="plan-summary">
-            {PLAN_SUMMARY} Sign in if you already have an account, or start a 14-day free trial (card required).
+            Sign in with your firm account. Public signup is closed — for access, email{" "}
+            <a href="mailto:join@casesifter.com">join@casesifter.com</a>.
           </p>
 
           <div className="actions">
@@ -3631,18 +3443,17 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
               {working === "login" ? "Signing in…" : "Sign in"}
             </button>
             <button
-              className="btn gold"
+              className="btn secondary"
               type="button"
-              disabled={busy}
-              onClick={() => guard("trial", () => startTrialSignedOut())}
+              onClick={() => setShowTerms(true)}
             >
-              {working === "trial" ? "Opening checkout…" : "Start a 14-day free trial"}
+              Terms
             </button>
           </div>
           <p className="footnote">
             {isDesktopApp()
-              ? "Files stay on this PC. Analysis runs remotely; source files are deleted from our servers immediately after each scan. Start trial opens Stripe Checkout (card required)."
-              : "Your PDFs are processed and deleted after analysis; we don't keep the files. We store an encrypted case index so your firm can find contradictions across filings. AI analysis uses Google Gemini and Anthropic Claude under paid API terms. Start trial opens Stripe Checkout (card required). CaseSifter never sees your card number."}
+              ? "Files stay on this PC. Analysis runs remotely; source files are deleted from our servers immediately after each scan."
+              : "Your PDFs are processed and deleted after analysis; we don't keep the files. We store an encrypted case index so your firm can find contradictions across filings."}
           </p>
         </form>
       )}
@@ -3693,18 +3504,19 @@ function TermsModal({ onClose }) {
             a matter, or your entire account at any time.
             Database backups may retain encrypted copies for a limited window after deletion.
           </p>
-          <h4>3. Billing and trials</h4>
+          <h4>3. Billing</h4>
           <p>
-            Paid plans are <strong>$79 per seat per month</strong>, billed through Stripe; CaseSifter never
-            receives or stores your card number. A free trial period requires a valid card on file — unless you
-            cancel before the trial ends, it converts automatically into a paid subscription at the then-current
-            per-seat price. Manage seats and payment methods in the Stripe Customer Portal from Account → Manage billing.
+            Firm access is priced per file and negotiated with each firm. Contact{" "}
+            <a href="mailto:join@casesifter.com">join@casesifter.com</a> for access and quotes.
+            Product help:{" "}
+            <a href="mailto:support@casesifter.com">support@casesifter.com</a>.
           </p>
           <h4>4. Cancellation</h4>
           <p>
-            You may cancel at any time from Account → Manage billing (Customer Portal) or by emailing{" "}
-            <a href="mailto:support@casesifter.com">support@casesifter.com</a>; cancellation takes effect at
-            the end of the current billing period. Account closure can purge firm fact memory on request.
+            You may cancel firm access by emailing{" "}
+            <a href="mailto:support@casesifter.com">support@casesifter.com</a> or{" "}
+            <a href="mailto:join@casesifter.com">join@casesifter.com</a>.
+            Account closure can purge firm fact memory on request.
           </p>
           <h4>5. Acceptable use</h4>
           <p>

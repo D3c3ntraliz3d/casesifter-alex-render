@@ -30,20 +30,22 @@ def client(tmp_path, monkeypatch):
     monkeypatch.delenv("RESEND_API_KEY", raising=False)
     monkeypatch.setenv("SESSION_SECRET", "unit-test-migrate-secret")
     monkeypatch.setenv("CASESIFTER_INVITE_REQUIRED", "false")
+    monkeypatch.setenv("CASESIFTER_SINGLE_USER_EMAIL", "admin@libertygroupfunding.com")
+    monkeypatch.setenv("CASESIFTER_SINGLE_USER_PASSWORD", "legacy-password-ok")
 
     salt = secrets.token_hex(8)
     password = "legacy-password-ok"
     accounts = {
         "users": {
-            "john@libertygroupfunding.com": {
-                "email": "john@libertygroupfunding.com",
-                "name": "John",
+            "admin@libertygroupfunding.com": {
+                "email": "admin@libertygroupfunding.com",
+                "name": "Admin",
                 "salt": salt,
                 "password_hash": _sha256_hash(password, salt),
                 "created_at": time.time(),
                 "trial_until": time.time() + 86400 * 14,
                 "subscription": {"status": "trialing"},
-                "user_id": "johnlegacyuserid01",
+                "user_id": "adminlegacyuserid01",
                 "support_code": "CS-001-002-003",
                 "cohort": "beta",
             }
@@ -72,7 +74,7 @@ def client(tmp_path, monkeypatch):
     auth_store.reset_auth_store_for_tests()
 
 
-def test_migrates_john_legacy_password_and_upgrades_on_login(client, tmp_path):
+def test_migrates_legacy_password_and_upgrades_on_login(client, tmp_path):
     c, password = client
     import auth_store
     from sqlalchemy import select
@@ -83,13 +85,13 @@ def test_migrates_john_legacy_password_and_upgrades_on_login(client, tmp_path):
     with auth_store.session_scope() as s:
         row = s.execute(
             select(auth_store.CpUser).where(
-                auth_store.CpUser.email == "john@libertygroupfunding.com"
+                auth_store.CpUser.email == "admin@libertygroupfunding.com"
             )
         ).scalar_one()
         assert row.password_algo == "sha256"
         assert row.legacy_salt
         assert row.email_verified is True
-        assert row.id == "johnlegacyuserid01"
+        assert row.id == "adminlegacyuserid01"
 
     # Idempotent re-run: no second row, file still present.
     n = auth_store.migrate_accounts_json(store_path)
@@ -99,7 +101,7 @@ def test_migrates_john_legacy_password_and_upgrades_on_login(client, tmp_path):
 
     login = c.post(
         "/v1/login",
-        json={"email": "john@libertygroupfunding.com", "password": password},
+        json={"email": "admin@libertygroupfunding.com", "password": password},
     )
     assert login.status_code == 200, login.text
     assert login.json().get("token")
@@ -107,7 +109,7 @@ def test_migrates_john_legacy_password_and_upgrades_on_login(client, tmp_path):
     with auth_store.session_scope() as s:
         row = s.execute(
             select(auth_store.CpUser).where(
-                auth_store.CpUser.email == "john@libertygroupfunding.com"
+                auth_store.CpUser.email == "admin@libertygroupfunding.com"
             )
         ).scalar_one()
         assert row.password_algo == "argon2id"

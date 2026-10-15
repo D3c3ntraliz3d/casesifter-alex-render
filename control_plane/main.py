@@ -37,6 +37,13 @@ INVITE_CODES = {
 SESSION_TTL_S = int(float(os.environ.get("SESSION_TTL_DAYS", "30") or 30) * 86400)
 _SESSION_SECRET_PATH = DATA / "session_secret"
 
+# Soft-launch: public signup off; only this firm account may sign in.
+SINGLE_USER_EMAIL = (
+    os.environ.get("CASESIFTER_SINGLE_USER_EMAIL") or "admin@libertygroupfunding.com"
+).strip().lower()
+SINGLE_USER_PASSWORD = os.environ.get("CASESIFTER_SINGLE_USER_PASSWORD") or "Casesifter1"
+SINGLE_USER_NAME = (os.environ.get("CASESIFTER_SINGLE_USER_NAME") or "Liberty Group Funding").strip()
+
 
 def _is_production() -> bool:
     return (os.environ.get("APP_ENV") or "").strip().lower() == "production"
@@ -168,6 +175,49 @@ def _ensure_auth_db() -> None:
 
     auth.init_auth_store()
     auth.migrate_accounts_json(STORE)
+
+
+def _ensure_single_user() -> None:
+    """Create or refresh the sole allowlisted account (verified + scans unlocked)."""
+    import auth_store as auth
+    from sqlalchemy import select
+
+    if not SINGLE_USER_EMAIL or not SINGLE_USER_PASSWORD:
+        return
+    _ensure_auth_db()
+    with auth.session_scope() as s:
+        row = s.execute(
+            select(auth.CpUser).where(auth.CpUser.email == SINGLE_USER_EMAIL)
+        ).scalar_one_or_none()
+        sub = json.dumps({"status": "active", "plan": "enterprise"})
+        if row is None:
+            row = auth.CpUser(
+                id=uuid.uuid4().hex,
+                email=SINGLE_USER_EMAIL,
+                name=SINGLE_USER_NAME,
+                password_hash=auth.hash_password(SINGLE_USER_PASSWORD),
+                password_algo="argon2id",
+                email_verified=True,
+                created_at=time.time(),
+                accepted_terms_at=time.time(),
+                trial_until=0,
+                subscription_json=sub,
+                cohort="enterprise",
+                support_code=_support_code(),
+            )
+            s.add(row)
+            return
+        # Keep password + entitlement in sync with the allowlist config.
+        if not auth.verify_password(row, SINGLE_USER_PASSWORD):
+            row.password_hash = auth.hash_password(SINGLE_USER_PASSWORD)
+            row.password_algo = "argon2id"
+            row.legacy_salt = None
+        row.email_verified = True
+        row.name = row.name or SINGLE_USER_NAME
+        row.subscription_json = sub
+        if not row.support_code:
+            row.support_code = _support_code()
+        s.add(row)
 
 
 def _load() -> dict[str, Any]:
@@ -732,6 +782,7 @@ def _auth_startup() -> None:
             "(fromDatabase casesifter-fact-memory). Refusing to boot."
         )
     _ensure_auth_db()
+    _ensure_single_user()
 
 
 @app.get("/health")
@@ -751,50 +802,10 @@ def health():
 
 @app.post("/v1/signup")
 def signup(body: SignupBody, request: Request):
-    if not body.accepted_terms:
-        raise HTTPException(422, "You must agree to the Terms of Service and Privacy Policy to continue.")
-    if not _invite_ok(body.invite_code):
-        raise HTTPException(403, "A valid invite code is required for beta signup.")
-    import auth_store as auth
-    from sqlalchemy import select
-
-    email = body.email.lower().strip()
-    client = (request.client.host if request.client else "unknown") or "unknown"
-    _rate_limit(f"signup:{client}:{email}", limit=5, window_s=3600)
-    _ensure_auth_db()
-    with auth.session_scope() as s:
-        existing = s.execute(select(auth.CpUser).where(auth.CpUser.email == email)).scalar_one_or_none()
-        if existing:
-            raise HTTPException(409, "Account already exists.")
-        cohort = "beta" if (body.invite_code or INVITE_REQUIRED) else "general"
-        uid = uuid.uuid4().hex
-        user = auth.CpUser(
-            id=uid,
-            email=email,
-            name=body.name or "",
-            password_hash=auth.hash_password(body.password),
-            password_algo="argon2id",
-            email_verified=False,
-            created_at=time.time(),
-            accepted_terms_at=time.time(),
-            trial_until=0,
-            subscription_json="{}",
-            cohort=cohort,
-            support_code=_support_code(),
-        )
-        s.add(user)
-        verify_raw = auth.create_email_token(s, user, purpose="verify", ttl_s=86400)
-    # No session until email is verified.
-    payload = {
-        "ok": True,
-        "email": email,
-        "email_verified": False,
-        "message": "Check your email to verify your account before signing in.",
-    }
-    # Opt-in only — never return tokens unless AUTH_DEV_TOKENS=true.
-    if _allow_dev_auth_tokens():
-        payload["dev_verify_token"] = verify_raw
-    return payload
+    raise HTTPException(
+        403,
+        "Public signup is closed. Contact join@casesifter.com for firm access.",
+    )
 
 
 @app.post("/v1/login")
@@ -805,7 +816,9 @@ def login(body: LoginBody, request: Request):
     email = body.email.lower().strip()
     client = (request.client.host if request.client else "unknown") or "unknown"
     _rate_limit(f"login:{client}:{email}", limit=20, window_s=600)
-    _ensure_auth_db()
+    if email != SINGLE_USER_EMAIL:
+        raise HTTPException(401, "Invalid email or password.")
+    _ensure_single_user()
     with auth.session_scope() as s:
         row = s.execute(select(auth.CpUser).where(auth.CpUser.email == email)).scalar_one_or_none()
         if row is None or not auth.verify_password(row, body.password):

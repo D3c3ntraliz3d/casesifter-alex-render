@@ -12,6 +12,9 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+SINGLE_EMAIL = "admin@libertygroupfunding.com"
+SINGLE_PASSWORD = "Casesifter1"
+
 
 @pytest.fixture()
 def client_default(tmp_path, monkeypatch):
@@ -22,6 +25,8 @@ def client_default(tmp_path, monkeypatch):
     monkeypatch.delenv("RESEND_API_KEY", raising=False)
     monkeypatch.setenv("SESSION_SECRET", "unit-test-no-dev-tokens")
     monkeypatch.setenv("CASESIFTER_INVITE_REQUIRED", "false")
+    monkeypatch.setenv("CASESIFTER_SINGLE_USER_EMAIL", SINGLE_EMAIL)
+    monkeypatch.setenv("CASESIFTER_SINGLE_USER_PASSWORD", SINGLE_PASSWORD)
 
     import auth_store
 
@@ -33,11 +38,12 @@ def client_default(tmp_path, monkeypatch):
     mod.SESSION_SECRET = "unit-test-no-dev-tokens"
     mod.STORE = tmp_path / "accounts.json"
     mod.DATA = tmp_path
+    mod._ensure_single_user()
     yield TestClient(mod.app)
     auth_store.reset_auth_store_for_tests()
 
 
-def test_signup_and_reset_never_return_tokens_by_default(client_default):
+def test_signup_closed_and_reset_never_return_tokens_by_default(client_default):
     c = client_default
     su = c.post(
         "/v1/signup",
@@ -47,23 +53,10 @@ def test_signup_and_reset_never_return_tokens_by_default(client_default):
             "accepted_terms": True,
         },
     )
-    assert su.status_code == 200, su.text
-    body = su.json()
-    assert "dev_verify_token" not in body
-    assert "dev_reset_token" not in body
-    # Even with AUTH_DEV_TOKENS unset, reset must not leak a token for an existing user.
-    # Create verified user via store so reset path runs.
-    import auth_store
-    from sqlalchemy import select
+    assert su.status_code == 403
+    assert "dev_verify_token" not in su.json()
 
-    with auth_store.session_scope() as s:
-        row = s.execute(
-            select(auth_store.CpUser).where(auth_store.CpUser.email == "victim@example.com")
-        ).scalar_one()
-        row.email_verified = True
-        s.add(row)
-
-    reset = c.post("/v1/password-reset/request", json={"email": "victim@example.com"})
+    reset = c.post("/v1/password-reset/request", json={"email": SINGLE_EMAIL})
     assert reset.status_code == 200
     assert "dev_reset_token" not in reset.json()
     assert "dev_verify_token" not in reset.json()
