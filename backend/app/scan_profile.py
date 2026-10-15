@@ -77,7 +77,7 @@ STATEMENT_HINT_RE = re.compile(
     r"meter\s*(?:read|reading|number)|"
     r"kwh|therms|"
     r"check\s*number|"
-    r"national\s*grid|con\s*edison|keyspan|pseg"
+    r"national\s*grid|con\s*edison|keyspan|pseg|verizon"
     r")"
 )
 

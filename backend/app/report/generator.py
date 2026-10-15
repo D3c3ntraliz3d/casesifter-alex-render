@@ -22,6 +22,7 @@ from reportlab.platypus import (
 
 from app import __version__
 from app.models import Report
+from app.report.scoring import risk_banner
 from app.storage import artifact_dir, job_dir
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
@@ -30,7 +31,6 @@ env = Environment(
     autoescape=select_autoescape(["html"]),
 )
 
-RISK_LABEL = {"green": "Low risk", "yellow": "Moderate risk", "red": "High risk"}
 CATEGORY_LABEL = {
     "metadata": "Metadata",
     "image": "Image manipulation",
@@ -46,7 +46,7 @@ def render_html(report: Report) -> str:
     template = env.get_template("report.html")
     return template.render(
         report=_embed_heatmaps(report),
-        risk_label=RISK_LABEL.get(report.risk_level, report.risk_level),
+        risk_label=risk_banner(report.risk_level, report.findings),
         category_label=CATEGORY_LABEL,
         generated=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         version=__version__,
@@ -132,7 +132,10 @@ def render_pdf(report: Report) -> Path:
     story.append(Paragraph(report.audit.filename, styles["Body"]))
     story.append(Spacer(1, 8))
     badge = Table(
-        [[Paragraph(f"<b>{RISK_LABEL[report.risk_level]}</b>  (score {report.risk_score}/100)", styles["Body"])]],
+        [[Paragraph(
+            f"<b>{risk_banner(report.risk_level, report.findings)}</b>  (score {report.risk_score}/100)",
+            styles["Body"],
+        )]],
         colWidths=[6.5 * inch],
     )
     badge.setStyle(

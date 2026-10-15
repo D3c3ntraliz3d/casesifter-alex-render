@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import re
 from collections import Counter
 
-from app.finding_policy import is_material_finding
+from app.finding_policy import forgery_risk_band, is_material_finding
 from app.gotcha import TYPE_SCORE_WEIGHT
 from app.models import Finding, Report, RiskLevel
+
+CRITICAL_RISK_LABEL = "Critical risk — strong indicators of alteration"
+RISK_LABEL = {"green": "Low risk", "yellow": "Moderate risk", "red": "High risk"}
 
 
 SEVERITY_WEIGHT = {
@@ -45,7 +49,11 @@ def score_risk(findings: list[Finding]) -> tuple[RiskLevel, int]:
 def score_risk_details(
     findings: list[Finding],
 ) -> tuple[RiskLevel, int, list[dict[str, object]]]:
-    """Return score, level derived from that score, and score_drivers (no floors)."""
+    """Return score, level, and score_drivers.
+
+    An exhibit that appears forged floors at 100. Clean checks are not averaged
+    in and cannot pull that floor back down.
+    """
     actionable = [
         f
         for f in findings
@@ -64,15 +72,32 @@ def score_risk_details(
             elif (item.evidence or {}).get("evidence_tier") == 1 and (item.evidence or {}).get("claim_tier") == 1:
                 weight *= 1.1
         raw += int(weight)
-    score = min(100, raw)
+    weighted = min(100, raw)
+    band, floor, critical = forgery_risk_band(findings)
+    # Floor is a minimum. Additional clean checks cannot reduce it.
+    score = min(100, max(weighted, floor))
     drivers: list[dict[str, object]] = [
         {
             "type": "weighted_findings",
-            "raw_score": score,
+            "raw_score": weighted,
             "finding_count": len(actionable),
             "explanation": "Sum of severity weights adjusted by confidence and verified finding type.",
         }
     ]
+    if floor:
+        drivers.append(
+            {
+                "type": "critical_floor",
+                "floor": floor,
+                "band": band,
+                "critical_count": len(critical),
+                "score": score,
+                "explanation": (
+                    "An exhibit that appears forged floors the score at 100. "
+                    "Clean checks do not lower that floor."
+                ),
+            }
+        )
     level = risk_level_from_score(score)
     drivers.append(
         {
@@ -83,6 +108,14 @@ def score_risk_details(
         }
     )
     return level, score, drivers
+
+
+def risk_banner(level: str, findings: list[Finding]) -> str:
+    """Attorney-facing label. Forged exhibits read as critical risk."""
+    band, _floor, _critical = forgery_risk_band(findings)
+    if band == "critical":
+        return CRITICAL_RISK_LABEL
+    return RISK_LABEL.get(level, level)
 
 
 def pick_top_findings(findings: list[Finding], limit: int = 3) -> list[Finding]:
@@ -137,24 +170,44 @@ def recommended_actions(risk: RiskLevel, findings: list[Finding]) -> list[str]:
     return unique[:6]
 
 
+def _critical_clause(item: Finding) -> str:
+    page = f"page {item.page}" if item.page else "page not stated"
+    quote = str((item.evidence or {}).get("quoted_evidence") or "").strip()
+    evidence = quote or re.sub(r"\s+", " ", item.explanation or "").strip()
+    if len(evidence) > 280:
+        evidence = evidence[:277].rstrip() + "..."
+    return f"{page} — {item.title}. Evidence: {evidence}"
+
+
 def executive_summary(risk: RiskLevel, filename: str, findings: list[Finding]) -> str:
     counts = Counter(f.severity for f in findings if is_material_finding(f))
     top = pick_top_findings(findings)
-    if risk == "green":
+    band, _floor, critical = forgery_risk_band(findings)
+    if risk == "green" and not critical:
         return (
             f"Automated review of “{filename}” did not find strong signs of digital alteration. "
             "Timestamps, structure, and image-forensics checks are consistent with a routine file. "
             "Staff should still apply ordinary evidentiary judgment."
         )
-    lead = top[0].title if top else "inconsistent internal signals"
-    if risk == "red":
+    if band == "critical" and critical:
+        listed = " ".join(
+            f"({index}) {_critical_clause(item)}" for index, item in enumerate(critical, start=1)
+        )
         return (
-            f"“{filename}” is assessed as high risk. The leading concern is: {lead}. "
+            f"{CRITICAL_RISK_LABEL}. “{filename}” {listed} "
+            "Review each cited page against the scan. These are indicators for counsel to check."
+        )
+    lead = top[0].title if top else "inconsistent internal signals"
+    if risk == "red" or band == "high":
+        extra = ""
+        if critical:
+            extra = " " + " ".join(_critical_clause(item) for item in critical)
+        return (
+            f"“{filename}” is assessed as high risk. The leading concern is: {lead}.{extra} "
             f"The scan recorded {counts.get('critical', 0)} critical, {counts.get('high', 0)} high, "
             f"and {counts.get('medium', 0)} medium finding(s). Treat the exhibit as unverified until reviewed."
         )
     return (
         f"“{filename}” is assessed as moderate risk. The leading concern is: {lead}. "
-        "One or more checks found inconsistencies that deserve human review but are not, by themselves, "
-        "proof of fraud."
+        "One or more checks found inconsistencies that deserve human review before the exhibit is relied on."
     )

@@ -45,13 +45,21 @@ MONTHS = {
     "dec": 12,
 }
 
+_MONTH = (
+    r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+    r"Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|"
+    r"Dec(?:ember)?)"
+)
 DATE_TOKEN = re.compile(
     r"("
     r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}"
     r"|"
-    r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
-    r"Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|"
-    r"Dec(?:ember)?)\.?\s+\d{1,2}(?:st|nd|rd|th)?"
+    # "April 2007" / "December 2011" — month and year, no day.
+    + _MONTH
+    + r"\.?\s+\d{4}"
+    r"|"
+    + _MONTH
+    + r"\.?\s+\d{1,2}(?:st|nd|rd|th)?"
     r"(?:,|\s+)?\s*(?:['’]\d{2}|\d{2,4})"
     r")",
     re.I,
@@ -98,10 +106,11 @@ def find_statement_date_conflicts(
 
     out: list[Finding] = []
     seen: set[str] = set()
-    for block in _statement_blocks(body):
-        if ARREARS_OK_RE.search(block):
-            continue
-        for item in _conflicts_in_block(block, source):
+    for page_no, block in _statement_blocks(body):
+        arrears = bool(ARREARS_OK_RE.search(block))
+        for item in _conflicts_in_block(block, source, page_no):
+            if arrears and not _future_due_date_impossibility(item):
+                continue
             key = item.id
             if key in seen:
                 continue
@@ -112,26 +121,39 @@ def find_statement_date_conflicts(
     return out
 
 
-def _statement_blocks(text: str) -> list[str]:
+def _future_due_date_impossibility(item: Finding) -> bool:
+    """A due date years after the statement date is not an older missed installment."""
+    if "due date" not in (item.title or "").lower():
+        return False
+    evidence = item.evidence or {}
+    try:
+        left = date.fromisoformat(str(evidence.get("left_date") or ""))
+        right = date.fromisoformat(str(evidence.get("right_date") or ""))
+    except ValueError:
+        return False
+    return (right - left).days > DUE_AFTER_DAYS
+
+
+def _statement_blocks(text: str) -> list[tuple[int, str]]:
     pages = re.split(r"\f+", text or "")
-    out: list[str] = []
-    for page in pages:
+    out: list[tuple[int, str]] = []
+    for page_no, page in enumerate(pages, start=1):
         page = page.strip()
         if not page:
             continue
         labels = list(STATEMENT_DATE.finditer(page))
         if len(labels) <= 1:
-            out.append(page)
+            out.append((page_no, page))
             continue
         cuts = [0] + [match.start() for match in labels[1:]] + [len(page)]
         for left, right in zip(cuts, cuts[1:]):
             chunk = page[left:right].strip()
             if chunk:
-                out.append(chunk)
+                out.append((page_no, chunk))
     return out
 
 
-def _conflicts_in_block(block: str, source: str) -> list[Finding]:
+def _conflicts_in_block(block: str, source: str, page_no: int | None = None) -> list[Finding]:
     statement = _first_date(STATEMENT_DATE, block)
     due = _first_date(DUE_DATE, block)
     period = PERIOD_SPAN.search(block)
@@ -158,6 +180,7 @@ def _conflicts_in_block(block: str, source: str) -> list[Finding]:
                 ),
                 source=source,
                 quote=_snippet(block, period.start()),
+                page=page_no,
             )
         )
     if statement and period_start and period_end:
@@ -178,6 +201,7 @@ def _conflicts_in_block(block: str, source: str) -> list[Finding]:
                     ),
                     source=source,
                     quote=_snippet(block, statement[2]),
+                    page=page_no,
                 )
             )
     if statement and due:
@@ -197,6 +221,7 @@ def _conflicts_in_block(block: str, source: str) -> list[Finding]:
                     ),
                     source=source,
                     quote=_snippet(block, statement[2]),
+                    page=page_no,
                 )
             )
     return findings
@@ -214,14 +239,49 @@ def _first_date(pattern: re.Pattern[str], block: str) -> tuple[date, str, int] |
 
 
 def _near_court_stamp(block: str, at: int) -> bool:
-    window = block[max(0, at - 80) : at + 80]
-    return bool(COURT_STAMP.search(window))
+    """Skip a date that sits on the e-filing stamp line itself.
+
+    A body date on the next line is not stamp furniture. An 80-character window
+    was dropping statement dates that sit directly under a NYSCEF header, which
+    hid the April 2007 / December 2011 due-date catch on e-filed exhibits.
+
+    The NYSCEF / FILED / RECEIVED stamp date must never be used as a statement
+    date or due date, even when OCR glues the stamp onto the same visual line
+    as bill labels.
+    """
+    line_start = block.rfind("\n", 0, at) + 1
+    line_end = block.find("\n", at)
+    if line_end < 0:
+        line_end = len(block)
+    line = block[line_start:line_end]
+    if COURT_STAMP.search(line):
+        return True
+    # Same physical stamp band when newlines were lost: FILED/NYSCEF within
+    # ~50 chars before this date token, still on the stamp phrase.
+    window = block[max(0, at - 50) : at]
+    return bool(
+        re.search(
+            r"(?i)(?:FILED:|RECEIVED\s+NYSCEF|NYSCEF\s+DOC|INDEX\s+NO\.?)\s*[^.\n]{0,40}$",
+            window,
+        )
+    )
 
 
 def _parse_date(raw: str) -> date | None:
     text = re.sub(r"\s+", " ", (raw or "").strip())
     if not text:
         return None
+    month_year = re.match(
+        r"^(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+        r"Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|"
+        r"Dec(?:ember)?)\.?\s+(\d{4})$",
+        text,
+        re.I,
+    )
+    if month_year:
+        month = MONTHS.get(re.sub(r"\.", "", month_year.group(1)).lower())
+        if month:
+            return _safe_date(int(month_year.group(2)), month, 1)
     numeric = re.match(r"^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})$", text)
     if numeric:
         month, day, year = (int(numeric.group(1)), int(numeric.group(2)), int(numeric.group(3)))
@@ -259,7 +319,12 @@ def _safe_date(year: int, month: int, day: int) -> date | None:
 
 
 def _snippet(block: str, at: int) -> str:
-    return re.sub(r"\s+", " ", block[max(0, at - 40) : at + 160]).strip()[:240]
+    start = max(0, at - 40)
+    if start > 0 and block[start:start + 1].isalnum():
+        space = block.rfind(" ", 0, start)
+        if space != -1 and start - space <= 24:
+            start = space + 1
+    return re.sub(r"\s+", " ", block[start : at + 160]).strip()[:240]
 
 
 def _date_finding(
@@ -272,13 +337,15 @@ def _date_finding(
     why: str,
     source: str,
     quote: str,
+    page: int | None = None,
 ) -> Finding:
     quoted = quote or f"{left_raw} / {right_raw}"
     seed = f"stmt-date|{title}|{left.isoformat()}|{right.isoformat()}|{quoted[:80]}"
     return finding(
         fid="txt-stmtdate-" + hashlib.sha1(seed.encode("utf-8")).hexdigest()[:10],
         category="contextual",
-        severity="high",
+        severity="critical",
+        page=page,
         title=title,
         explanation=(
             f"This exhibit’s own labels cannot coexist: “{left_raw}” and “{right_raw}”. "

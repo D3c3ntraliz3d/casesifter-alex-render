@@ -73,7 +73,9 @@ def test_strip_report_hides_conflicts_and_rescores(monkeypatch):
     out = strip_report(original)
     assert [f["id"] for f in out["findings"]] == KEPT_IDS
     assert all(f["id"] in KEPT_IDS for f in out["top_findings"])
-    assert out["risk_score"] < 100
+    # Kept findings still include exhibit-forgery signals (due-date + issuer anachronism).
+    assert out["risk_score"] == 100
+    assert out["risk_level"] == "red"
     assert out["case_fact_conflicts_hidden"] == 4
     # Stored report untouched (setting is read-time only).
     assert len(original["findings"]) == 6 and original["risk_score"] == 100
@@ -154,5 +156,7 @@ def test_matter_endpoints_follow_setting(tmp_path, monkeypatch, enabled):
             for g in board["gotchas"]
         )
         assert [f["id"] for f in report["findings"]] == KEPT_IDS
-        assert report["risk_score"] < 100
+        # Forensic forgery signals remain; forged exhibits floor at 100.
+        assert report["risk_score"] == 100
+        assert report["risk_level"] == "red"
     reset_store()
