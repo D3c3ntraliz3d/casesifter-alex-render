@@ -9,6 +9,7 @@ from PIL import Image
 
 from app.config import settings
 from app.engines import finding, timed_module
+from app.image_deps import require_image_forensics_deps
 from app.ingestion import extract_embedded_images, iter_pdf_pages, load_image
 from app.models import Finding, ModuleResult
 from app.storage import artifact_dir
@@ -32,6 +33,7 @@ def analyze_image_forensics(
 def _run(
     path: Path, job_id: str, origin: dict[str, Any]
 ) -> tuple[list[Finding], dict[str, Any]]:
+    require_image_forensics_deps()
     findings: list[Finding] = []
     artifacts: list[str] = []
     # Court exhibits are almost always scans or photos of paper. An OCR text layer does

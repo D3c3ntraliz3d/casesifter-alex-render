@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Reset password — CaseSifter</title>
+  <link rel="stylesheet" href="assets/style.css" />
+</head>
+<body>
+  <main class="wrap">
+    <h1>Choose a new password</h1>
+    <p id="reset-status" class="form-status"></p>
+    <form id="reset-form">
+      <div class="field">
+        <label for="password">New password</label>
+        <input id="password" name="password" type="password" required minlength="8" autocomplete="new-password" />
+      </div>
+      <button class="btn primary" type="submit">Update password</button>
+    </form>
+  </main>
+  <script src="assets/app.js"></script>
+</body>
+</html>

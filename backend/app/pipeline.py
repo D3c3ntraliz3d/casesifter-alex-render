@@ -22,22 +22,26 @@ from app.config import settings
 from app.engines.contextual_logic import analyze_contextual
 from app.engines.image_forensics import analyze_image_forensics
 from app.engines.metadata import analyze_metadata
-from app.engines.ocr_text import analyze_ocr_text
+from app.engines.ocr_text import analyze_ocr_text, text_is_ocr_starved
 from app.engines.pdf_integrity import analyze_pdf_integrity, pdf_origin_guess
 from app.engines.structural import analyze_structural
 from app.ingestion import sha256_file, sniff_type
 from app.models import AuditTrail, Finding, FontUsage, ModuleResult, PageDimension, Report, TimelineEvent
+from app.engines.statement_body import (
+    find_issuer_market_anachronisms,
+    find_line_self_contradictions,
+    find_statement_math_errors,
+    with_page_breaks,
+)
 from app.engines.statement_dates import find_statement_date_conflicts
 from app.engines.template_fabrication import find_template_leftovers, review_print_scan_ela
 from app.finding_policy import triage_findings
 from app.impact_judge import apply_case_impact_judge
 from app.report import (
-    executive_summary,
+    apply_review_presentation,
     pick_top_findings,
-    recommended_actions,
     render_html,
     render_pdf,
-    score_risk_details,
 )
 from app.scan_profile import (
     PROFILE_COURT_FILING,
@@ -239,6 +243,10 @@ def run_local_stage(
     ocr = analyze_ocr_text(source, metadata.extras, scan_profile=profile)
     full_text = ocr.extras.pop("full_text", "") or ""
     page_offsets = list(ocr.extras.get("page_offsets") or [])
+    # Sparse / still-untrustworthy text after OCR preference → force full visual.
+    ocr_starved = (not court_filing) and text_is_ocr_starved(full_text)
+    if ocr_starved:
+        ocr.extras["ocr_starved"] = True
 
     local_findings: list[Finding] = []
     if not court_filing:
@@ -250,9 +258,45 @@ def run_local_stage(
                 doc_kind=doc_kind,
             )
         )
+        paged_text = with_page_breaks(full_text, page_offsets)
+        date_findings = find_statement_date_conflicts(
+            paged_text,
+            scan_profile=profile,
+            source=display_name or source.name,
+            doc_kind=doc_kind,
+        )
+        # Real module row so the Dates light is not invented client-side.
+        # Findings live only on this module (not also in local_findings).
+        statement_dates = ModuleResult(
+            name="statement_dates",
+            status="ok",
+            duration_ms=0,
+            summary=(
+                f"{len(date_findings)} statement-date conflict(s)."
+                if date_findings
+                else "No statement-date conflicts."
+            ),
+            findings=list(date_findings),
+        )
         local_findings.extend(
-            find_statement_date_conflicts(
-                full_text,
+            find_issuer_market_anachronisms(
+                paged_text,
+                scan_profile=profile,
+                source=display_name or source.name,
+                doc_kind=doc_kind,
+            )
+        )
+        local_findings.extend(
+            find_line_self_contradictions(
+                paged_text,
+                scan_profile=profile,
+                source=display_name or source.name,
+                doc_kind=doc_kind,
+            )
+        )
+        local_findings.extend(
+            find_statement_math_errors(
+                paged_text,
                 scan_profile=profile,
                 source=display_name or source.name,
                 doc_kind=doc_kind,
@@ -260,6 +304,11 @@ def run_local_stage(
         )
         # ELA review needs image findings; apply after modules merge in gemini stage.
         pass
+    else:
+        statement_dates = _skipped_module(
+            "statement_dates",
+            "Skipped for court filings. Statement due-date checks run on exhibits only.",
+        )
 
     local_facts = extract_facts(
         full_text,
@@ -292,6 +341,7 @@ def run_local_stage(
         "structural": _dump_module(structural),
         "images": _dump_module(images),
         "ocr": _dump_module(ocr),
+        "statement_dates": _dump_module(statement_dates),
         "full_text": full_text,
         "page_offsets": page_offsets,
         "local_findings": [f.model_dump(mode="json") for f in local_findings],
@@ -300,14 +350,31 @@ def run_local_stage(
         "fingerprint": fingerprint,
         "hashes": hashes,
         "local_s": local_s,
+        "ocr_starved": ocr_starved,
     }
     _local_stage_path(job_id).write_text(json.dumps(payload, default=str), encoding="utf-8")
+    # Publish Image/Meta/… outcomes now so row lights can turn green before Gemini.
+    from app.scan_signals import scan_signals
+
+    local_modules = scan_signals(
+        {
+            "modules": [
+                metadata.model_dump(mode="json"),
+                pdf.model_dump(mode="json"),
+                structural.model_dump(mode="json"),
+                images.model_dump(mode="json"),
+                ocr.model_dump(mode="json"),
+                statement_dates.model_dump(mode="json"),
+            ]
+        }
+    ).get("scan_modules") or []
     update_job(
         job_id,
         status="local_done",
         stage="local_done",
         percent=82,
         message="Local PDF/OCR complete — queued for Gemini review…",
+        scan_modules=local_modules,
     )
     return {"job_id": job_id, "status": "local_done", "local_s": local_s, "digest": digest}
 
@@ -349,6 +416,21 @@ def run_gemini_stage(
     structural = _load_module(data["structural"])
     images = _load_module(data["images"])
     ocr = _load_module(data["ocr"])
+    if data.get("statement_dates"):
+        statement_dates = _load_module(data["statement_dates"])
+    elif court_filing:
+        statement_dates = _skipped_module(
+            "statement_dates",
+            "Skipped for court filings. Statement due-date checks run on exhibits only.",
+        )
+    else:
+        statement_dates = ModuleResult(
+            name="statement_dates",
+            status="ok",
+            duration_ms=0,
+            summary="No statement-date module in local stage.",
+            findings=[],
+        )
     full_text = data.get("full_text") or ""
     page_offsets = list(data.get("page_offsets") or [])
     local_s = float(data.get("local_s") or 0.0)
@@ -366,6 +448,7 @@ def run_gemini_stage(
     doc_meta = dict((metadata.extras.get("metadata") or {}).get("document") or {})
     doc_meta["doc_kind"] = doc_kind
     doc_meta["filename"] = display_name or source.name
+    doc_meta["ocr_starved"] = bool(data.get("ocr_starved"))
     contextual = analyze_contextual(
         full_text,
         doc_meta,
@@ -380,7 +463,7 @@ def run_gemini_stage(
         message="Contextual review complete — extracting facts…",
     )
 
-    modules = [metadata, pdf, structural, images, ocr, contextual]
+    modules = [metadata, pdf, structural, images, ocr, statement_dates, contextual]
     findings: list[Finding] = []
     for module in modules:
         findings.extend(module.findings)
@@ -665,21 +748,51 @@ def run_gemini_stage(
     fail_reason = get_ai_review_failure()
     failed_ranges = get_failed_page_ranges()
     # Prefer ranges recorded on the contextual module when TLS was reset elsewhere.
-    ctx_ranges = (contextual.extras or {}).get("document_analysis_failed_page_ranges")
+    ctx_extras = contextual.extras or {}
+    ctx_ranges = ctx_extras.get("document_analysis_failed_page_ranges")
     if isinstance(ctx_ranges, list) and ctx_ranges and not failed_ranges:
         failed_ranges = ctx_ranges
+    visual_required = bool(ctx_extras.get("visual_review_required"))
+    review_mode = ctx_extras.get("review_mode")
+    review_mode = review_mode if isinstance(review_mode, str) else None
+    doc_status = ctx_extras.get("document_analysis")
+    dar = ctx_extras.get("document_analysis_result")
+    visual_succeeded = (
+        doc_status == "enabled"
+        and isinstance(dar, dict)
+        and bool(dar.get("file_sent"))
+    )
+    # Required visual review that never returned a parsed file response.
+    if visual_required and not fail_reason and not visual_succeeded:
+        fail_reason = "not_attempted"
     if fail_reason:
         ai_review = "incomplete"
         ai_review_reason = fail_reason
+    elif review_mode == "local_only":
+        ai_review = "local_only"
+        ai_review_reason = None
     else:
+        # Court-filing skip and a finished visual pass. No key on a court
+        # filing stays unset — a completed skip, not a Gemini failure.
         ai_review = "complete" if settings.gemini_api_key else None
         ai_review_reason = None
     comparison["ai_review"] = ai_review
     comparison["ai_review_reason"] = ai_review_reason
+    comparison["visual_review_required"] = visual_required
+    comparison["review_mode"] = review_mode
     if failed_ranges:
         comparison["ai_review_failed_page_ranges"] = failed_ranges
 
-    risk_level, risk_score, score_drivers = score_risk_details(findings)
+    report_name = display_name or source.name
+    presented = apply_review_presentation(
+        findings,
+        report_name,
+        ai_review=ai_review,
+        review_mode=review_mode,
+    )
+    risk_level = presented["risk_level"]
+    risk_score = presented["risk_score"]
+    score_drivers = presented["score_drivers"]
     comparison["score_drivers"] = score_drivers
     top = pick_top_findings(findings)
     audit = AuditTrail(
@@ -695,16 +808,15 @@ def run_gemini_stage(
     artifact_urls = [
         f"/api/jobs/{job_id}/artifacts/{name}" for name in (images.extras.get("artifacts") or [])
     ]
-    report_name = display_name or source.name
     report = Report(
         job_id=job_id,
         risk_level=risk_level,
         risk_score=risk_score,
         ai_review=ai_review,
         ai_review_reason=ai_review_reason,
-        executive_summary=executive_summary(risk_level, report_name, findings),
+        executive_summary=str(presented["executive_summary"]),
         top_findings=top,
-        recommended_actions=recommended_actions(risk_level, findings),
+        recommended_actions=presented["recommended_actions"],
         findings=findings,
         timeline=timeline,
         page_dimensions=dims,
@@ -754,8 +866,13 @@ def run_gemini_stage(
                 bits += f" (+{len(failed_ranges) - 8} more)"
             range_note = f" Failed page ranges: {bits}."
         complete_msg = (
-            f"Scan finished but AI review is incomplete ({ai_review_reason or 'error'})."
+            f"Scan finished but visual review is incomplete ({ai_review_reason or 'error'}). "
+            "This file was not cleared."
             f"{range_note} Re-run AI review (full re-scan from your local file)."
+        )
+    elif ai_review == "local_only":
+        complete_msg = (
+            "Local-only review complete. The visual model pass was not run."
         )
     else:
         complete_msg = (

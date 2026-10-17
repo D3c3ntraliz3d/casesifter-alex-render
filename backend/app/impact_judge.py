@@ -26,6 +26,7 @@ FRAUD_ANALYSIS = frozenset(
         "template_fabrication",
         "logo_chrome_mismatch",
         "date_inconsistency",
+        "line_self_contradiction",
         "text_overlay",
         "graphic_manipulation",
     }

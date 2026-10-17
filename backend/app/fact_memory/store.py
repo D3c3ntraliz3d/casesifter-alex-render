@@ -11,6 +11,7 @@ import logging
 import threading
 import time
 import uuid
+from collections import defaultdict
 from datetime import date, datetime, timezone
 from typing import Any, Callable
 
@@ -71,12 +72,18 @@ class FactMemoryStore:
         *,
         name: str | None = None,
         auth_user_id: str | None = None,
+        join_owner_email: str | None = None,
+        account_role: str | None = None,
     ) -> dict[str, Any]:
-        """1:1 firm per account. Prefer stable auth_user_id when provided."""
+        """Firm per account, or join owner's firm when join_owner_email is set (seat invite)."""
         email_n = (email or "").strip().lower()
         if not email_n:
             raise ValueError("email required")
         auth_id = (auth_user_id or "").strip() or None
+        owner_email = (join_owner_email or "").strip().lower() or None
+        role = (account_role or "owner").strip().lower()
+        if role not in {"owner", "admin", "member"}:
+            role = "owner"
         with self.session() as s:
             user = None
             if auth_id:
@@ -88,7 +95,10 @@ class FactMemoryStore:
                 if user.email != email_n:
                     user.email = email_n
                     s.add(user)
-                    s.commit()
+                if role and user.role != role and role != "owner":
+                    user.role = role
+                    s.add(user)
+                s.commit()
                 firm = s.get(Firm, user.firm_id)
                 assert firm is not None
                 return {
@@ -98,7 +108,34 @@ class FactMemoryStore:
                     "persist_facts": bool(firm.persist_facts),
                     "store_snippets": bool(firm.store_snippets),
                     "name": firm.name,
+                    "role": (user.role or "owner"),
                 }
+            # Join existing firm when invited under an org owner.
+            if owner_email and owner_email != email_n:
+                owner = s.execute(select(User).where(User.email == owner_email)).scalar_one_or_none()
+                if owner is not None:
+                    firm = s.get(Firm, owner.firm_id)
+                    assert firm is not None
+                    join_role = role if role in {"admin", "member"} else "member"
+                    user = User(
+                        id=auth_id or _new_id(),
+                        firm_id=firm.id,
+                        email=email_n,
+                        role=join_role,
+                    )
+                    s.add(user)
+                    s.commit()
+                    self._audit(s, firm.id, user.id, "firm.member_join", user.id)
+                    s.commit()
+                    return {
+                        "firm_id": firm.id,
+                        "user_id": user.id,
+                        "email": user.email,
+                        "persist_facts": bool(firm.persist_facts),
+                        "store_snippets": bool(firm.store_snippets),
+                        "name": firm.name,
+                        "role": join_role,
+                    }
             firm_key = enc.generate_firm_key()
             firm = Firm(
                 id=_new_id(),
@@ -125,7 +162,59 @@ class FactMemoryStore:
                 "persist_facts": True,
                 "store_snippets": True,
                 "name": firm.name,
+                "role": "owner",
             }
+
+    def set_member_role(self, firm_id: str, user_id: str, role: str) -> dict[str, Any]:
+        role_n = (role or "").strip().lower()
+        if role_n not in {"owner", "admin", "member"}:
+            raise ValueError("invalid role")
+        with self.session() as s:
+            user = s.get(User, user_id)
+            if not user or user.firm_id != firm_id:
+                raise KeyError("member not found")
+            user.role = role_n
+            s.add(user)
+            s.commit()
+            return {
+                "user_id": user.id,
+                "email": user.email,
+                "role": user.role,
+            }
+
+    def update_matter(
+        self,
+        firm_id: str,
+        matter_id: str,
+        *,
+        name: str | None = None,
+        index_number: str | None = None,
+        court: str | None = None,
+        county: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        with self.session() as s:
+            matter = s.execute(
+                select(Matter).where(
+                    Matter.id == matter_id,
+                    Matter.firm_id == firm_id,
+                )
+            ).scalar_one_or_none()
+            if matter is None:
+                return None
+            if name is not None:
+                matter.name = (name or "").strip() or matter.name
+            if index_number is not None:
+                matter.index_number = (index_number or "").strip() or None
+            if court is not None:
+                matter.court = (court or "").strip() or None
+            if county is not None:
+                matter.county = (county or "").strip() or None
+            s.add(matter)
+            s.commit()
+            self._audit(s, firm_id, user_id, "matter.update", matter_id)
+            s.commit()
+            return self.get_matter(firm_id, matter_id)
 
     def get_firm(self, firm_id: str) -> dict[str, Any] | None:
         with self.session() as s:
@@ -141,6 +230,15 @@ class FactMemoryStore:
                 "created_at": firm.created_at.isoformat() if firm.created_at else None,
             }
 
+    def member_role(self, firm_id: str, user_id: str | None) -> str:
+        if not user_id:
+            return ""
+        with self.session() as s:
+            user = s.get(User, user_id)
+            if not user or user.firm_id != firm_id:
+                return ""
+            return (user.role or "").strip()
+
     def set_persist_facts(self, firm_id: str, enabled: bool) -> None:
         with self.session() as s:
             firm = s.get(Firm, firm_id)
@@ -148,6 +246,95 @@ class FactMemoryStore:
                 raise KeyError("firm not found")
             firm.persist_facts = bool(enabled)
             s.commit()
+
+    def list_members(self, firm_id: str) -> list[dict[str, Any]]:
+        with self.session() as s:
+            if not s.get(Firm, firm_id):
+                raise KeyError("firm not found")
+            rows = s.execute(select(User).where(User.firm_id == firm_id).order_by(User.created_at.asc())).scalars().all()
+            return [
+                {
+                    "user_id": row.id,
+                    "email": row.email,
+                    "role": (row.role or "").strip() or "member",
+                    "created_at": row.created_at.isoformat() if row.created_at else None,
+                }
+                for row in rows
+            ]
+
+    def update_firm_settings(
+        self,
+        firm_id: str,
+        *,
+        name: str | None = None,
+        persist_facts: bool | None = None,
+        store_snippets: bool | None = None,
+        retention_policy: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        with self.session() as s:
+            firm = s.get(Firm, firm_id)
+            if not firm:
+                raise KeyError("firm not found")
+            if name is not None:
+                cleaned = (name or "").strip()
+                if cleaned:
+                    firm.name = cleaned[:255]
+            if persist_facts is not None:
+                firm.persist_facts = bool(persist_facts)
+            if store_snippets is not None:
+                firm.store_snippets = bool(store_snippets)
+            if retention_policy is not None:
+                policy = (retention_policy or "").strip()[:64]
+                if policy:
+                    firm.retention_policy = policy
+            self._audit(s, firm_id, user_id, "firm.settings_update", firm_id)
+            s.commit()
+            return {
+                "id": firm.id,
+                "name": firm.name,
+                "persist_facts": bool(firm.persist_facts),
+                "store_snippets": bool(firm.store_snippets),
+                "retention_policy": firm.retention_policy,
+            }
+
+    def job_health_summary(self, firm_id: str) -> dict[str, Any]:
+        """High-level scan/job counts for the firm admin panel."""
+        with self.session() as s:
+            if not s.get(Firm, firm_id):
+                raise KeyError("firm not found")
+            rows = s.execute(
+                select(AnalysisJob).where(AnalysisJob.firm_id == firm_id)
+            ).scalars().all()
+            counts: dict[str, int] = {}
+            recent: list[dict[str, Any]] = []
+            for row in rows:
+                status = (row.status or "unknown").strip() or "unknown"
+                counts[status] = counts.get(status, 0) + 1
+            ordered = sorted(
+                rows,
+                key=lambda r: r.updated_at or r.created_at or _utcnow(),
+                reverse=True,
+            )[:20]
+            for row in ordered:
+                recent.append(
+                    {
+                        "job_id": row.job_id,
+                        "matter_id": row.matter_id,
+                        "status": row.status,
+                        "display_name": getattr(row, "display_name", None)
+                        or getattr(row, "original_filename", None),
+                        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+                        "error": (row.error or "")[:200] or None,
+                    }
+                )
+            active = sum(counts.get(k, 0) for k in ("queued", "running", "local_done"))
+            return {
+                "total": len(rows),
+                "active": active,
+                "by_status": counts,
+                "recent": recent,
+            }
 
     def _fernet(self, s: Session, firm_id: str) -> Fernet:
         firm = s.get(Firm, firm_id)
@@ -162,13 +349,15 @@ class FactMemoryStore:
         user_id: str | None,
         action: str,
         target: str | None,
+        request_id: str | None = None,
     ) -> None:
         s.add(
             AuditLog(
                 firm_id=firm_id,
                 user_id=user_id,
-                action=action,
-                target=target,
+                action=(action or "")[:64],
+                target=(target[:512] if target else None),
+                request_id=((request_id or "")[:64] or None),
                 at=_utcnow(),
             )
         )
@@ -179,10 +368,34 @@ class FactMemoryStore:
         user_id: str | None,
         action: str,
         target: str | None = None,
+        request_id: str | None = None,
     ) -> None:
         with self.session() as s:
-            self._audit(s, firm_id, user_id, action, target)
+            self._audit(s, firm_id, user_id, action, target, request_id=request_id)
             s.commit()
+
+    def list_audit(self, firm_id: str, *, limit: int = 100) -> list[dict[str, Any]]:
+        """Firm-scoped access log. Never returns another firm's rows."""
+        cap = max(1, min(int(limit or 100), 500))
+        with self.session() as s:
+            rows = s.execute(
+                select(AuditLog)
+                .where(AuditLog.firm_id == firm_id)
+                .order_by(AuditLog.id.desc())
+                .limit(cap)
+            ).scalars().all()
+            return [
+                {
+                    "id": row.id,
+                    "firm_id": row.firm_id,
+                    "user_id": row.user_id,
+                    "action": row.action,
+                    "target": row.target,
+                    "request_id": row.request_id,
+                    "at": row.at.isoformat() if row.at else None,
+                }
+                for row in rows
+            ]
 
     # ── Matters ──────────────────────────────────────────────────────────
 
@@ -215,11 +428,82 @@ class FactMemoryStore:
             return self._matter_dict(matter)
 
     def list_matters(self, firm_id: str) -> list[dict[str, Any]]:
+        """Matter list with document_count and highest_risk for case-tile tint."""
+        risk_rank = {"red": 0, "yellow": 1, "incomplete": 2, "green": 3}
         with self.session() as s:
             rows = s.execute(
                 select(Matter).where(Matter.firm_id == firm_id).order_by(Matter.last_activity_at.desc())
             ).scalars().all()
-            return [self._matter_dict(m) for m in rows]
+            if not rows:
+                return []
+            docs = s.execute(
+                select(Document).where(Document.firm_id == firm_id)
+            ).scalars().all()
+            by_matter: dict[str, list[Document]] = defaultdict(list)
+            doc_shas_by_matter: dict[str, set[str]] = defaultdict(set)
+            for doc in docs:
+                by_matter[doc.matter_id].append(doc)
+                sha = (doc.sha256 or "").lower()
+                if sha:
+                    doc_shas_by_matter[doc.matter_id].add(sha)
+            # Open / failed jobs without a Document still count as filings on the
+            # case tile so a large in-flight batch does not look empty.
+            open_jobs = s.execute(
+                select(AnalysisJob).where(
+                    AnalysisJob.firm_id == firm_id,
+                    AnalysisJob.matter_id.is_not(None),
+                    AnalysisJob.status.in_(
+                        ("queued", "running", "local_done", "failed", "interrupted")
+                    ),
+                )
+            ).scalars().all()
+            extra_by_matter: dict[str, int] = defaultdict(int)
+            seen_job_sha: dict[str, set[str]] = defaultdict(set)
+            for job in open_jobs:
+                mid = job.matter_id
+                if not mid:
+                    continue
+                sha = (job.sha256 or "").lower()
+                if not sha or sha in doc_shas_by_matter.get(mid, set()):
+                    continue
+                if sha in seen_job_sha[mid]:
+                    continue
+                seen_job_sha[mid].add(sha)
+                extra_by_matter[mid] += 1
+            try:
+                fernet = self._fernet(s, firm_id)
+            except Exception:
+                fernet = None
+            out: list[dict[str, Any]] = []
+            for matter in rows:
+                payload = self._matter_dict(matter)
+                matter_docs = by_matter.get(matter.id, [])
+                payload["document_count"] = len(matter_docs) + extra_by_matter.get(
+                    matter.id, 0
+                )
+                highest: str | None = None
+                best = 99
+                if fernet is not None:
+                    for doc in matter_docs:
+                        if not doc.report_enc:
+                            continue
+                        try:
+                            report = enc.decrypt_json(fernet, doc.report_enc) or {}
+                            if not isinstance(report, dict):
+                                continue
+                            level = str(report.get("risk_level") or "").strip().lower()
+                            rank = risk_rank.get(level)
+                            if rank is None:
+                                continue
+                            if rank < best:
+                                best = rank
+                                highest = level
+                        except Exception:
+                            continue
+                if highest:
+                    payload["highest_risk"] = highest
+                out.append(payload)
+            return out
 
     def get_matter(self, firm_id: str, matter_id: str) -> dict[str, Any] | None:
         with self.session() as s:
@@ -228,7 +512,14 @@ class FactMemoryStore:
             ).scalar_one_or_none()
             return self._matter_dict(matter) if matter else None
 
-    def delete_matter(self, firm_id: str, matter_id: str, *, user_id: str | None = None) -> bool:
+    def delete_matter(
+        self,
+        firm_id: str,
+        matter_id: str,
+        *,
+        user_id: str | None = None,
+        request_id: str | None = None,
+    ) -> bool:
         with self.session() as s:
             matter = s.execute(
                 select(Matter).where(Matter.id == matter_id, Matter.firm_id == firm_id)
@@ -236,7 +527,7 @@ class FactMemoryStore:
             if not matter:
                 return False
             s.delete(matter)
-            self._audit(s, firm_id, user_id, "matter.delete", matter_id)
+            self._audit(s, firm_id, user_id, "matter.delete", matter_id, request_id=request_id)
             s.commit()
             return True
 
@@ -265,6 +556,16 @@ class FactMemoryStore:
                     Document.matter_id == matter_id,
                     Document.sha256 == sha256,
                 )
+            ).scalar_one_or_none()
+            if not doc:
+                return None
+            fernet = self._fernet(s, firm_id)
+            return self._document_dict(doc, fernet)
+
+    def get_document(self, firm_id: str, document_id: str) -> dict[str, Any] | None:
+        with self.session() as s:
+            doc = s.execute(
+                select(Document).where(Document.id == document_id, Document.firm_id == firm_id)
             ).scalar_one_or_none()
             if not doc:
                 return None
@@ -356,7 +657,26 @@ class FactMemoryStore:
                     if isinstance(r, dict)
                 ):
                     finding.status = "stale"
+            sha = (doc.sha256 or "").lower()
             s.delete(doc)
+            # Detach durable jobs so provisional list rows do not resurrect a
+            # deliberately deleted filing.
+            if sha:
+                jobs = (
+                    s.execute(
+                        select(AnalysisJob).where(
+                            AnalysisJob.firm_id == firm_id,
+                            AnalysisJob.matter_id == matter_id,
+                            AnalysisJob.sha256 == sha,
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                for job in jobs:
+                    job.matter_id = None
+                    job.document_id = None
+                    job.updated_at = _utcnow()
             self._audit(s, firm_id, user_id, "document.delete", document_id)
             s.commit()
             return True
@@ -367,6 +687,7 @@ class FactMemoryStore:
         file_size_bytes = None
         ai_review = None
         ai_review_reason = None
+        signals: dict[str, Any] = {}
         if doc.report_enc:
             try:
                 report = enc.decrypt_json(fernet, doc.report_enc) or {}
@@ -374,6 +695,7 @@ class FactMemoryStore:
                     # Document list risk follows the same CASE_FACT_CONFLICTS
                     # setting as the board (re-scored at read time).
                     from app.case_conflict_toggle import strip_report
+                    from app.scan_signals import scan_signals
 
                     report = strip_report(report)
                     risk_level = report.get("risk_level")
@@ -382,6 +704,20 @@ class FactMemoryStore:
                     ai_review_reason = report.get("ai_review_reason")
                     audit = report.get("audit") if isinstance(report.get("audit"), dict) else {}
                     file_size_bytes = audit.get("file_size_bytes")
+                    snap: dict[str, Any] = {}
+                    if doc.snapshot_enc:
+                        try:
+                            raw_snap = enc.decrypt_json(fernet, doc.snapshot_enc) or {}
+                            if isinstance(raw_snap, dict):
+                                snap = raw_snap
+                        except Exception:
+                            snap = {}
+                    signals = scan_signals(
+                        report,
+                        snapshot=snap,
+                        page_count=doc.page_count,
+                        doc_kind=doc.doc_type,
+                    )
             except Exception:
                 logger.debug("Could not decrypt report risk for doc %s", doc.id, exc_info=True)
         return {
@@ -396,6 +732,8 @@ class FactMemoryStore:
             "filed_date": doc.filed_date.isoformat() if doc.filed_date else None,
             "page_count": doc.page_count,
             "scanned_at": doc.scanned_at.isoformat() if doc.scanned_at else None,
+            # Alias used by the document row (desktop + hosted).
+            "last_scanned_at": doc.scanned_at.isoformat() if doc.scanned_at else None,
             "extractor_version": doc.extractor_version,
             "status": "complete",
             "scan_job_id": doc.last_job_id,
@@ -409,6 +747,16 @@ class FactMemoryStore:
             "file_size_bytes": file_size_bytes,
             "ai_review": ai_review,
             "ai_review_reason": ai_review_reason,
+            "scan_modules": signals.get("scan_modules") or [],
+            "scan_profile": signals.get("scan_profile"),
+            "visual_review_required": signals.get("visual_review_required"),
+            "review_mode": signals.get("review_mode"),
+            "gemini_calls": signals.get("gemini_calls"),
+            "document_analysis": signals.get("document_analysis"),
+            "visual_file_sent": signals.get("visual_file_sent"),
+            "profile_tags": signals.get("profile_tags") or [],
+            "data_profile": signals.get("data_profile") or {},
+            "info_summary": signals.get("info_summary") or "",
         }
 
     def list_prior_snapshots(
@@ -486,6 +834,54 @@ class FactMemoryStore:
                 return False
             fernet = self._fernet(s, firm_id)
             doc.report_enc = enc.encrypt_json(fernet, report)
+            s.commit()
+            return True
+
+    def merge_local_modules_into_report(
+        self,
+        firm_id: str,
+        matter_id: str,
+        *,
+        sha256: str,
+        job_id: str,
+        modules: list[dict[str, Any]],
+    ) -> bool:
+        """Write local Image/Meta/… module rows into the stored report before Gemini.
+
+        Without this, a long Gemini wait leaves the list showing a previous
+        Image crash (cv2/pypdfium) even though this job already finished Image.
+        """
+        if not modules or not sha256:
+            return False
+        with self.session() as s:
+            doc = s.execute(
+                select(Document).where(
+                    Document.firm_id == firm_id,
+                    Document.matter_id == matter_id,
+                    Document.sha256 == sha256.lower(),
+                )
+            ).scalar_one_or_none()
+            if doc is None or not doc.report_enc:
+                return False
+            fernet = self._fernet(s, firm_id)
+            report = enc.decrypt_json(fernet, doc.report_enc) or {}
+            if not isinstance(report, dict):
+                return False
+            by_name = {
+                str(m.get("name")): m
+                for m in modules
+                if isinstance(m, dict) and m.get("name")
+            }
+            existing = list(report.get("modules") or [])
+            kept = [
+                m
+                for m in existing
+                if isinstance(m, dict) and str(m.get("name") or "") not in by_name
+            ]
+            report["modules"] = kept + list(by_name.values())
+            doc.report_enc = enc.encrypt_json(fernet, report)
+            doc.last_job_id = job_id
+            doc.scanned_at = _utcnow()
             s.commit()
             return True
 
@@ -797,11 +1193,10 @@ class FactMemoryStore:
                     Document.sha256 == sha256,
                 )
             ).scalar_one_or_none()
-            if existing and not force:
-                # Still record a run pointing at existing doc; refresh report if provided.
-                if report is not None:
-                    existing.report_enc = enc.encrypt_json(fernet, report)
-                    existing.last_job_id = job_id
+            # A finished analysis (report present) must rewrite facts / findings /
+            # scanned_at — not only swap the report blob. Report-less dedupe of
+            # an identical upload can still short-circuit.
+            if existing and not force and report is None:
                 if byte_length is not None:
                     existing.source_size = byte_length
                 run = Run(
@@ -826,6 +1221,9 @@ class FactMemoryStore:
 
             if isinstance(filed_date, str):
                 filed_date = date.fromisoformat(filed_date) if filed_date else None
+            # A rescan that does not send a date must keep the date the user saved.
+            if filed_date is None and existing is not None and existing.filed_date is not None:
+                filed_date = existing.filed_date
 
             doc = existing or Document(
                 id=_new_id(),
@@ -994,6 +1392,15 @@ class FactMemoryStore:
                 existing_keys.add(key)
                 # Always mint our own finding PK — pipeline ids may exceed varchar(36)
                 # or collide across runs.
+                # Durable findings only store evidence JSON + explanation. Keep
+                # page / why_suspicious inside evidence so Case Impact can expand.
+                evidence_blob = dict(finding.get("evidence") or {})
+                if finding.get("page") is not None and evidence_blob.get("page") is None:
+                    evidence_blob["page"] = finding.get("page")
+                if finding.get("why_suspicious") and not evidence_blob.get("why_suspicious"):
+                    evidence_blob["why_suspicious"] = finding.get("why_suspicious")
+                if not evidence_blob.get("document_id"):
+                    evidence_blob["document_id"] = doc.id
                 row = FindingRow(
                     id=_new_id(),
                     matter_id=matter_id,
@@ -1005,7 +1412,7 @@ class FactMemoryStore:
                     description_enc=enc.encrypt_text(fernet, finding.get("explanation")),
                     title_enc=enc.encrypt_text(fernet, finding.get("title")),
                     fact_ids_json=json.dumps(finding.get("fact_ids") or []),
-                    evidence_enc=enc.encrypt_json(fernet, finding.get("evidence") or {}),
+                    evidence_enc=enc.encrypt_json(fernet, evidence_blob),
                     status="open",
                     created_at=_utcnow(),
                 )
@@ -1157,33 +1564,65 @@ class FactMemoryStore:
             if not include_stale:
                 q = q.where(FindingRow.status != "stale")
             rows = s.execute(q.order_by(FindingRow.created_at.desc())).scalars().all()
+            run_ids = {row.run_id for row in rows if row.run_id}
+            run_docs: dict[str, list[str]] = {}
+            if run_ids:
+                for run in s.execute(select(Run).where(Run.id.in_(run_ids))).scalars().all():
+                    try:
+                        ids = json.loads(run.document_ids_json or "[]")
+                    except json.JSONDecodeError:
+                        ids = []
+                    if isinstance(ids, list):
+                        run_docs[run.id] = [str(x) for x in ids if x]
             out = []
             for row in rows:
+                evidence = enc.decrypt_json(fernet, row.evidence_enc) or {}
+                if not isinstance(evidence, dict):
+                    evidence = {}
+                doc_ids = run_docs.get(row.run_id or "", [])
+                document_id = (
+                    evidence.get("document_id")
+                    or (doc_ids[0] if len(doc_ids) == 1 else None)
+                )
+                page = evidence.get("page")
+                if page is None:
+                    page = evidence.get("evidence_page")
                 out.append(
                     {
                         "id": row.id,
                         "matter_id": matter_id,
                         "run_id": row.run_id,
+                        "document_id": document_id,
+                        "page": page,
                         "finding_type": row.finding_type,
                         "severity": row.severity,
                         "confidence": row.confidence,
                         "title": enc.decrypt_text(fernet, row.title_enc),
                         "explanation": enc.decrypt_text(fernet, row.description_enc),
-                        "evidence": enc.decrypt_json(fernet, row.evidence_enc) or {},
+                        "why_suspicious": evidence.get("why_suspicious"),
+                        "evidence": evidence,
                         "status": row.status,
                         "created_at": row.created_at.isoformat() if row.created_at else None,
                     }
                 )
             return out
 
-    def export_matter(self, firm_id: str, matter_id: str, *, user_id: str | None = None) -> dict[str, Any]:
+    def export_matter(
+        self,
+        firm_id: str,
+        matter_id: str,
+        *,
+        user_id: str | None = None,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
         matter = self.get_matter(firm_id, matter_id)
         if not matter:
             raise KeyError("matter not found")
         docs = self.list_documents(firm_id, matter_id)
         snaps = self.list_prior_snapshots(firm_id, matter_id)
-        findings = self.list_findings(firm_id, matter_id, include_stale=True)
-        self.audit(firm_id, user_id, "matter.export", matter_id)
+        # Non-stale only — API layer further filters to material Case Impact rows.
+        findings = self.list_findings(firm_id, matter_id, include_stale=False)
+        self.audit(firm_id, user_id, "matter.export", matter_id, request_id=request_id)
         return {
             "matter": matter,
             "documents": docs,
@@ -1285,6 +1724,9 @@ class FactMemoryStore:
         message: str | None = None,
         error: str | None = None,
         attempts: int | None = None,
+        original_filename: str | None = None,
+        display_name: str | None = None,
+        doc_kind: str | None = None,
     ) -> dict[str, Any]:
         now = _utcnow()
         with self.session() as s:
@@ -1299,6 +1741,9 @@ class FactMemoryStore:
                     sha256=(sha256 or "").lower(),
                     status=status or "queued",
                     attempts=int(attempts) if attempts is not None else 1,
+                    original_filename=(original_filename or None),
+                    display_name=(display_name or None),
+                    doc_kind=(doc_kind or None),
                     message=message,
                     error=error,
                     created_at=now,
@@ -1314,6 +1759,12 @@ class FactMemoryStore:
                     row.user_id = user_id or None
                 if sha256:
                     row.sha256 = sha256.lower()
+                if original_filename is not None:
+                    row.original_filename = original_filename or None
+                if display_name is not None:
+                    row.display_name = display_name or None
+                if doc_kind is not None:
+                    row.doc_kind = doc_kind or None
                 prev_status = row.status
                 prev_error = str(row.error or "")
                 if attempts is not None:
@@ -1428,6 +1879,27 @@ class FactMemoryStore:
                 .first()
             )
             return self._analysis_job_dict(row) if row else None
+
+    def latest_jobs_by_sha(self, firm_id: str, matter_id: str) -> dict[str, dict[str, Any]]:
+        """Newest durable job for each file hash in a matter."""
+        with self.session() as s:
+            rows = (
+                s.execute(
+                    select(AnalysisJob)
+                    .where(AnalysisJob.firm_id == firm_id)
+                    .where(AnalysisJob.matter_id == matter_id)
+                    .order_by(AnalysisJob.created_at.desc())
+                )
+                .scalars()
+                .all()
+            )
+            out: dict[str, dict[str, Any]] = {}
+            for row in rows:
+                sha = (row.sha256 or "").lower()
+                if not sha or sha in out:
+                    continue
+                out[sha] = self._analysis_job_dict(row)
+            return out
 
     def max_attempts_for_sha(
         self,
@@ -1777,6 +2249,9 @@ class FactMemoryStore:
             "status": row.status,
             "attempts": int(row.attempts or 0),
             "restart_interruptions": int(getattr(row, "restart_interruptions", 0) or 0),
+            "original_filename": getattr(row, "original_filename", None),
+            "display_name": getattr(row, "display_name", None),
+            "doc_kind": getattr(row, "doc_kind", None),
             "message": row.message,
             "error": row.error,
             "ai_review": getattr(row, "ai_review", None),

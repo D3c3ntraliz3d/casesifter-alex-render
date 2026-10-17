@@ -1,6 +1,8 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 import logging
+
+from app.edge_security import csrf_block_response, docs_kwargs, install_api_headers, origin_blocked
 
 from app import cases_db
 from app.api import public_router, router
@@ -20,6 +22,7 @@ app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
     description="CaseSifter — local store, ephemeral remote analysis.",
+    **docs_kwargs(settings.app_env),
 )
 
 _mode = settings.resolve_app_mode()
@@ -43,6 +46,26 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+install_api_headers(app)
+
+_ORIGIN_ALLOW = {origin.rstrip("/") for origin in _origins}
+_PRODUCTION = (settings.app_env or "").strip().lower() == "production"
+
+
+@app.middleware("http")
+async def _cookie_csrf(request: Request, call_next):
+    """Cookie sessions are not sent as a Bearer header, so check Origin."""
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.cookies.get("cs_session"):
+        authorization = request.headers.get("authorization") or ""
+        if not authorization.lower().startswith("bearer "):
+            if origin_blocked(
+                request.headers.get("origin") or "",
+                _ORIGIN_ALLOW,
+                production=_PRODUCTION,
+            ):
+                return csrf_block_response()
+    return await call_next(request)
 
 # analysis = hosted hybrid (no vault). vault = local John testing (full case API).
 if _mode == "analysis":
@@ -84,6 +107,20 @@ def _startup() -> None:
             "APP_MODE=analysis but ANALYSIS_API_KEYS and CLOUD_CONTROL_URL are empty — "
             "/api/v1 will return 401."
         )
+    try:
+        from app.image_deps import missing_image_forensics_deps
+
+        missing_img = missing_image_forensics_deps()
+        if missing_img:
+            logger.error(
+                "Image forensics packages missing (%s) — Image check will stay red until "
+                "pip install -r backend/requirements.txt and a re-scan.",
+                ", ".join(missing_img),
+            )
+        else:
+            logger.info("Image forensics packages present (cv2, pypdfium2, numpy)")
+    except Exception as exc:
+        logger.warning("Image forensics dep probe failed: %s", exc)
     cases_db.ensure_schema()
     try:
         store = get_store()  # init SQLite/Postgres fact memory schema
@@ -132,11 +169,17 @@ def _startup() -> None:
             "Multimodal Gemini path disabled. APP_MODE=%s",
             _mode,
         )
+    if settings.local_only_review:
+        logger.warning(
+            "LOCAL_ONLY_REVIEW is on — forensic scans are labeled local-only and "
+            "are not treated as a completed visual review."
+        )
     if not settings.gemini_api_key:
         logger.warning(
             "GEMINI_API_KEY is not set — exhibit multimodal / historical fraud review is OFF. "
-            "Scanned exhibits will not pause on Gemini. Set GEMINI_API_KEY and "
-            "CONTEXTUAL_MULTIMODAL=true in .env."
+            "Forensic exhibits that require a visual review will not be cleared as low risk. "
+            "Set GEMINI_API_KEY and CONTEXTUAL_MULTIMODAL=true, or set LOCAL_ONLY_REVIEW=true "
+            "to label an explicit local-only scan."
         )
     elif not settings.contextual_multimodal:
         logger.warning(
@@ -189,10 +232,12 @@ def _shutdown() -> None:
 
 @app.get("/")
 def root():
-    return {
+    payload = {
         "name": settings.app_name,
         "version": settings.app_version,
         "app_mode": _mode,
-        "docs": "/docs",
         "health": "/api/health",
     }
+    if not _PRODUCTION:
+        payload["docs"] = "/docs"
+    return payload

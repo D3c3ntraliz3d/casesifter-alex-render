@@ -16,6 +16,7 @@ from app.case_consistency import (
 from app.scan_profile import (
     PROFILE_COURT_FILING,
     PROFILE_FORENSIC,
+    REFERENCE_KINDS,
     apply_media_override,
     finalize_scan_profile,
     resolve_scan_profile,
@@ -38,7 +39,9 @@ from app.engines.statement_dates import find_statement_date_conflicts
 from app.engines.template_fabrication import find_template_leftovers, review_print_scan_ela
 from app.report.scoring import pick_top_findings, score_risk
 from app.finding_policy import (
+    is_header_or_arrears_noise,
     is_material_finding,
+    is_recorded_instrument_date_noise,
     is_recorded_instrument_math_noise,
     looks_like_recorded_instrument,
 )
@@ -718,6 +721,12 @@ def evaluate_doc_kinds() -> dict:
         "exhibit_parens_order_kind_is_forensic": exhibit_parens_order == PROFILE_FORENSIC,
         "exhibit_stays_forensic": scan_profile_for_kind("exhibit") == PROFILE_FORENSIC,
         "affidavit_kind_is_court_filing": scan_profile_for_kind("affidavit") == PROFILE_COURT_FILING,
+        "decision_is_reference_court_filing": scan_profile_for_kind("decision") == PROFILE_COURT_FILING,
+        "judgment_is_reference_court_filing": scan_profile_for_kind("judgment") == PROFILE_COURT_FILING,
+        "petition_is_court_filing": scan_profile_for_kind("petition") == PROFILE_COURT_FILING,
+        "statement_of_facts_is_court_filing": (
+            scan_profile_for_kind("statement_of_facts") == PROFILE_COURT_FILING
+        ),
         "all_pass": False,
     }
 
@@ -726,7 +735,8 @@ def evaluate_recorded_math() -> dict:
     """Recorded mortgages/deeds are not bank statements; alteration still counts."""
     mortgage_text = (
         "This Mortgage, to be recorded in the Office of the City Register, CRFN 2023000123456, "
-        "Block 5621 Lot 14, mortgage tax $4,312.50, principal sum of $575,000.00 at 6.125 percent."
+        "Block 5621 Lot 14, mortgage tax $4,312.50, principal sum of $575,000.00 at 6.125 percent. "
+        "Mortgage dated 03/01/2006. Recorded May 15, 2006."
     )
     deed_name = "Bargain and Sale Deed — 1739 46th Street"
     bill_text = "Previous balance $100.00 Payments $40.00 New charges $70.00 Amount due $130.00"
@@ -748,7 +758,40 @@ def evaluate_recorded_math() -> dict:
         "observation": "100 minus 40 plus 70 is 130, but the bill states 140.",
         "quoted_evidence": "Amount due $140.00",
     }
+    # Regression: execution/recording lag used to interrupt morning scans again.
+    recording_lag = {
+        "analysis_type": "date_inconsistency",
+        "title": "Mortgage date does not match recording date",
+        "observation": "Mortgage dated 03/01/2006 but recorded 05/15/2006.",
+        "quoted_evidence": "Mortgage dated 03/01/2006. Recorded May 15, 2006.",
+        "why_suspicious": "Execution and recording dates do not match.",
+    }
+    assignment_lag = {
+        "analysis_type": "date_inconsistency",
+        "title": "Assignment date vs recording date discrepancy",
+        "observation": "Assignment of Mortgage dated March 1, 2015; recorded May 12, 2015.",
+        "quoted_evidence": "Assignment of Mortgage dated March 1, 2015. Recorded May 12, 2015.",
+    }
+    statement_dates = {
+        "analysis_type": "date_inconsistency",
+        "title": "Statement due date precedes its own period",
+        "observation": "Due date is years after the statement date.",
+        "quoted_evidence": "Statement date April 2007. Next due date December 2011.",
+    }
     notice_name = "533445 2023 NOTICE OF MORTGAGE FORECLOSURE"
+    lag_finding = Finding(
+        id="ctx-ai-mortgage-lag",
+        category="contextual",
+        severity="high",
+        title=recording_lag["title"],
+        explanation=recording_lag["observation"],
+        why_suspicious=recording_lag["why_suspicious"],
+        confidence=80,
+        evidence={
+            "analysis_type": "date_inconsistency",
+            "quoted_evidence": recording_lag["quoted_evidence"],
+        },
+    )
     return {
         "mortgage_body_is_recorded": looks_like_recorded_instrument(mortgage_text, "Exhibit S_12"),
         "deed_filename_is_recorded": looks_like_recorded_instrument("", deed_name),
@@ -763,6 +806,20 @@ def evaluate_recorded_math() -> dict:
         "bank_math_kept": not is_recorded_instrument_math_noise(
             bill_math, text=bill_text, source="Con Edison bill"
         ),
+        "recording_lag_is_date_noise": is_recorded_instrument_date_noise(
+            recording_lag, text=mortgage_text, source="Mortgage"
+        ),
+        "assignment_lag_is_date_noise": is_recorded_instrument_date_noise(
+            assignment_lag, text="", source="Assignment of Mortgage"
+        ),
+        "recording_lag_is_header_noise": is_header_or_arrears_noise(recording_lag),
+        "recording_lag_not_material": not is_material_finding(lag_finding),
+        "statement_date_not_instrument_noise": not is_recorded_instrument_date_noise(
+            statement_dates, text=bill_text, source="Con Edison bill"
+        ),
+        "reference_kinds_are_court_filing": REFERENCE_KINDS <= {
+            k for k in ("order", "decision", "judgment") if scan_profile_for_kind(k) == PROFILE_COURT_FILING
+        },
         "all_pass": False,
     }
 
@@ -782,8 +839,8 @@ def evaluate_template_fabrication() -> dict:
     clean_hits = find_template_leftovers(clean, scan_profile="forensic", source="Exhibit S_12")
     filing_hits = find_template_leftovers(bill, scan_profile="court_filing", source="Motion")
     sample_of = find_template_leftovers(pleading, scan_profile="forensic", source="Exhibit A")
-    ela = Finding(
-        id="img-ela-page-1",
+    soft_ela = Finding(
+        id="img-ela-page-1-soft",
         category="image",
         severity="info",
         title="Uneven recompression on scanned page page-1",
@@ -792,9 +849,19 @@ def evaluate_template_fabrication() -> dict:
         confidence=32,
         evidence={"ela_score": 44, "largest_blob_px": 1400, "scan_heavy": True},
     )
-    # Clean statement + soft ELA must NOT upgrade (no template leftover content hook).
-    upgraded_clean = review_print_scan_ela([ela], clean, scan_profile="forensic")
-    # Leftover chrome + ELA may upgrade (bought template print-scan path).
+    ela = Finding(
+        id="img-ela-page-1",
+        category="image",
+        severity="info",
+        title="Uneven recompression on scanned page page-1",
+        explanation="x",
+        why_suspicious="y",
+        confidence=32,
+        evidence={"ela_score": 70, "largest_blob_px": 3000, "scan_heavy": True},
+    )
+    # Clean statement + soft/strong ELA must NOT upgrade (no template leftover / L1 hook).
+    upgraded_clean = review_print_scan_ela([soft_ela], clean, scan_profile="forensic")
+    # Leftover chrome + strong ELA may upgrade (bought template print-scan path).
     upgraded = review_print_scan_ela([ela], bill, scan_profile="forensic")
     buried = review_print_scan_ela([ela], "This indenture made the first day of June.", scan_profile="forensic")
     scan_ela = Finding(
@@ -1436,6 +1503,7 @@ def evaluate_desktop_fact_packet() -> dict:
     case-name “waynes” / 11467 P001 on the thin client.
     """
     from app.case_consistency import fact_conflicts_from_packet
+    from app.fact_extract import extract_facts
     from app.finding_policy import is_material_finding
     from app.models import Finding
 
@@ -1450,17 +1518,20 @@ def evaluate_desktop_fact_packet() -> dict:
         "I, Wayne Alexander, being duly sworn, state:\n"
         "I entered into occupancy of the Subject Property on May 17, 2019.\n"
     )
+    # Desktop packet carries comparison.facts from each scan — not bare text.
     hits = fact_conflicts_from_packet(
         [
             {
                 "document_id": "d22",
                 "display_name": "Wayne affidavit Sept 2021",
                 "text_excerpt": d22,
+                "facts": extract_facts(d22),
             },
             {
                 "document_id": "d69",
                 "display_name": "Wayne affidavit Aug 2022",
                 "text_excerpt": d69,
+                "facts": extract_facts(d69),
             },
         ]
     )
@@ -1471,8 +1542,9 @@ def evaluate_desktop_fact_packet() -> dict:
         if row.get("field") == "occupancy_start" or "Occupancy start" in str(row.get("title") or "")
     ]
 
-    # Pairwise documentary case_consistency must stay material for risk scoring
-    # (otherwise both exhibits risk green even when the board has the card).
+    # Occupancy / mortgage conflicts are matter-level (aggregate) so later
+    # affidavits are not painted red as proxy docs. Pairwise emission is skipped;
+    # the board card must still ship via fact_conflicts_from_packet.
     pairwise = Finding(
         id="ctx-case-occ",
         category="case_consistency",
@@ -1494,14 +1566,11 @@ def evaluate_desktop_fact_packet() -> dict:
         },
     )
 
-    # Ephemeral peer path: compare_to_case findings must yellow/red the file score.
     from app.case_consistency import compare_to_case
-    from app.fact_extract import extract_facts
-    from app.report.scoring import score_risk
 
     peer_facts = extract_facts(d22)
     new_facts = extract_facts(d69)
-    consistency, _matrix = compare_to_case(
+    consistency, matrix = compare_to_case(
         new_document_id="d69",
         new_display_name="Wayne affidavit Aug 2022",
         new_entities={},
@@ -1521,21 +1590,33 @@ def evaluate_desktop_fact_packet() -> dict:
         new_text=d69,
         case_documents=[],
     )
-    peer_risk, peer_score = score_risk(consistency)
+    # Matrix still records the red occupancy row; findings stay empty (matter-level).
+    occ_matrix = [
+        row
+        for row in matrix
+        if row.get("flag") == "red"
+        and row.get("documentary")
+        and str(row.get("key") or "") == "occupancy_start"
+    ]
+    occ_findings = [
+        f
+        for f in consistency
+        if (f.evidence or {}).get("field") == "occupancy_start"
+        or "occupancy" in (f.title or "").lower()
+    ]
 
     return {
         "wayne_packet_ships": len(occupancy) >= 1,
         "wayne_severity_high": bool(occupancy) and occupancy[0].get("severity") == "high",
         "documentary_pairwise_stays_material": is_material_finding(pairwise),
-        "ephemeral_peer_compare_hits": len(consistency) >= 1,
-        "ephemeral_peer_risk_not_green": peer_risk in {"yellow", "red"} and peer_score >= 35,
+        "ephemeral_peer_matrix_flags_occupancy": len(occ_matrix) >= 1,
+        "ephemeral_peer_no_proxy_occupancy_finding": len(occ_findings) == 0,
         "all_pass": len(occupancy) >= 1
         and bool(occupancy)
         and occupancy[0].get("severity") == "high"
         and is_material_finding(pairwise)
-        and len(consistency) >= 1
-        and peer_risk in {"yellow", "red"}
-        and peer_score >= 35,
+        and len(occ_matrix) >= 1
+        and len(occ_findings) == 0,
     }
 
 

@@ -1,3 +1,6 @@
+const year = document.getElementById("year");
+if (year) year.textContent = String(new Date().getFullYear());
+
 document.addEventListener("DOMContentLoaded", () => {
   const toggle = document.querySelector(".nav-toggle");
   const links = document.querySelector(".nav-links");
@@ -18,9 +21,12 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   wireSignup();
+  wireVerify();
+  wireReset();
 });
 
 const CONTROL_PLANE_URL = "https://casesifter-control.onrender.com";
+const ANALYSIS_API_URL = "https://casesifter-analysis.onrender.com";
 /** Default Open web app target (works today). Prefer custom domain once DNS resolves. */
 const APP_URL_DEFAULT = "https://casesifter-app.onrender.com";
 const APP_URL_PREFERRED = "https://app.casesifter.com";
@@ -83,7 +89,7 @@ async function wireSignup() {
     if (typeof form.reportValidity === "function" && !form.reportValidity()) {
       showFormStatus(
         status,
-        "Fix the highlighted fields — password (6+ chars) and terms are required.",
+        "Fix the highlighted fields — password (8+ chars) and terms are required.",
         { error: true },
       );
       return;
@@ -94,8 +100,8 @@ async function wireSignup() {
       form.email?.focus();
       return;
     }
-    if (password.length < 6) {
-      showFormStatus(status, "Password must be at least 6 characters.", { error: true });
+    if (password.length < 8) {
+      showFormStatus(status, "Password must be at least 8 characters.", { error: true });
       form.password?.focus();
       return;
     }
@@ -181,6 +187,88 @@ async function wireSignup() {
         { error: true },
       );
       submit.disabled = false;
+    }
+  });
+}
+
+async function claimAnalysisCookie(code) {
+  if (!code) return;
+  await fetch(`${ANALYSIS_API_URL}/api/v1/session/accept`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ code }),
+  });
+}
+
+function wireVerify() {
+  const status = document.getElementById("verify-status");
+  if (!status) return;
+  const params = new URLSearchParams(window.location.search || "");
+  const token = (params.get("verify_token") || "").trim();
+  window.history.replaceState({}, "", window.location.pathname);
+  if (!token) {
+    showFormStatus(status, "This verification link is missing a token.", { error: true });
+    return;
+  }
+  (async () => {
+    try {
+      const res = await fetch(`${CONTROL_PLANE_URL}/v1/verify-email`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ token }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        showFormStatus(status, data.detail || "This verification link is invalid or expired.", { error: true });
+        return;
+      }
+      await claimAnalysisCookie(data.analysis_code);
+      showFormStatus(status, "Email verified. Taking you to the app…");
+      window.location.assign(APP_URL_DEFAULT);
+    } catch {
+      showFormStatus(status, "Could not reach CaseSifter to verify this link.", { error: true });
+    }
+  })();
+}
+
+function wireReset() {
+  const form = document.getElementById("reset-form");
+  const status = document.getElementById("reset-status");
+  if (!form || !status) return;
+  const params = new URLSearchParams(window.location.search || "");
+  const token = (params.get("reset_token") || "").trim();
+  window.history.replaceState({}, "", window.location.pathname);
+  if (!token) {
+    showFormStatus(status, "This reset link is missing a token.", { error: true });
+    form.hidden = true;
+    return;
+  }
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const password = form.password?.value || "";
+    if (password.length < 8) {
+      showFormStatus(status, "Password must be at least 8 characters.", { error: true });
+      return;
+    }
+    try {
+      const res = await fetch(`${CONTROL_PLANE_URL}/v1/password-reset/confirm`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ token, password }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        showFormStatus(status, data.detail || "This reset link is invalid or expired.", { error: true });
+        return;
+      }
+      await claimAnalysisCookie(data.analysis_code);
+      showFormStatus(status, "Password updated. Taking you to the app…");
+      window.location.assign(APP_URL_DEFAULT);
+    } catch {
+      showFormStatus(status, "Could not reach CaseSifter to reset the password.", { error: true });
     }
   });
 }

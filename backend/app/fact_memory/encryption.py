@@ -83,6 +83,22 @@ def unwrap_firm_key(wrapped: str) -> bytes:
     return master_fernet().decrypt(wrapped.encode("ascii"))
 
 
+def _fernet_for_secret(secret: str) -> Fernet:
+    material = _normalize_master_material(secret)
+    return Fernet(base64.urlsafe_b64encode(material))
+
+
+def rewrap_firm_key(wrapped: str, *, old_secret: str, new_secret: str) -> str:
+    """Decrypt a firm key with the old master secret and wrap it with the new one.
+
+    Fact rows stay encrypted under the firm key. Only the wrapped key changes.
+    """
+    if not (old_secret or "").strip() or not (new_secret or "").strip():
+        raise ValueError("both master secrets are required")
+    raw = _fernet_for_secret(old_secret).decrypt(wrapped.encode("ascii"))
+    return _fernet_for_secret(new_secret).encrypt(raw).decode("ascii")
+
+
 def firm_fernet(wrapped_key: str) -> Fernet:
     raw = unwrap_firm_key(wrapped_key)
     # generate_firm_key returns Fernet.generate_key() which is already b64.

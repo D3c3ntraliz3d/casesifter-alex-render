@@ -9,6 +9,15 @@ from pathlib import Path
 # or "answer" and must not override AFFIDAVIT OF SERVICE, NOTICE OF MOTION, etc.
 FILENAME_KIND_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("proof_of_service", re.compile(r"(?i)\b(affidavit|affirmation)\b.{0,40}\bof\s+service\b|\baos\b")),
+    ("order_to_show_cause", re.compile(r"(?i)\border\s+to\s+show\s+cause\b|\botsc\b")),
+    ("motion_summary_judgment", re.compile(
+        r"(?i)\b(?:motion\s+for\s+)?summary\s+judgment\b|\bmsj\b"
+    )),
+    ("motion_dismiss", re.compile(
+        r"(?i)\bmotion\s+to\s+dismiss\b|\bpreliminary\s+objections\b"
+    )),
+    ("motion_vacate", re.compile(r"(?i)\bmotion\s+to\s+(?:vacate|set\s+aside)\b")),
+    ("motion_reargue", re.compile(r"(?i)\bmotion\s+to\s+(?:reargue|reconsider)\b")),
     ("motion", re.compile(
         r"(?i)\bnotice\s+of\s+(?:cross[\s-]*)?mot(?:ion)?\b|\bcross[\s-]mot(?:ion)?\b|\bmotion\s+to\b"
     )),
@@ -20,18 +29,51 @@ FILENAME_KIND_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("notice_of_pendency", re.compile(r"(?i)\bnotice\s+of\s+pendency\b")),
     ("calendar", re.compile(r"(?i)\b(appearance\s+detail|court\s+appearance|calendar)\b")),
     ("notice", re.compile(r"(?i)\bnotice\s+of\s+(?:entry|appearance|rejection|cross|mortgage)\b")),
+    ("decision", re.compile(r"(?i)\bdecision(?:\s+and\s+order)?\b|\bopinion\b")),
+    ("judgment", re.compile(r"(?i)\b(?:final\s+)?judgment\b|\bjfs\b")),
     # Filename only: allow "Order" / "Proposed Order", but not "in order to" / "money order".
     ("order", re.compile(
-        r"(?i)(?<!in )(?<!money )\b(?:proposed\s+)?order\b|\bdecision\s+and\s+order\b"
+        r"(?i)(?<!in )(?<!money )\b(?:proposed\s+)?order\b"
+    )),
+    ("rule_19a_statement", re.compile(
+        r"(?i)\brule\s*19-?a\b|\bconcise\s+statement\s+of\s+facts\b"
+    )),
+    ("statement_of_facts", re.compile(
+        r"(?i)\bstatement\s+of\s+(?:undisputed\s+)?(?:material\s+)?facts\b"
+    )),
+    ("counter_statement", re.compile(
+        r"(?i)\bcounter[\s-]?statement\b|\bresponse\s+to\s+statement\s+of\s+facts\b"
     )),
     ("affidavit", re.compile(r"(?i)\baffidavit\b")),
     ("affirmation", re.compile(r"(?i)\baffirmation\b")),
     ("letter", re.compile(r"(?i)\b(cover\s+)?letter\b")),
     ("stipulation", re.compile(r"(?i)\bstipulation\b")),
-    ("transcript", re.compile(r"(?i)\b(transcript|deposition)\b")),
+    ("deposition_transcript", re.compile(r"(?i)\bdeposition\b")),
+    ("hearing_transcript", re.compile(r"(?i)\bhearing\s+transcript\b")),
+    ("trial_transcript", re.compile(r"(?i)\btrial\s+transcript\b")),
+    ("transcript", re.compile(r"(?i)\btranscript\b")),
+    ("interrogatory_answers", re.compile(r"(?i)\binterrogator(?:y|ies)\b")),
+    ("rfa_responses", re.compile(r"(?i)\brequests?\s+for\s+admission\b|\brfa\b")),
+    ("appellate_brief", re.compile(r"(?i)\bappellate\s+brief\b|\bbrief\s+for\s+(?:appellant|appellee)\b")),
+    ("reply_brief", re.compile(r"(?i)\breply\s+(?:brief|memorandum)\b")),
+    ("memorandum", re.compile(r"(?i)\bmemorandum\s+of\s+law\b|\bmemoran?dum\b")),
+    ("brief", re.compile(r"(?i)\bbrief\s+in\s+support\b|\bbrief\b")),
+    ("opposition", re.compile(r"(?i)\bopposition\b|\bresponse\s+to\s+motion\b")),
+    ("proposed_findings", re.compile(
+        r"(?i)\bproposed\s+findings?\b|\bfindings?\s+of\s+fact\b"
+    )),
+    ("pretrial_memorandum", re.compile(r"(?i)\bpretrial\s+(?:memorandum|statement)\b")),
     ("bill", re.compile(r"(?i)\b(utility\s+bill|account\s+statement|bank\s+statement)\b")),
     ("summons", re.compile(r"(?i)\bsummons\b")),
-    ("complaint", re.compile(r"(?i)\b(verified\s+)?complaint\b")),
+    ("verified_pleading", re.compile(r"(?i)\bverified\s+(?:complaint|petition)\b")),
+    ("third_party_complaint", re.compile(r"(?i)\bthird[\s-]?party\s+complaint\b")),
+    ("counterclaim", re.compile(r"(?i)\bcounter[\s-]?claim\b")),
+    ("cross_claim", re.compile(r"(?i)\bcross[\s-]?claim\b")),
+    ("affirmative_defenses", re.compile(r"(?i)\baffirmative\s+defenses?\b")),
+    ("new_matter", re.compile(r"(?i)\bnew\s+matter\b")),
+    ("petition", re.compile(r"(?i)\bpetition\b")),
+    ("complaint", re.compile(r"(?i)\bcomplaint\b")),
+    ("reply", re.compile(r"(?i)\breply\s+to\s+(?:counterclaim|new\s+matter)\b")),
     ("answer", re.compile(r"(?i)\banswer\b")),
 ]
 
@@ -53,13 +95,19 @@ BODY_KIND_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     if pair[0]
     in {
         "proof_of_service",
+        "order_to_show_cause",
         "motion",
         "affidavit",
         "affirmation",
+        "decision",
+        "judgment",
         "order",
         "letter",
         "stipulation",
+        "deposition_transcript",
         "transcript",
+        "memorandum",
+        "opposition",
         "bill",
     }
 ]
@@ -82,6 +130,62 @@ EXHIBIT_PARENS_S_RE = re.compile(
     rf"(?:{_DASH}+(\d{{1,4}}))?"
 )
 
+# NYSCEF download / stamp index: 11467/2007, 11467_2007, INDEX NO. 11467/2007.
+# Year may be followed by "_" (word char) in NYSCEF stems — do not require \b.
+_INDEX_FROM_NAME_RE = re.compile(
+    r"(?i)(?:index\s*(?:no\.?|number)?\s*[_:=\-]?\s*)?"
+    r"(\d{3,7})\s*[/_\-]\s*((?:19|20)\d{2})(?!\d)"
+)
+
+
+def normalize_index_number(raw: str | None) -> str:
+    """Canonical compare form: digits/year with a single slash (e.g. 11467/2007)."""
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    m = _INDEX_FROM_NAME_RE.search(text)
+    if m:
+        return f"{m.group(1)}/{m.group(2)}"
+    # Bare "11467/2007" already normalized-ish.
+    compact = re.sub(r"\s+", "", text)
+    m2 = re.fullmatch(r"(\d{3,7})[/_\-]((?:19|20)\d{2})", compact)
+    if m2:
+        return f"{m2.group(1)}/{m2.group(2)}"
+    return compact.lower()
+
+
+def parse_index_from_filename(filename: str | None) -> str | None:
+    """Pull a court index from a NYSCEF-style filename when present."""
+    stem = _stem(filename or "")
+    if not stem:
+        return None
+    m = _INDEX_FROM_NAME_RE.search(stem)
+    if not m:
+        return None
+    return f"{m.group(1)}/{m.group(2)}"
+
+
+def index_mismatch_warning(
+    filename: str | None,
+    matter_index: str | None,
+) -> dict[str, str] | None:
+    """Warn when filename index ≠ matter index (soft-block; upload still allowed)."""
+    file_idx = parse_index_from_filename(filename)
+    matter_norm = normalize_index_number(matter_index)
+    if not file_idx or not matter_norm:
+        return None
+    if normalize_index_number(file_idx) == matter_norm:
+        return None
+    return {
+        "filename_index": file_idx,
+        "matter_index": matter_norm,
+        "message": (
+            f"This file’s NYSCEF index ({file_idx}) does not match this matter’s "
+            f"index ({matter_norm}). Cross-index exhibits can pollute Case Impact — "
+            "confirm before relying on the board."
+        ),
+    }
+
 
 def propose_document_title(
     filename: str,
@@ -91,6 +195,14 @@ def propose_document_title(
     stem = _stem(filename)
     exhibit = exhibit_title_from_filename(filename)
     if exhibit:
+        # Exhibit packet title stays; statement body → bill so the Kind column
+        # can show Statement/bill without a manual "fix kinds" pass.
+        try:
+            from app.scan_profile import looks_like_statement_text
+        except Exception:
+            looks_like_statement_text = lambda _t: False  # noqa: E731
+        if text_sample and looks_like_statement_text(text_sample):
+            return _truncate(exhibit), "bill"
         return _truncate(exhibit), "exhibit"
 
     cleaned = re.sub(r"[_\-]+", " ", stem)
@@ -105,15 +217,22 @@ def propose_document_title(
         if motion:
             return _truncate(_with_file_number(motion, stem)), "motion"
     if kind:
+        try:
+            from app.doc_kinds import kind_label as _kind_label
+        except Exception:
+            _kind_label = lambda k: (k or "").replace("_", " ").title()  # noqa: E731
         label = {
             "complaint": "Complaint",
             "answer": "Answer",
             "order": "Order",
+            "decision": "Decision",
+            "judgment": "Judgment",
             "affidavit": "Affidavit",
             "affirmation": "Affirmation",
             "letter": "Letter",
             "stipulation": "Stipulation",
             "transcript": "Transcript",
+            "deposition_transcript": "Deposition",
             "bill": "Statement",
             "summons": "Summons",
             "proof_of_service": "Affidavit of Service",
@@ -122,7 +241,12 @@ def propose_document_title(
             "rji": "RJI",
             "notice_of_pendency": "Notice of Pendency",
             "calendar": "Calendar",
-        }.get(kind, kind.title())
+            "memorandum": "Memorandum",
+            "brief": "Brief",
+            "opposition": "Opposition",
+            "petition": "Petition",
+            "counterclaim": "Counterclaim",
+        }.get(kind) or _kind_label(kind)
         # "AFFIRMATION AFFIDAVIT" / "AFFIRMATION AFFIDAVIT OF SERVICE" → Affidavit / Affidavit of Service
         # Keep distinguishing residue from the filename (e.g. "– Pete Harley").
         if kind == "proof_of_service" and re.search(

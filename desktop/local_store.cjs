@@ -34,7 +34,33 @@ function nowIso() {
 }
 
 function listCases(root) {
-  return readIndex(root).cases.slice().sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""));
+  const rank = { red: 0, yellow: 1, incomplete: 2, green: 3 };
+  return readIndex(root)
+    .cases.slice()
+    .sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""))
+    .map((row) => {
+      const docsPath = path.join(root, "cases", row.id, "documents.json");
+      if (!fs.existsSync(docsPath)) return row;
+      try {
+        const docs = JSON.parse(fs.readFileSync(docsPath, "utf8"));
+        let highest = null;
+        let best = 99;
+        for (const doc of docs || []) {
+          const level = String(doc.risk_level || "").toLowerCase();
+          const r = rank[level];
+          if (r == null) continue;
+          if (r < best) {
+            best = r;
+            highest = level;
+          }
+        }
+        const next = { ...row, document_count: Array.isArray(docs) ? docs.length : row.document_count || 0 };
+        if (highest) next.highest_risk = highest;
+        return next;
+      } catch {
+        return row;
+      }
+    });
 }
 
 function createCase(root, payload) {
@@ -61,13 +87,241 @@ function createCase(root, payload) {
   return row;
 }
 
+function callsOf(value) {
+  return typeof value === "number" && Number.isFinite(value) ? Math.trunc(value) : null;
+}
+
+const ANALYSIS_TAG_LABELS = {
+  date_inconsistency: "Statement dates",
+  historical_impossibility: "Issuer era",
+  math_error: "Statement math",
+  line_self_contradiction: "Line contradiction",
+  template_fabrication: "Template chrome",
+  logo_chrome_mismatch: "Logo chrome",
+  text_overlay: "Text overlay",
+  graphic_manipulation: "Graphic edit",
+};
+const MODULE_TAG_LABELS = {
+  metadata: "Meta",
+  image_forensics: "Image",
+  ocr_text: "OCR",
+  contextual_logic: "Logic",
+};
+const ANALYSIS_PRIORITY = [
+  "date_inconsistency",
+  "historical_impossibility",
+  "math_error",
+  "line_self_contradiction",
+  "template_fabrication",
+  "logo_chrome_mismatch",
+  "text_overlay",
+  "graphic_manipulation",
+];
+
+function profileTags(report, scanModules) {
+  const tags = [];
+  const seen = new Set();
+  const add = (label) => {
+    const text = String(label || "").trim();
+    if (!text || seen.has(text)) return;
+    seen.add(text);
+    tags.push(text);
+  };
+  const byType = {};
+  const findings = [...(report.top_findings || []), ...(report.findings || [])];
+  for (const item of findings) {
+    if (!item || typeof item !== "object") continue;
+    const ev = item.evidence && typeof item.evidence === "object" ? item.evidence : {};
+    const analysis = String(item.analysis_type || ev.analysis_type || "").trim();
+    if (!analysis) continue;
+    const sev = String(item.severity || "").toLowerCase();
+    if (sev === "info") continue;
+    byType[analysis] = sev || "medium";
+  }
+  const ordered = [
+    ...ANALYSIS_PRIORITY.filter((a) => a in byType),
+    ...Object.keys(byType).filter((a) => !ANALYSIS_PRIORITY.includes(a)).sort(),
+  ];
+  for (const analysis of ordered) {
+    add(ANALYSIS_TAG_LABELS[analysis] || analysis.replace(/_/g, " "));
+    if (tags.length >= 5) break;
+  }
+  for (const mod of scanModules || []) {
+    if (String(mod?.status || "") !== "error") continue;
+    const name = String(mod?.name || "");
+    add(`${MODULE_TAG_LABELS[name] || name || "Module"} error`);
+  }
+  if (String(report.ai_review || "").toLowerCase() === "incomplete") add("AI review incomplete");
+  return tags.slice(0, 6);
+}
+
+function uniqStrings(values, limit = 6) {
+  const out = [];
+  const seen = new Set();
+  for (const raw of values || []) {
+    const text = String(raw || "").trim();
+    if (!text) continue;
+    const key = text.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(text);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+function entityNames(entities, keys) {
+  if (!entities || typeof entities !== "object") return [];
+  const names = [];
+  for (const key of keys) {
+    const bucket = entities[key];
+    if (Array.isArray(bucket)) {
+      for (const item of bucket) {
+        if (typeof item === "string") names.push(item);
+        else if (item && typeof item === "object") names.push(item.name || item.display || item.value || "");
+      }
+    } else if (typeof bucket === "string") names.push(bucket);
+  }
+  return uniqStrings(names, 8);
+}
+
+function dataProfile(report, doc) {
+  const comparison = report.comparison && typeof report.comparison === "object" ? report.comparison : {};
+  const entities = comparison.entities && typeof comparison.entities === "object" ? comparison.entities : {};
+  const findings = [...(report.top_findings || []), ...(report.findings || [])].filter(
+    (f) => f && typeof f === "object"
+  );
+  const counts = {};
+  for (const item of findings) {
+    const sev = String(item.severity || "").toLowerCase();
+    if (["critical", "high", "medium", "low"].includes(sev)) counts[sev] = (counts[sev] || 0) + 1;
+  }
+  const top = [];
+  for (const item of findings) {
+    if (String(item.severity || "").toLowerCase() === "info") continue;
+    const title = String(item.title || "").trim();
+    if (!title) continue;
+    top.push({ title: title.slice(0, 160), severity: String(item.severity || "medium") });
+    if (top.length >= 3) break;
+  }
+  const dims = report.page_dimensions || comparison.page_dimensions || [];
+  const pages =
+    (typeof doc?.page_count === "number" && doc.page_count > 0 && doc.page_count) ||
+    (Array.isArray(dims) && dims.length ? dims.length : null);
+  return {
+    kind: doc?.doc_kind || comparison.doc_kind || null,
+    pages,
+    organizations: entityNames(entities, ["organizations", "orgs", "issuers", "companies"]),
+    people: entityNames(entities, ["people", "persons", "parties"]),
+    dates: [],
+    amounts: [],
+    addresses: [],
+    finding_counts: counts,
+    top_findings: top,
+  };
+}
+
+function infoSummary(report, data, tags) {
+  const exec = typeof report.executive_summary === "string" ? report.executive_summary.trim() : "";
+  if (exec) {
+    const cleaned = exec.replace(/\s+/g, " ");
+    return cleaned.length > 260 ? `${cleaned.slice(0, 259).replace(/\s+\S*$/, "")}…` : cleaned;
+  }
+  const parts = [];
+  if (data?.organizations?.length) parts.push(data.organizations.slice(0, 3).join(" · "));
+  if (data?.top_findings?.length) {
+    parts.push(`Flags: ${data.top_findings.map((t) => t.title).filter(Boolean).slice(0, 2).join("; ")}`);
+  } else if (tags?.length) {
+    parts.push(`Flags: ${tags.slice(0, 4).join(", ")}`);
+  }
+  return parts.join(". ").slice(0, 280);
+}
+
+/** Slim module/review fields already stored on a cached report. */
+function scanSignals(report, doc) {
+  const empty = {
+    scan_modules: [],
+    scan_profile: null,
+    visual_review_required: null,
+    review_mode: null,
+    gemini_calls: null,
+    document_analysis: null,
+    visual_file_sent: null,
+    profile_tags: [],
+    data_profile: {},
+    info_summary: "",
+  };
+  if (!report || typeof report !== "object") return empty;
+  const modules = Array.isArray(report.modules) ? report.modules : [];
+  const scanModules = [];
+  let extras = {};
+  for (const mod of modules) {
+    if (!mod || typeof mod !== "object") continue;
+    if (mod.name && mod.status) scanModules.push({ name: String(mod.name), status: String(mod.status) });
+    if (mod.name === "contextual_logic" && mod.extras && typeof mod.extras === "object") extras = mod.extras;
+  }
+  const comparison = report.comparison && typeof report.comparison === "object" ? report.comparison : {};
+  const timing = comparison.timing && typeof comparison.timing === "object" ? comparison.timing : {};
+  const summary = comparison.gemini_scan_summary && typeof comparison.gemini_scan_summary === "object"
+    ? comparison.gemini_scan_summary
+    : {};
+  const usage = comparison.gemini_usage && typeof comparison.gemini_usage === "object" ? comparison.gemini_usage : {};
+  const ctxUsage = extras.gemini_usage && typeof extras.gemini_usage === "object" ? extras.gemini_usage : {};
+  const calls = callsOf(timing.gemini_calls) ?? callsOf(summary.calls) ?? callsOf(ctxUsage.calls) ?? callsOf(usage.calls);
+  let required = null;
+  if (typeof comparison.visual_review_required === "boolean") required = comparison.visual_review_required;
+  else if (typeof extras.visual_review_required === "boolean") required = extras.visual_review_required;
+  const mode = typeof comparison.review_mode === "string" && comparison.review_mode
+    ? comparison.review_mode
+    : (typeof extras.review_mode === "string" && extras.review_mode ? extras.review_mode : null);
+  let fileSent = null;
+  if (Object.prototype.hasOwnProperty.call(extras, "document_analysis_result")) {
+    const dar = extras.document_analysis_result;
+    fileSent = Boolean(dar && typeof dar === "object" && dar.file_sent);
+  }
+  const tags = profileTags(report, scanModules);
+  const data = dataProfile(report, doc);
+  return {
+    scan_modules: scanModules,
+    scan_profile: typeof comparison.scan_profile === "string" ? comparison.scan_profile : null,
+    visual_review_required: required,
+    review_mode: mode,
+    gemini_calls: calls,
+    document_analysis: typeof extras.document_analysis === "string" ? extras.document_analysis : null,
+    visual_file_sent: fileSent,
+    ai_review: report.ai_review || comparison.ai_review || null,
+    ai_review_reason: report.ai_review_reason || comparison.ai_review_reason || null,
+    profile_tags: tags,
+    data_profile: data,
+    info_summary: infoSummary(report, data, tags),
+  };
+}
+
 function getCase(root, caseId) {
   const caseDir = path.join(root, "cases", caseId);
   if (!fs.existsSync(caseDir)) return null;
   const meta = JSON.parse(fs.readFileSync(path.join(caseDir, "case.json"), "utf8"));
   const docsPath = path.join(caseDir, "documents.json");
   const documents = JSON.parse(fs.readFileSync(docsPath, "utf8"));
-  // Do not load report files here — that made opening large cases / adding files crawl.
+  // Reports are read once, then the slim signals stay on the document row.
+  let dirty = false;
+  for (const doc of documents) {
+    if (doc.status !== "complete") continue;
+    // Backfill when profile/summary fields are still missing on older rows.
+    if (
+      Array.isArray(doc.scan_modules) &&
+      Array.isArray(doc.profile_tags) &&
+      doc.data_profile &&
+      typeof doc.info_summary === "string"
+    ) {
+      continue;
+    }
+    const report = loadReport(root, caseId, doc.id);
+    if (!report) continue;
+    Object.assign(doc, scanSignals(report, doc));
+    dirty = true;
+  }
+  if (dirty) fs.writeFileSync(docsPath, JSON.stringify(documents, null, 2));
   return { ...meta, documents };
 }
 
@@ -143,10 +397,13 @@ function saveReport(root, caseId, documentId, report) {
     (report && report.comparison && report.comparison.text_excerpt) ||
     (report && report.text_excerpt) ||
     "";
-  if (excerpt) {
-    updateDocument(root, caseId, documentId, {
-      text_excerpt: String(excerpt).slice(0, 24000),
-    });
+  const docsPath = path.join(root, "cases", caseId, "documents.json");
+  const docs = fs.existsSync(docsPath) ? JSON.parse(fs.readFileSync(docsPath, "utf8")) : [];
+  const existing = Array.isArray(docs) ? docs.find((d) => d.id === documentId) : null;
+  const patch = scanSignals(report, existing);
+  if (excerpt) patch.text_excerpt = String(excerpt).slice(0, 24000);
+  if (patch.scan_modules || patch.info_summary || excerpt) {
+    updateDocument(root, caseId, documentId, patch);
   }
   return dest;
 }

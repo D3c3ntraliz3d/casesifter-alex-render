@@ -494,6 +494,41 @@ def submit_ephemeral_job(payload: dict[str, Any]) -> Future:
                     result.get("peak_rss_mb"),
                     rss_mb(),
                 )
+                # Persist Image/Meta outcomes now so the case list does not keep
+                # a previous module crash while Gemini is still running.
+                try:
+                    from app.storage import job_dir_existing, load_progress
+                    from app.fact_memory.store import get_store
+
+                    existing = job_dir_existing(job_id)
+                    flag = (existing / "persist.flag") if existing else None
+                    matter_id = str(payload.get("matter_id") or "").strip()
+                    if not matter_id and flag is not None and flag.is_file():
+                        matter_id = flag.read_text(encoding="utf-8").strip()
+                    progress = load_progress(job_id)
+                    modules = list(getattr(progress, "scan_modules", None) or [])
+                    digest = str((result or {}).get("digest") or "").lower()
+                    firm_ctx = payload.get("firm_ctx") if isinstance(payload.get("firm_ctx"), dict) else {}
+                    firm_id = str(firm_ctx.get("firm_id") or "").strip()
+                    if matter_id and firm_id and digest and modules:
+                        merged = get_store().merge_local_modules_into_report(
+                            firm_id,
+                            matter_id,
+                            sha256=digest,
+                            job_id=job_id,
+                            modules=modules,
+                        )
+                        if merged:
+                            logger.info(
+                                "early local modules persisted job=%s matter=%s",
+                                job_id[:8],
+                                matter_id[:8],
+                            )
+                except Exception:
+                    logger.exception(
+                        "early local module persist failed job=%s",
+                        job_id[:8],
+                    )
                 submit_gemini_stage(gemini_payload)
                 handed_to_gemini = True
                 if not out.done():

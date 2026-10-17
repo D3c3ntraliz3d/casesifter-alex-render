@@ -203,6 +203,7 @@ class AuditLog(Base):
     user_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     action: Mapped[str] = mapped_column(String(64), nullable=False)
     target: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    request_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
@@ -234,6 +235,10 @@ class AnalysisJob(Base):
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     # Times this matter+sha was status=running when the instance restarted (OOM/health).
     restart_interruptions: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Labels for provisional Documents rows before fact persist creates a Document.
+    original_filename: Mapped[str | None] = mapped_column(Text, nullable=True)
+    display_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    doc_kind: Mapped[str | None] = mapped_column(String(64), nullable=True)
     message: Mapped[str | None] = mapped_column(Text, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     ai_review: Mapped[str | None] = mapped_column(String(32), nullable=True)
@@ -307,6 +312,7 @@ def init_db(url: str | None = None) -> None:
     Base.metadata.create_all(engine)
     ensure_source_columns(engine)
     ensure_analysis_job_columns(engine)
+    ensure_audit_columns(engine)
     clear_source_enc_once(engine)
 
 
@@ -398,11 +404,31 @@ def ensure_analysis_job_columns(engine) -> None:
         )
     if "user_id" not in have:
         alters.append("ALTER TABLE analysis_jobs ADD COLUMN user_id VARCHAR(36)")
+    if "original_filename" not in have:
+        alters.append("ALTER TABLE analysis_jobs ADD COLUMN original_filename TEXT")
+    if "display_name" not in have:
+        alters.append("ALTER TABLE analysis_jobs ADD COLUMN display_name TEXT")
+    if "doc_kind" not in have:
+        alters.append("ALTER TABLE analysis_jobs ADD COLUMN doc_kind VARCHAR(64)")
     if not alters:
         return
     with engine.begin() as conn:
         for sql in alters:
             conn.execute(text(sql))
+
+
+def ensure_audit_columns(engine) -> None:
+    """create_all does not add columns to an existing audit_log table."""
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+    if "audit_log" not in insp.get_table_names():
+        return
+    have = {col["name"] for col in insp.get_columns("audit_log")}
+    if "request_id" in have:
+        return
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE audit_log ADD COLUMN request_id VARCHAR(64)"))
 
 
 def reset_engine() -> None:

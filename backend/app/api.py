@@ -63,8 +63,12 @@ SAFE_ID = re.compile(r"^[a-f0-9]{16,64}$")
 def _health_payload() -> dict:
     # Instant only — no DB, no files, no watchdog. Render kills the instance if this
     # takes longer than 5s while analysis is running.
+    # Image deps use find_spec only (no OpenCV load) so health stays cheap.
+    from app.image_deps import missing_image_forensics_deps
+
     git_commit = (os.environ.get("RENDER_GIT_COMMIT") or "").strip() or None
     mode = settings.resolve_app_mode()
+    missing_img = missing_image_forensics_deps()
     payload = {
         "status": "ok",
         "name": settings.app_name,
@@ -75,6 +79,8 @@ def _health_payload() -> dict:
         "scan_max_concurrent": max(1, int(settings.scan_max_concurrent or 1)),
         "gemini_max_concurrent": max(1, int(settings.gemini_max_concurrent or 2)),
         "gemini_max_inflight_mb": max(16, int(settings.gemini_max_inflight_mb or 150)),
+        "image_forensics_ready": not missing_img,
+        "image_forensics_missing": missing_img,
     }
     if git_commit:
         payload["git_commit"] = git_commit
@@ -222,6 +228,10 @@ def api_get_case(case_id: str):
     # Stale-scan reaping runs in the background watchdog — keep get_case fast
     # so adding/refreshing files with 100+ docs stays snappy.
     docs = cases_db.list_documents(case_id)
+    from app.scan_row import attach_vault_scan_progress
+    from app.storage import load_progress
+
+    docs = attach_vault_scan_progress(docs, load_progress)
     return {**case, "documents": docs}
 
 
@@ -359,6 +369,7 @@ async def api_upload_document(
 
     # Lightweight text peek for auto-title (PDF first page / plain text).
     # A bad page must not reject the file; the case still needs the filing.
+    sample = ""
     try:
         sample = _peek_text(dest)
         proposed_name, proposed_kind = propose_document_title(safe_name, sample)
@@ -368,11 +379,18 @@ async def api_upload_document(
     # Display name may come from auto-title; court-filing kinds must not be
     # silently written into blank doc_kind — that forced the packaging fast path
     # and skipped forgery review on real scanned uploads.
-    # Exhibit-shaped NYSCEF names (EXHIBIT_S__41 / EXHIBIT(S)) always stay exhibit
-    # so a body phrase like "in order to" cannot park the file on court_filing.
+    # Exhibit-shaped NYSCEF names keep an Exhibit *title*; statement body peeks
+    # refine kind to bill so Kind shows Statement/bill without a manual fix.
     user_kind = (doc_kind or "").strip()
     if looks_like_exhibit_filename(safe_name) or looks_like_exhibit_filename(final_name):
-        final_kind = "exhibit"
+        from app.scan_profile import looks_like_statement_text
+
+        final_kind = (
+            "bill"
+            if (proposed_kind or "").strip().lower() == "bill"
+            or looks_like_statement_text(sample)
+            else "exhibit"
+        )
     elif user_kind:
         final_kind = user_kind
     elif proposed_kind and proposed_kind.strip().lower() not in COURT_FILING_KINDS:
@@ -400,7 +418,9 @@ async def api_upload_document(
             job_path = job_dir(job_id) / safe_name
             shutil.copy2(dest, job_path)
             create_job(job_id, safe_name)
-            cases_db.update_document(doc["id"], scan_job_id=job_id, status="queued")
+            cases_db.update_document(
+                doc["id"], scan_job_id=job_id, status="queued", risk_level=None, risk_score=None
+            )
             _start_analysis(
                 job_id,
                 job_path,
@@ -435,11 +455,26 @@ def api_patch_document(case_id: str, document_id: str, body: DocumentUpdate):
     doc = cases_db.get_document(document_id)
     if doc is None or doc["case_id"] != case_id:
         raise HTTPException(404, "Unknown document.")
-    updated = cases_db.update_document(
-        document_id,
-        display_name=body.display_name,
-        doc_kind=body.doc_kind,
-    )
+    from datetime import date as _date
+
+    fields: dict = {}
+    if "display_name" in body.model_fields_set and body.display_name is not None:
+        fields["display_name"] = body.display_name
+    if "doc_kind" in body.model_fields_set:
+        fields["doc_kind"] = body.doc_kind
+    if "filed_date" in body.model_fields_set:
+        filed = body.filed_date
+        if filed == "":
+            filed = None
+        if filed is not None:
+            try:
+                _date.fromisoformat(filed)
+            except ValueError as exc:
+                raise HTTPException(400, "filed_date must be YYYY-MM-DD.") from exc
+        fields["filed_date"] = filed
+    if not fields:
+        return doc
+    updated = cases_db.update_document(document_id, **fields)
     return updated
 
 
@@ -527,6 +562,7 @@ def api_rescan_case(
         "queued": len(pending),
         "skipped": len(skipped),
         "skipped_documents": skipped,
+        "started": pending,
         "status": "started",
     }
 
@@ -605,10 +641,13 @@ def _infer_kind_from_names(doc: dict) -> str | None:
     """Fill or correct doc_kind from filename / display (rescan must not keep Unknown)."""
     filename = doc.get("original_filename") or ""
     display = doc.get("display_name") or ""
-    # Exhibit-shaped names win even over a wrong prior kind (e.g. Order from body text).
+    current = (doc.get("doc_kind") or "").strip().lower()
+    # Exhibit-shaped names beat a wrong pleading kind (e.g. Order from body text).
+    # Keep bill when a prior scan already refined exhibit → statement.
     if looks_like_exhibit_filename(filename) or looks_like_exhibit_filename(display):
+        if current == "bill":
+            return "bill"
         return "exhibit"
-    current = (doc.get("doc_kind") or "").strip()
     if current:
         return current
     _name, proposed = propose_document_title(filename, "")
@@ -637,7 +676,9 @@ def _queue_document_scan(doc: dict, *, submitted_by: str) -> dict[str, str]:
             display = proposed_name
         cases_db.update_document(doc["id"], doc_kind=kind, display_name=display)
         doc = {**doc, "doc_kind": kind, "display_name": display}
-    cases_db.update_document(doc["id"], scan_job_id=job_id, status="queued")
+    cases_db.update_document(
+        doc["id"], scan_job_id=job_id, status="queued", risk_level=None, risk_score=None
+    )
     _start_analysis(
         job_id,
         job_path,

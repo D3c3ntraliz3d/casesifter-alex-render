@@ -1,5 +1,9 @@
 # CaseSifter desktop (thin client)
 
+> **Frozen — cut before broad launch.** Soft-launch is the hosted web app
+> (`docs/HANDOFF.md`). Do not add Electron features; delete this folder before
+> general availability. Local vault (`APP_MODE=vault`) remains for John’s testing.
+
 Local case files + remote ephemeral analysis. **Does not ship** `gotcha.py` / pipeline engines.
 
 ## Run (dev)

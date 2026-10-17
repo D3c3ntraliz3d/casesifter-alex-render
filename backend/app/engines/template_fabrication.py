@@ -99,18 +99,52 @@ def find_template_leftovers(
     ]
 
 
+# Deterministic L1 content types that can gate strong ELA on the same page.
+# Never promote ELA alone — leftovers OR same-page L1 required.
+_L1_CONTENT_TYPES = frozenset(
+    {
+        "date_inconsistency",
+        "math_error",
+        "historical_impossibility",
+        "line_self_contradiction",
+        "template_fabrication",
+    }
+)
+
+
+def _l1_pages(findings: list[Finding]) -> set[int]:
+    """Pages that already carry a deterministic L1 content finding."""
+    pages: set[int] = set()
+    for item in findings:
+        evidence = item.evidence or {}
+        analysis = str(evidence.get("analysis_type") or "")
+        if analysis not in _L1_CONTENT_TYPES:
+            continue
+        if item.severity == "info":
+            continue
+        if item.page is None:
+            continue
+        pages.add(int(item.page))
+    return pages
+
+
 def review_print_scan_ela(
     findings: list[Finding],
     text: str,
     *,
     scan_profile: str,
 ) -> list[Finding]:
-    """Print-then-scan is the concealment step. Do not bury strong localized ELA on statements."""
+    """Print-then-scan is the concealment step. Do not bury strong localized ELA on statements.
+
+    Promote only when strong ELA AND (template leftovers OR same-page L1 content).
+    Never promote ELA alone — clean decoys with soft/strong texture stay quiet.
+    """
     if scan_profile != PROFILE_FORENSIC:
         return findings
     leftovers = bool(find_template_leftovers(text, scan_profile=scan_profile))
     statement = looks_like_consumer_statement(text)
-    if not leftovers and not statement:
+    l1_pages = _l1_pages(findings)
+    if not leftovers and not statement and not l1_pages:
         return findings
     out: list[Finding] = []
     for item in findings:
@@ -125,16 +159,17 @@ def review_print_scan_ela(
             out.append(item)
             continue
         strong_ela = score >= 62 and blob >= 2200
-        # Content hook required: leftover template chrome. Strong ELA alone on a
-        # consumer statement is secondary and must not red-score clean decoys.
-        if not leftovers:
-            out.append(item)
-            continue
-        if not strong_ela and not leftovers:
+        same_page_l1 = item.page is not None and int(item.page) in l1_pages
+        # Content hook required: leftover template chrome OR same-page L1 finding.
+        # Strong ELA alone on a consumer statement must not red-score clean decoys.
+        content_hook = leftovers or same_page_l1
+        if not content_hook or not strong_ela:
             out.append(item)
             continue
         evidence.pop("scan_heavy", None)
         evidence["print_scan_review"] = True
+        evidence["content_hook"] = True
+        evidence["ela_l1_gate"] = "template_leftovers" if leftovers else "same_page_l1"
         evidence["analysis_type"] = evidence.get("analysis_type") or "graphic_manipulation"
         out.append(
             item.model_copy(
@@ -145,7 +180,8 @@ def review_print_scan_ela(
                     "why_suspicious": (
                         "A bought template filled in, printed, and scanned often leaves a "
                         "different JPEG history on the typed fields than on the form chrome. "
-                        "On a consumer statement that is not ordinary flatbed texture."
+                        "On a consumer statement that already has a content defect, that is "
+                        "not ordinary flatbed texture."
                     ),
                     "evidence": evidence,
                 }

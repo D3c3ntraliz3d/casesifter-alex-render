@@ -14,6 +14,7 @@
     .green { background: #c6f6d5; color: #22543d; }
     .yellow { background: #fefcbf; color: #744210; }
     .red { background: #fed7d7; color: #742a2a; }
+    .incomplete { background: #e7eef6; color: #14324a; }
     .finding { border: 1px solid var(--line); padding: 12px 14px; margin: 10px 0; }
     .finding h3 { margin: 0 0 6px; font-size: 15px; color: var(--navy); }
     .why { color: var(--muted); font-style: italic; }
@@ -54,7 +55,11 @@
       </div>
       {% endfor %}
     {% else %}
+      {% if report.ai_review == "incomplete" %}
+      <p>Visual review did not complete, so this is not a low-risk result. No fraud finding is recorded from a review that did not finish.</p>
+      {% else %}
       <p>No material findings.</p>
+      {% endif %}
     {% endif %}
 
     <h2>Detailed findings</h2>
@@ -79,7 +84,11 @@
       {% endif %}
     </div>
     {% else %}
+    {% if report.ai_review == "incomplete" %}
+    <p>Visual review did not complete. This file was not cleared.</p>
+    {% else %}
     <p>No automated findings were recorded.</p>
+    {% endif %}
     {% endfor %}
 
     <h2>Timeline</h2>

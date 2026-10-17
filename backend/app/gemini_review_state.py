@@ -11,13 +11,29 @@ from __future__ import annotations
 import threading
 from typing import Literal
 
-AiReviewReason = Literal["rate_limited", "billing", "error", "file_not_sent", "partial"]
+AiReviewReason = Literal[
+    "rate_limited",
+    "billing",
+    "error",
+    "file_not_sent",
+    "partial",
+    "no_api_key",
+    "multimodal_off",
+    "not_attempted",
+    "empty_response",
+    "timeout",
+]
 
 _PRIORITY: dict[str, int] = {
-    "billing": 5,
-    "rate_limited": 4,
-    "partial": 3,
-    "file_not_sent": 2,
+    "billing": 9,
+    "rate_limited": 8,
+    "partial": 7,
+    "file_not_sent": 6,
+    "no_api_key": 5,
+    "multimodal_off": 5,
+    "timeout": 4,
+    "empty_response": 4,
+    "not_attempted": 3,
     "error": 1,
 }
 _tls = threading.local()

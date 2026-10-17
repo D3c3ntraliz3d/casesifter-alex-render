@@ -1,4 +1,5 @@
 import { rememberScanFile, sha256OfFile } from "./localFiles.js";
+import { isAllowedStripeUrl } from "./stripeUrl.js";
 
 const jsonHeaders = { Accept: "application/json" };
 
@@ -11,36 +12,71 @@ const ANALYSIS_API_KEY = String(import.meta.env.VITE_ANALYSIS_API_KEY || "").tri
 
 const SESSION_TOKEN_KEY = "casesifter_session_token";
 const SESSION_EMAIL_KEY = "casesifter_email";
+const SESSION_FLAG = "casesifter_signed_in";
 
 function desktop() {
   return typeof window !== "undefined" && window.casesifter?.isDesktop ? window.casesifter : null;
 }
 
 function getSessionToken() {
+  // Browser sessions are HttpOnly cookies. Never read a bearer out of storage.
+  return "";
+}
+
+function rememberEmail(email) {
   try {
-    return localStorage.getItem(SESSION_TOKEN_KEY) || "";
+    if (email) sessionStorage.setItem(SESSION_EMAIL_KEY, email);
+  } catch {
+    /* private mode */
+  }
+}
+
+function storedEmail() {
+  try {
+    return sessionStorage.getItem(SESSION_EMAIL_KEY) || "";
   } catch {
     return "";
   }
 }
 
-function setSession(token, email) {
+function markSignedIn(email) {
   try {
-    if (token) localStorage.setItem(SESSION_TOKEN_KEY, token);
-    else localStorage.removeItem(SESSION_TOKEN_KEY);
-    if (email) localStorage.setItem(SESSION_EMAIL_KEY, email);
-  } catch {
-    /* private mode */
-  }
-}
-
-function clearSession() {
-  try {
+    sessionStorage.setItem(SESSION_FLAG, "1");
     localStorage.removeItem(SESSION_TOKEN_KEY);
     localStorage.removeItem(SESSION_EMAIL_KEY);
   } catch {
     /* private mode */
   }
+  rememberEmail(email);
+}
+
+function hasSessionHint() {
+  try {
+    return sessionStorage.getItem(SESSION_FLAG) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function clearSession() {
+  try {
+    sessionStorage.removeItem(SESSION_FLAG);
+    sessionStorage.removeItem(SESSION_EMAIL_KEY);
+    localStorage.removeItem(SESSION_TOKEN_KEY);
+    localStorage.removeItem(SESSION_EMAIL_KEY);
+  } catch {
+    /* private mode */
+  }
+}
+
+async function acceptAnalysisSession(code) {
+  if (!code || !ANALYSIS_API_URL) return;
+  await fetch(`${ANALYSIS_API_URL}/api/v1/session/accept`, {
+    method: "POST",
+    headers: { ...jsonHeaders, "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ code }),
+  });
 }
 
 /** True when a control-plane response means the Bearer token is gone/expired. */
@@ -92,24 +128,26 @@ export function absorbSessionHandoff() {
 export async function exchangeSessionCode(code) {
   const res = await fetch(controlUrl("/v1/session/exchange"), {
     method: "POST",
+    credentials: "include",
     headers: { ...jsonHeaders, "Content-Type": "application/json" },
     body: JSON.stringify({ code }),
   });
   const data = await readJson(res);
-  if (!data?.token) throw new Error("Session exchange failed.");
-  setSession(data.token, data.entitlement?.email);
+  if (data?.analysis_code) await acceptAnalysisSession(data.analysis_code);
+  markSignedIn(data?.entitlement?.email);
   return data;
 }
 
 /** Open Stripe Checkout / Customer Portal URL in this tab (reliable after await). */
 export function openCheckoutUrl(url) {
-  if (!url) return false;
+  if (!isAllowedStripeUrl(url)) return false;
+  const target = new URL(url).href;
   try {
-    window.location.assign(url);
+    window.location.assign(target);
     return true;
   } catch {
     try {
-      window.open(url, "_blank", "noopener,noreferrer");
+      window.open(target, "_blank", "noopener,noreferrer");
       return true;
     } catch {
       return false;
@@ -149,7 +187,7 @@ async function apiFetch(path, options = {}) {
   if (options.body instanceof FormData) {
     delete headers["Content-Type"];
   }
-  return fetch(apiUrl(path), { ...options, headers });
+  return fetch(apiUrl(path), { ...options, headers, credentials: "include" });
 }
 
 // Electron prefixes every rejected ipcRenderer.invoke() with "Error invoking remote
@@ -212,8 +250,49 @@ export async function getJob(jobId, { includeReport = false } = {}) {
   return readJson(res);
 }
 
+/** Vault-only direct link (local APP_MODE=vault). Prefer downloadExportReport. */
 export function exportUrl(jobId, kind) {
   return apiUrl(`/api/jobs/${jobId}/export/${kind}`);
+}
+
+/**
+ * Credentialed export download. Hosted analysis regenerates from durable report
+ * via /api/v1/jobs/.../export; local vault still uses /api/jobs/.../export.
+ */
+export async function downloadExportReport(jobId, kind) {
+  const k = String(kind || "").toLowerCase();
+  if (!["html", "pdf", "json"].includes(k)) {
+    throw new Error("Export kind must be html, pdf, or json.");
+  }
+  const path = ANALYSIS_API_URL
+    ? `/api/v1/jobs/${jobId}/export/${k}`
+    : `/api/jobs/${jobId}/export/${k}`;
+  const res = ANALYSIS_API_URL
+    ? await analysisFetch(path)
+    : await apiFetch(path);
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(detail || `Export failed (${res.status}).`);
+  }
+  const blob = await res.blob();
+  const cd = res.headers.get("Content-Disposition") || "";
+  const match = /filename\*?=(?:UTF-8''|")?([^\";]+)/i.exec(cd);
+  const filename = match
+    ? decodeURIComponent(match[1].replace(/"/g, "").trim())
+    : `exhibit-report-${jobId}.${k}`;
+  const url = URL.createObjectURL(blob);
+  try {
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+  return { filename, size: blob.size };
 }
 
 export function documentFileUrl(caseId, documentId) {
@@ -342,6 +421,35 @@ export async function listCases() {
   return data.cases || [];
 }
 
+export async function listAccessLog() {
+  const signins = await controlAuthedJson("/v1/audit");
+  let matterEvents = [];
+  let matterAuditDenied = false;
+  if (isHostedAnalysis()) {
+    try {
+      const res = await analysisFetch("/api/v1/matters/audit");
+      if (res.status === 403) {
+        matterAuditDenied = true;
+      } else {
+        const data = await readJson(res);
+        matterEvents = data.events || [];
+      }
+    } catch (err) {
+      // Firm matter log is owner/admin only — do not wipe personal sign-in rows.
+      if (/403|forbidden|firm admin/i.test(String(err?.message || err || ""))) {
+        matterAuditDenied = true;
+      } else {
+        throw err;
+      }
+    }
+  }
+  return {
+    sign_in_events: signins.events || [],
+    matter_events: matterEvents,
+    matter_audit_denied: matterAuditDenied,
+  };
+}
+
 export async function createCase(payload) {
   const cs = desktop();
   if (cs) return cs.createCase(payload);
@@ -438,8 +546,19 @@ export async function deleteDocument(caseId, documentId) {
 
 export async function updateCase(caseId, payload) {
   if (isHostedAnalysis()) {
-    // Name/index edits not yet exposed; return current matter.
-    return getCase(caseId);
+    const body = {
+      name: payload?.caption ?? payload?.name,
+      caption: payload?.caption ?? payload?.name,
+      index_number: payload?.index_number,
+      court: payload?.court,
+      county: payload?.county,
+    };
+    const res = await analysisFetch(`/api/v1/matters/${caseId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    return readJson(res);
   }
   const res = await apiFetch(`/api/cases/${caseId}`, {
     method: "PATCH",
@@ -535,11 +654,20 @@ export async function uploadCaseDocument(
       return {
         document: null,
         job_id: job.job_id,
-        job: { status: "queued", job_id: job.job_id },
+        job: {
+          status: "queued",
+          job_id: job.job_id,
+          index_warning: job.index_warning || null,
+          filename_index: job.filename_index || null,
+          matter_index: job.matter_index || null,
+        },
         sha256: sha,
         status: "queued",
         display_name: labels.displayName || file.name,
         original_filename: file.name,
+        index_warning: job.index_warning || null,
+        filename_index: job.filename_index || null,
+        matter_index: job.matter_index || null,
       };
     }
     // Poll until complete so the matter document row exists.
@@ -635,15 +763,28 @@ export async function getDesktopReport(caseId, documentId) {
 }
 
 export async function patchDocument(caseId, documentId, payload) {
+  const cs = desktop();
+  if (cs?.patchDocument) {
+    return callDesktop(cs.patchDocument(caseId, documentId, payload));
+  }
   if (isHostedAnalysis()) {
+    const body = {};
+    if (
+      Object.prototype.hasOwnProperty.call(payload, "filed_date") ||
+      Object.prototype.hasOwnProperty.call(payload, "filedDate")
+    ) {
+      body.filed_date = payload.filed_date ?? payload.filedDate ?? null;
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, "display_name")) {
+      body.display_name = payload.display_name;
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, "doc_kind")) {
+      body.doc_kind = payload.doc_kind;
+    }
     const res = await analysisFetch(`/api/v1/matters/${caseId}/documents/${documentId}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        filed_date: payload.filed_date ?? payload.filedDate ?? null,
-        display_name: payload.display_name,
-        doc_kind: payload.doc_kind,
-      }),
+      body: JSON.stringify(body),
     });
     return readJson(res);
   }
@@ -688,7 +829,29 @@ export async function listCaseGotchas(caseId) {
         allFindings.push({ ...f, document_id: doc.id });
         if (f.evidence?.gotcha || f.category === "gotcha") {
           if (f.evidence?.case_impact === "noise" || f.severity === "info") continue;
-          gotchas.push({ ...f, document_id: doc.id, title: f.title });
+          const ev = f.evidence || {};
+          gotchas.push({
+            ...f,
+            document_id: doc.id,
+            title: f.title,
+            // Flatten nested evidence so Case Impact expand can render either shape.
+            explanation: f.explanation,
+            why_suspicious: f.why_suspicious || ev.why_suspicious,
+            why_it_may_matter: f.why_it_may_matter || f.explanation,
+            attorney_why: f.attorney_why || ev.attorney_why,
+            claim_quote: f.claim_quote || ev.claim_quote,
+            claim_source: f.claim_source || ev.claim_source,
+            evidence_quote: f.evidence_quote || ev.evidence_quote || ev.quoted_evidence,
+            evidence_source: f.evidence_source || ev.evidence_source,
+            evidence_label: f.evidence_label || ev.evidence_label,
+            materiality_reason: f.materiality_reason || ev.materiality_reason,
+            fact_named: f.fact_named || ev.fact_named,
+            case_impact: f.case_impact || ev.case_impact,
+            case_impact_bucket: f.case_impact_bucket || ev.case_impact_bucket,
+            tainted_support: Boolean(f.tainted_support || ev.tainted_support),
+            self_undercut: Boolean(f.self_undercut || ev.self_undercut),
+            page: f.page ?? ev.page ?? ev.evidence_page,
+          });
         }
       }
     }
@@ -883,6 +1046,7 @@ async function hostedRescanDocument(caseId, doc) {
     matterId: caseId,
     displayName: doc.display_name,
     docKind: doc.doc_kind || doc.doc_type,
+    filedDate: doc.filed_date || doc.filedDate || undefined,
     submittedBy: "web-app-rescan",
   });
   return { job_id: job.job_id, status: job.status || "queued", queued: true };
@@ -930,6 +1094,7 @@ export async function rescanCase(caseId, { waitingOnly = false } = {}) {
     let skipped = 0;
     let next = 0;
     const errors = [];
+    const started = [];
     const concurrency = 2;
 
     async function worker() {
@@ -940,6 +1105,7 @@ export async function rescanCase(caseId, { waitingOnly = false } = {}) {
         try {
           await cs.analyzeDocument(caseId, doc.id);
           queued += 1;
+          started.push({ document_id: doc.id });
         } catch (err) {
           skipped += 1;
           if (err?.message) errors.push(err.message);
@@ -954,6 +1120,7 @@ export async function rescanCase(caseId, { waitingOnly = false } = {}) {
       status: queued ? "started" : "idle",
       queued,
       skipped,
+      started,
       error: errors[0] || null,
     };
   }
@@ -969,10 +1136,12 @@ export async function rescanCase(caseId, { waitingOnly = false } = {}) {
     let queued = 0;
     const missing = [];
     const errors = [];
+    const started = [];
     for (const doc of docs) {
       try {
-        await hostedRescanDocument(caseId, doc);
+        const job = await hostedRescanDocument(caseId, doc);
         queued += 1;
+        started.push({ document_id: doc.id, job_id: job?.job_id || null });
       } catch (err) {
         const msg = String(err?.message || err || "");
         if (/not cached|Locate or re-upload/i.test(msg)) {
@@ -987,6 +1156,7 @@ export async function rescanCase(caseId, { waitingOnly = false } = {}) {
       queued,
       skipped: missing.length + errors.length,
       missing,
+      started,
       error: errors[0] || (missing.length ? `${missing.length} file(s) need Locate / re-upload.` : null),
     };
   }
@@ -1050,6 +1220,37 @@ export async function exportMatter(matterId) {
   return readJson(res);
 }
 
+/** Credentialed matter review pack download (JSON). Hosted path only. */
+export async function downloadMatterExport(matterId, { filename } = {}) {
+  const payload = await exportMatter(matterId);
+  const caption =
+    payload?.matter?.caption ||
+    payload?.matter?.name ||
+    String(matterId || "matter").slice(0, 12);
+  const safe = String(caption)
+    .replace(/[^\w\-]+/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_|_$/g, "")
+    .slice(0, 48) || "matter";
+  const name = filename || `casesifter-${safe}-export.json`;
+  const blob = new Blob([JSON.stringify(payload, null, 2)], {
+    type: "application/json",
+  });
+  const url = URL.createObjectURL(blob);
+  try {
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+  return payload;
+}
+
 export async function getEntitlement() {
   const cs = desktop();
   if (cs) return callDesktop(cs.entitlement());
@@ -1069,30 +1270,21 @@ export async function getEntitlement() {
     }
   }
 
-  const token = getSessionToken();
-  if (!token) {
-    return {
-      active: false,
-      mode: "cloud",
-      plan: null,
-      message: "Sign in to activate your subscription.",
-      hasSession: false,
-      billing_state: "none",
-      trial_days_left: null,
-      share_anonymized_outcomes: true,
-    };
-  }
   try {
-    const res = await fetch(controlUrl("/v1/entitlement"), { headers: controlHeaders() });
+    const res = await fetch(controlUrl("/v1/entitlement"), {
+      headers: controlHeaders(),
+      credentials: "include",
+    });
     if (!res.ok) {
       const detail = await safeDetail(res);
       if (isSessionAuthFailure(res, detail)) {
+        const expired = hasSessionHint();
         clearSession();
         return {
           active: false,
           mode: "cloud",
           plan: null,
-          message: "Session expired. Sign in again.",
+          message: expired ? "Session expired. Sign in again." : "Sign in to activate your subscription.",
           hasSession: false,
           billing_state: "none",
           trial_days_left: null,
@@ -1102,15 +1294,8 @@ export async function getEntitlement() {
       throw new Error(detail || "Request failed.");
     }
     const data = await res.json();
-    let email = data.email;
-    if (!email) {
-      try {
-        email = localStorage.getItem(SESSION_EMAIL_KEY) || undefined;
-      } catch {
-        email = undefined;
-      }
-    }
-    if (email) setSession(token, email);
+    const email = data.email || storedEmail() || undefined;
+    if (email) markSignedIn(email);
     return {
       ...data,
       mode: "cloud",
@@ -1136,17 +1321,12 @@ export async function getEntitlement() {
     }
     // True network / CORS failure only (not 401). Keep token + email; Checkout will
     // surface a network error — never mis-label auth failure as "unreachable".
-    let email;
-    try {
-      email = localStorage.getItem(SESSION_EMAIL_KEY) || undefined;
-    } catch {
-      email = undefined;
-    }
+    const email = storedEmail() || undefined;
     return {
       active: false,
       mode: "cloud",
       plan: "cloud-cached",
-      hasSession: Boolean(getSessionToken()),
+      hasSession: hasSessionHint(),
       email,
       message: "Control plane unreachable. Sign in when online.",
       cached: true,
@@ -1175,6 +1355,7 @@ export async function loginCloud(email, password) {
   try {
     res = await fetch(controlUrl("/v1/login"), {
       method: "POST",
+      credentials: "include",
       headers: { ...jsonHeaders, "Content-Type": "application/json" },
       body: JSON.stringify({ email, password }),
     });
@@ -1182,12 +1363,195 @@ export async function loginCloud(email, password) {
     throw controlUnreachableError(err);
   }
   const data = await readJson(res);
-  if (!data?.token) throw new Error("Login returned no session token.");
-  setSession(data.token, email);
+  if (data?.mfa_required && data?.mfa_token) {
+    return {
+      mfa_required: true,
+      mfa_token: data.mfa_token,
+      email: data.email || email,
+      message: data.message || "Enter your authenticator code.",
+    };
+  }
+  if (data?.analysis_code) await acceptAnalysisSession(data.analysis_code);
+  markSignedIn(email);
   return getEntitlement();
 }
 
-export async function signupCloud(email, password, name, acceptedTerms, inviteCode) {
+export async function loginMfaCloud(mfaToken, code) {
+  let res;
+  try {
+    res = await fetch(controlUrl("/v1/login/mfa"), {
+      method: "POST",
+      credentials: "include",
+      headers: { ...jsonHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({ mfa_token: mfaToken, code }),
+    });
+  } catch (err) {
+    throw controlUnreachableError(err);
+  }
+  const data = await readJson(res);
+  if (data?.analysis_code) await acceptAnalysisSession(data.analysis_code);
+  markSignedIn(data?.entitlement?.email);
+  return getEntitlement();
+}
+
+export function ssoStartUrl() {
+  return controlUrl("/v1/sso/oidc/start");
+}
+
+export async function fetchAuthStatus() {
+  try {
+    const res = await fetch(controlUrl("/v1/auth/status"), {
+      credentials: "include",
+      headers: { ...jsonHeaders },
+    });
+    if (!res.ok) return { sso_available: false, totp_available: false };
+    return readJson(res);
+  } catch {
+    return { sso_available: false, totp_available: false };
+  }
+}
+
+export async function startTotpEnrollment() {
+  return controlAuthedJson("/v1/2fa/totp/start", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+}
+
+export async function confirmTotpEnrollment(code) {
+  return controlAuthedJson("/v1/2fa/totp/confirm", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code }),
+  });
+}
+
+export async function disableTotp(password, code) {
+  return controlAuthedJson("/v1/2fa/totp/disable", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password, code }),
+  });
+}
+
+export async function fetchAdminOverview() {
+  return controlAuthedJson("/v1/admin/overview");
+}
+
+export async function fetchAdminAudit() {
+  return controlAuthedJson("/v1/admin/audit");
+}
+
+export async function revokeAdminSession(sessionId) {
+  return controlAuthedJson(`/v1/admin/sessions/${encodeURIComponent(sessionId)}/revoke`, {
+    method: "POST",
+    body: "{}",
+  });
+}
+
+export async function revokeOtherSessions() {
+  return controlAuthedJson("/v1/admin/sessions/revoke-others", {
+    method: "POST",
+    body: "{}",
+  });
+}
+
+export async function patchAdminSettings(body) {
+  return controlAuthedJson("/v1/admin/settings", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+}
+
+export async function createSeatInvite(email, role = "member") {
+  return controlAuthedJson("/v1/admin/invites", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, role }),
+  });
+}
+
+export async function revokeSeatInvite(inviteId) {
+  return controlAuthedJson(`/v1/admin/invites/${encodeURIComponent(inviteId)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function setMemberRole(userId, role) {
+  return controlAuthedJson(`/v1/admin/users/${encodeURIComponent(userId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ role }),
+  });
+}
+
+/** Read ?seat_invite= from URL once (Admin invite link → Account signup). */
+export function absorbSeatInviteToken() {
+  if (typeof window === "undefined") return "";
+  try {
+    const params = new URLSearchParams(window.location.search || "");
+    const token = (params.get("seat_invite") || "").trim();
+    if (!token) return "";
+    params.delete("seat_invite");
+    const qs = params.toString();
+    window.history.replaceState(
+      {},
+      "",
+      `${window.location.pathname}${qs ? `?${qs}` : ""}`
+    );
+    try {
+      sessionStorage.setItem("cs_seat_invite", token);
+    } catch {
+      /* ignore */
+    }
+    return token;
+  } catch {
+    return "";
+  }
+}
+
+export function peekSeatInviteToken() {
+  try {
+    return (
+      (typeof sessionStorage !== "undefined" && sessionStorage.getItem("cs_seat_invite")) ||
+      ""
+    ).trim();
+  } catch {
+    return "";
+  }
+}
+
+export function clearSeatInviteToken() {
+  try {
+    sessionStorage.removeItem("cs_seat_invite");
+  } catch {
+    /* ignore */
+  }
+}
+
+export async function fetchFirmAdminOverview() {
+  if (!isHostedAnalysis()) {
+    return null;
+  }
+  const res = await analysisFetch("/api/v1/matters/admin");
+  return readJson(res);
+}
+
+export async function patchFirmAdminSettings(body) {
+  if (!isHostedAnalysis()) {
+    throw new Error("Firm settings require hosted analysis.");
+  }
+  const res = await analysisFetch("/api/v1/matters/admin/settings", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+  return readJson(res);
+}
+
+export async function signupCloud(email, password, name, acceptedTerms, inviteCode, seatInviteToken) {
   const cs = desktop();
   if (cs) {
     await callDesktop(cs.signup(email, password, name, acceptedTerms, inviteCode));
@@ -1203,6 +1567,7 @@ export async function signupCloud(email, password, name, acceptedTerms, inviteCo
   try {
     res = await fetch(controlUrl("/v1/signup"), {
       method: "POST",
+      credentials: "include",
       headers: { ...jsonHeaders, "Content-Type": "application/json" },
       body: JSON.stringify({
         email,
@@ -1210,17 +1575,15 @@ export async function signupCloud(email, password, name, acceptedTerms, inviteCo
         name: name || null,
         accepted_terms: Boolean(acceptedTerms),
         invite_code: inviteCode || null,
+        seat_invite_token: seatInviteToken || peekSeatInviteToken() || null,
       }),
     });
   } catch (err) {
     throw controlUnreachableError(err);
   }
   const data = await readJson(res);
+  if (res.ok) clearSeatInviteToken();
   // Session is issued only after email verification.
-  if (data?.token) {
-    setSession(data.token, email);
-    return getEntitlement();
-  }
   return {
     active: false,
     mode: "cloud",
@@ -1239,12 +1602,13 @@ export async function signupCloud(email, password, name, acceptedTerms, inviteCo
 export async function verifyEmailCloud(token) {
   const res = await fetch(controlUrl("/v1/verify-email"), {
     method: "POST",
+    credentials: "include",
     headers: { ...jsonHeaders, "Content-Type": "application/json" },
     body: JSON.stringify({ token }),
   });
   const data = await readJson(res);
-  if (!data?.token) throw new Error("Email verification failed.");
-  setSession(data.token, data.entitlement?.email);
+  if (data?.analysis_code) await acceptAnalysisSession(data.analysis_code);
+  markSignedIn(data?.entitlement?.email);
   return getEntitlement();
 }
 
@@ -1262,15 +1626,24 @@ export async function logoutCloud() {
     await callDesktop(cs.setConfig({ sessionToken: "" }));
     return { active: false, mode: "cloud", message: "Signed out." };
   }
-  const token = getSessionToken();
-  if (token) {
+  try {
+    await fetch(controlUrl("/v1/logout"), {
+      method: "POST",
+      credentials: "include",
+      headers: { Accept: "application/json" },
+    });
+  } catch {
+    /* still clear local session */
+  }
+  if (ANALYSIS_API_URL) {
     try {
-      await fetch(controlUrl("/v1/logout"), {
+      await fetch(`${ANALYSIS_API_URL}/api/v1/session/logout`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+        credentials: "include",
+        headers: { Accept: "application/json" },
       });
     } catch {
-      /* still clear local session */
+      /* analysis cookie clear is best-effort */
     }
   }
   clearSession();
@@ -1286,12 +1659,11 @@ export async function logoutCloud() {
 }
 
 async function controlAuthedJson(path, options = {}) {
-  const token = getSessionToken();
-  if (!token) throw new Error("Sign in first.");
   let res;
   try {
     res = await fetch(controlUrl(path), {
       ...options,
+      credentials: "include",
       headers: { ...controlHeaders(), ...(options.headers || {}) },
     });
   } catch (err) {

@@ -66,6 +66,25 @@ DISCHARGE_ADJUDICATION_RE = re.compile(
 # establishes which recorded instrument this whole case is actually about.
 COMPLAINT_NAME_RE = re.compile(r"(?i)\bcomplaint\b")
 
+# Occupancy / mortgage conflicts belong on the Case Impact board once via
+# aggregate_fact_conflicts. Attaching them onto every later affidavit or clean
+# filing paints proxy docs red without adding a new interrupt.
+MATTER_LEVEL_FACT_FIELDS = frozenset({"occupancy_start", "mortgage_origination"})
+
+# Forged-exhibit analysis types: one Case Impact card per signal, not per scan.
+FRAUD_ANALYSIS_TYPES = frozenset(
+    {
+        "math_error",
+        "historical_impossibility",
+        "template_fabrication",
+        "logo_chrome_mismatch",
+        "date_inconsistency",
+        "line_self_contradiction",
+        "text_overlay",
+        "graphic_manipulation",
+    }
+)
+
 
 def _squash(text: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (text or "").lower())
@@ -269,12 +288,19 @@ def compare_to_case(
             matrix.append({"prior_document_id": prior_id, "prior_name": prior_name, **row})
             # Documentary graph conflicts (entity-scoped) interrupt as credibility —
             # party's own exhibits cannot both be true on the same nameable fact.
-            if row.get("flag") == "red" and row.get("documentary"):
+            # Occupancy / mortgage pairs stay matter-level (aggregate) so later
+            # affidavits and clean filings are not painted red as proxy docs.
+            field_key = str(row.get("key") or "fact")
+            if (
+                row.get("flag") == "red"
+                and row.get("documentary")
+                and field_key not in MATTER_LEVEL_FACT_FIELDS
+            ):
                 findings.append(
                     _case_finding(
                         prior_id=prior_id,
                         prior_name=prior_name,
-                        field=str(row.get("key") or "fact"),
+                        field=field_key,
                         new_value=str(row.get("this_display") or ""),
                         prior_value=str(row.get("prior_display") or ""),
                         title=(
@@ -339,7 +365,8 @@ def compare_to_case(
                             ],
                         }
                     )
-            # Other cross-document fact mismatches stay case-level via aggregate_fact_conflicts.
+            # Occupancy / mortgage and other soft mismatches stay case-level
+            # via aggregate_fact_conflicts.
 
         # Exhibit-to-exhibit location split still matters; pleadings share many addresses.
         filing_involved = new_is_filing or prior_is_filing
@@ -655,12 +682,15 @@ def _compare_facts(
     prior_candidates = [
         fact
         for fact in prior_facts
-        if fact.get("key") in GOTCHA_KEYS or fact.get("graph")
+        if (fact.get("key") in GOTCHA_KEYS or fact.get("graph"))
+        and fact_conflict_eligible(fact)
     ]
     seen: set[str] = set()
     for fact in new_facts:
         key = fact.get("key")
         if key not in GOTCHA_KEYS and not fact.get("graph"):
+            continue
+        if not fact_conflict_eligible(fact):
             continue
         ck = cluster_key(fact)
         if ck in seen:
@@ -766,11 +796,19 @@ def _score_pair(left: dict[str, Any], right: dict[str, Any], key: str) -> dict[s
                 confidence=40,
             )
         discrepancy = f"{left.get('display')} vs {right.get('display')}"
-        materiality = (
-            "Process server's sworn personal-service AOS collides with the server's own "
-            "daily log (nail-and-mail only and/or different address near the claimed time) — "
-            "credibility / sewerservice risk on plaintiff's own papers."
-        )
+        methods = {str(left.get("service_method") or ""), str(right.get("service_method") or "")}
+        if methods & {"substitute", "nail_mail"} and "personal" in methods:
+            materiality = (
+                "Same process server claims personal service and substitute / nail-and-mail "
+                "at the same clock minute with quotes on both sides — credibility interrupt "
+                "on the AOS package (ordinary hours-apart personal-then-substitute is not)."
+            )
+        else:
+            materiality = (
+                "Process server's sworn personal-service AOS collides with the server's own "
+                "daily log (nail-and-mail only and/or different address near the claimed time) — "
+                "credibility / sewerservice risk on plaintiff's own papers."
+            )
         row = _row(left, right, key, label, discrepancy, materiality, True, False, confidence=90)
         row["documentary"] = True
         row["case_impact_bucket"] = "credibility"
@@ -1121,7 +1159,18 @@ def finding_stable_key(item: dict[str, Any]) -> tuple[str, ...]:
         ev.get("analysis_type") or item.get("finding_type") or item.get("analysis_type") or ""
     ).strip().lower()
     claim = _quote_key(str(ev.get("claim_quote") or item.get("claim_quote") or ""))
-    evidence = _quote_key(str(ev.get("evidence_quote") or item.get("evidence_quote") or ""))
+    evidence = _quote_key(
+        str(
+            ev.get("evidence_quote")
+            or item.get("evidence_quote")
+            or ev.get("quoted_evidence")
+            or ""
+        )
+    )
+    # Forged exhibit cards (S-41 class): matter-level once by signal + quote.
+    if analysis in FRAUD_ANALYSIS_TYPES or item.get("tainted_support") or ev.get("tainted_support"):
+        quote = evidence or claim or _quote_key(str(item.get("title") or ""))
+        return ("fraud", analysis or "tainted", quote[:160])
     this_v = _quote_key(str(ev.get("this_display") or item.get("this_display") or claim))
     prior_v = _quote_key(str(ev.get("prior_display") or item.get("prior_display") or evidence))
     values = tuple(sorted(v for v in (this_v, prior_v) if v))
@@ -1132,9 +1181,21 @@ def finding_stable_key(item: dict[str, Any]) -> tuple[str, ...]:
 
 def _gotcha_cluster_key(item: dict[str, Any]) -> tuple[str, ...]:
     """One card per fact theme (service at an address, settlement date), not per sentence."""
-    if item.get("tainted_support") and item.get("document_id"):
-        return ("tainted", str(item.get("document_id")))
     ev = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
+    analysis = str(
+        ev.get("analysis_type") or item.get("finding_type") or item.get("analysis_type") or ""
+    ).strip().lower()
+    if analysis in FRAUD_ANALYSIS_TYPES or item.get("tainted_support") or ev.get("tainted_support"):
+        quote = _quote_key(
+            str(
+                ev.get("quoted_evidence")
+                or ev.get("evidence_quote")
+                or item.get("evidence_quote")
+                or item.get("title")
+                or ""
+            )
+        )
+        return ("fraud", analysis or "tainted", quote[:160])
     field = str(ev.get("field") or item.get("field") or "").strip().lower()
     if field:
         claim = _quote_key(str(ev.get("claim_quote") or item.get("claim_quote") or ""))

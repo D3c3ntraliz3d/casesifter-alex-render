@@ -231,6 +231,14 @@ def _to_fact_record(item: dict[str, Any], text: str) -> dict[str, Any] | None:
     if not locate_quote(text, quote) and quote.lower() not in text.lower():
         return None
 
+    # Occupancy must quote occupancy language — not billing periods, AOS
+    # timestamps, or NYSCEF filed/recorded stamps (live 11467 false conflicts).
+    if predicate == "occupancy_start":
+        from app.fact_graph import _occupancy_fact_grounded
+
+        if not _occupancy_fact_grounded({"quote": quote, "display": value_raw}):
+            return None
+
     parsed = _date(value_raw) if predicate.endswith("_date") or predicate in {
         "employment_start",
         "employment_end",

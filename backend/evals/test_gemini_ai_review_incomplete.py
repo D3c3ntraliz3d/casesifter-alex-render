@@ -75,6 +75,20 @@ def test_pipeline_records_incomplete_ai_review_not_clean_complete(tmp_path, monk
     monkeypatch.setattr(config_mod, "settings", settings)
     monkeypatch.setattr(storage, "settings", settings)
     monkeypatch.setattr("app.pipeline.settings", settings)
+    # Force the visual path so a failed Gemini call is the incomplete reason,
+    # independent of whether the developer .env has a key.
+    monkeypatch.setattr(
+        "app.engines.contextual_logic.settings.gemini_api_key", "test-key", raising=False
+    )
+    monkeypatch.setattr(
+        "app.engines.contextual_logic.settings.contextual_multimodal", True, raising=False
+    )
+    monkeypatch.setattr(
+        "app.engines.contextual_logic.settings.logo_chrome_pass", False, raising=False
+    )
+    monkeypatch.setattr(
+        "app.engines.contextual_logic.settings.local_only_review", False, raising=False
+    )
 
     job_id = "f" * 32
     storage.create_job(job_id, "exhibit.pdf")
@@ -150,6 +164,13 @@ def test_pipeline_records_incomplete_ai_review_not_clean_complete(tmp_path, monk
     assert report.comparison.get("ai_review") == "incomplete"
     # Must not look like a clean complete AI review.
     assert report.ai_review != "complete"
+    assert report.risk_level != "green"
+    assert report.risk_level == "incomplete"
+    summary = report.executive_summary.lower()
+    assert "routine file" not in summary
+    assert "did not find strong signs of digital alteration" not in summary
+    actions = " ".join(report.recommended_actions).lower()
+    assert "no high-confidence manipulation indicators were found" not in actions
     assert not (storage.job_dir(job_id) / "retain_local_stage.flag").exists()
     progress = storage.load_progress(job_id)
     assert progress is not None

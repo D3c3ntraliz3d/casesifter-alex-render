@@ -16,7 +16,7 @@ Category = Literal[
     "gotcha",
 ]
 Severity = Literal["info", "low", "medium", "high", "critical"]
-RiskLevel = Literal["green", "yellow", "red"]
+RiskLevel = Literal["green", "yellow", "red", "incomplete"]
 JobStatus = Literal[
     "queued",
     "running",
@@ -123,12 +123,23 @@ class JobProgress(BaseModel):
     # Set when status first becomes "running" — used for absolute wall-clock timeout.
     started_at: datetime | None = None
     report: Report | None = None
+    # Compact module outcomes for the row lights. Survives after the full report
+    # blob is stripped from progress / deleted from disk.
+    scan_modules: list[dict[str, str]] | None = None
+    visual_review_required: bool | None = None
+    review_mode: str | None = None
+    gemini_calls: int | None = None
+    visual_file_sent: bool | None = None
+    document_analysis: str | None = None
 
 
 class UploadResponse(BaseModel):
     job_id: str
     filename: str
     status: JobStatus
+    index_warning: str | None = None
+    filename_index: str | None = None
+    matter_index: str | None = None
 
 
 class CaseCreate(BaseModel):
@@ -148,6 +159,7 @@ class CaseUpdate(BaseModel):
 class DocumentUpdate(BaseModel):
     display_name: str | None = Field(default=None, min_length=1, max_length=200)
     doc_kind: str | None = None
+    filed_date: str | None = None
 
 
 class CaseChatBody(BaseModel):

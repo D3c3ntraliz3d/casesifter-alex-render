@@ -204,7 +204,13 @@ def test_matters_crud_and_job_matter_id(tmp_path, monkeypatch):
 
     exported = client.get(f"/api/v1/matters/{matter_id}/export", headers=headers)
     assert exported.status_code == 200
-    assert exported.json()["matter"]["id"] == matter_id
+    body = exported.json()
+    assert body["matter"]["id"] == matter_id
+    assert body.get("export_kind") == "matter_review_pack"
+    assert "case_impact" in body
+    assert "document_summary" in body
+    assert isinstance(body["case_impact"].get("gotchas"), list)
+    assert isinstance(body["document_summary"], list)
 
     deleted = client.delete(f"/api/v1/matters/{matter_id}", headers=headers)
     assert deleted.status_code == 200

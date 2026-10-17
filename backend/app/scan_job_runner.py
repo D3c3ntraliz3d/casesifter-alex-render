@@ -62,7 +62,10 @@ def execute_ephemeral_job(payload: dict[str, Any]) -> dict[str, Any]:
         _update_durable_job(job_id, status="running", message="Local PDF/OCR running in worker process.")
         try:
             sample = ""
-            if not (doc_kind or "").strip():
+            kind_l = (doc_kind or "").strip().lower()
+            # Peek when kind is blank or a generic exhibit — statement body can
+            # refine exhibit → bill without changing the Exhibit display name.
+            if not kind_l or kind_l in {"exhibit", "evidence"}:
                 suffix = dest.suffix.lower()
                 if suffix == ".pdf":
                     try:
