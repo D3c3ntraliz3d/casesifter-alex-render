@@ -117,132 +117,92 @@ async function run() {
     `status=${controlBase.status} path=${controlBase.path}`
   );
 
-  // UI login
+  // Login from page context via same-origin /v1 (SPA path). Cross-origin control
+  // Set-Cookie is stripped by the route handler above; app-host cookies still stick.
   try {
-    // Open account / sign-in if needed
-    const emailSel = 'input[type="email"], input[name="email"], input[autocomplete="username"]';
-    const passSel = 'input[type="password"], input[name="password"], input[autocomplete="current-password"]';
-    let hasForm = (await page.locator(emailSel).count()) > 0;
-    if (!hasForm) {
-      const accountBtn = page.getByRole("button", { name: /account|sign in|log in/i }).first();
-      if (await accountBtn.count()) {
-        await accountBtn.click({ timeout: 10_000 }).catch(() => {});
-      }
-      hasForm = (await page.locator(emailSel).count()) > 0;
-    }
-    if (!hasForm) {
-      // Fallback: call login API from page context (still subject to cookie strip + SPA storage).
-      const apiResult = await page.evaluate(
-        async ({ email, password }) => {
-          const res = await fetch("/v1/login", {
-            method: "POST",
-            credentials: "include",
-            headers: {
-              Accept: "application/json",
-              "Content-Type": "application/json",
-              "X-Casesifter-Accept-Bearer": "1",
-            },
-            body: JSON.stringify({ email, password }),
-          });
-          const data = await res.json().catch(() => ({}));
-          if (data?.token) {
-            sessionStorage.setItem("casesifter_session_token", data.token);
-            sessionStorage.setItem("casesifter_signed_in", "1");
-            sessionStorage.setItem("casesifter_email", email);
-          }
-          if (data?.analysis_code) {
-            try {
-              await fetch(
-                "https://casesifter-alex-analysis.onrender.com/api/v1/session/accept",
-                {
-                  method: "POST",
-                  credentials: "include",
-                  headers: { Accept: "application/json", "Content-Type": "application/json" },
-                  body: JSON.stringify({ code: data.analysis_code }),
-                }
-              );
-            } catch {
-              /* best-effort */
-            }
-          }
-          const ent = await fetch("/v1/entitlement", {
-            credentials: "include",
-            headers: {
-              Accept: "application/json",
-              ...(data?.token ? { Authorization: `Bearer ${data.token}` } : {}),
-            },
-          });
-          const entBody = await ent.json().catch(() => ({}));
-          return {
-            loginStatus: res.status,
-            hasToken: Boolean(data?.token),
-            hasAnalysisCode: Boolean(data?.analysis_code),
-            entStatus: ent.status,
-            active: entBody?.active,
-            email: entBody?.email,
-            bearerStored: Boolean(sessionStorage.getItem("casesifter_session_token")),
-          };
-        },
-        { email: EMAIL, password: PW }
-      );
-      sameOriginLogin = true;
-      loginHadToken = apiResult.hasToken;
-      const pass =
-        apiResult.loginStatus === 200 &&
-        apiResult.entStatus === 200 &&
-        (apiResult.active === true || apiResult.bearerStored || apiResult.hasToken);
-      record(
-        "3. Login under 3P-cookie strip → entitlement",
-        pass,
-        `login=${apiResult.loginStatus} ent=${apiResult.entStatus} token=${apiResult.hasToken} analysis_code=${apiResult.hasAnalysisCode} active=${apiResult.active} bearerStored=${apiResult.bearerStored}`
-      );
-
-      // Analysis with Bearer (cookie to analysis may also be blocked)
-      const matters = await page.evaluate(async () => {
-        const tok = sessionStorage.getItem("casesifter_session_token") || "";
-        const res = await fetch("https://casesifter-alex-analysis.onrender.com/api/v1/matters", {
+    const apiResult = await page.evaluate(
+      async ({ email, password }) => {
+        const res = await fetch("/v1/login", {
+          method: "POST",
           credentials: "include",
           headers: {
             Accept: "application/json",
-            ...(tok ? { Authorization: `Bearer ${tok}` } : {}),
+            "Content-Type": "application/json",
+            "X-Casesifter-Accept-Bearer": "1",
           },
+          body: JSON.stringify({ email, password }),
         });
-        return { status: res.status };
-      });
-      record(
-        "4. Analysis matters with Bearer/cookie",
-        matters.status >= 200 && matters.status < 300,
-        `http=${matters.status}`
-      );
-    } else {
-      await page.locator(emailSel).first().fill(EMAIL);
-      await page.locator(passSel).first().fill(PW);
-      await page.getByRole("button", { name: /sign in|log in|continue/i }).first().click();
-      await page.waitForTimeout(4000);
-      const state = await page.evaluate(async () => {
-        const tok = sessionStorage.getItem("casesifter_session_token") || "";
-        const ent = await fetch("/v1/entitlement", {
+        const data = await res.json().catch(() => ({}));
+        if (data?.token) {
+          sessionStorage.setItem("casesifter_session_token", data.token);
+          sessionStorage.setItem("casesifter_signed_in", "1");
+          sessionStorage.setItem("casesifter_email", email);
+        }
+        if (data?.analysis_code) {
+          try {
+            await fetch("https://casesifter-alex-analysis.onrender.com/api/v1/session/accept", {
+              method: "POST",
+              credentials: "include",
+              headers: { Accept: "application/json", "Content-Type": "application/json" },
+              body: JSON.stringify({ code: data.analysis_code }),
+            });
+          } catch {
+            /* analysis cookie best-effort; Bearer covers auth */
+          }
+        }
+        const cookieOnly = await fetch("/v1/entitlement", {
+          credentials: "include",
+          headers: { Accept: "application/json" },
+        });
+        const withBearer = await fetch("/v1/entitlement", {
           credentials: "include",
           headers: {
             Accept: "application/json",
-            ...(tok ? { Authorization: `Bearer ${tok}` } : {}),
+            ...(data?.token ? { Authorization: `Bearer ${data.token}` } : {}),
           },
         });
-        const body = await ent.json().catch(() => ({}));
+        const entBody = await withBearer.json().catch(() => ({}));
         return {
-          entStatus: ent.status,
-          active: body?.active,
-          bearerStored: Boolean(tok),
-          hint: sessionStorage.getItem("casesifter_signed_in") === "1",
+          loginStatus: res.status,
+          hasToken: Boolean(data?.token),
+          hasAnalysisCode: Boolean(data?.analysis_code),
+          cookieOnlyStatus: cookieOnly.status,
+          entStatus: withBearer.status,
+          active: entBody?.active,
+          bearerStored: Boolean(sessionStorage.getItem("casesifter_session_token")),
         };
+      },
+      { email: EMAIL, password: PW }
+    );
+    sameOriginLogin = true;
+    loginHadToken = apiResult.hasToken;
+    const pass =
+      apiResult.loginStatus === 200 &&
+      apiResult.entStatus === 200 &&
+      apiResult.active === true &&
+      (apiResult.cookieOnlyStatus === 200 || apiResult.hasToken);
+    record(
+      "3. Login under 3P-cookie strip → entitlement",
+      pass,
+      `login=${apiResult.loginStatus} cookieOnly=${apiResult.cookieOnlyStatus} ent=${apiResult.entStatus} token=${apiResult.hasToken} analysis_code=${apiResult.hasAnalysisCode} active=${apiResult.active}`
+    );
+
+    const matters = await page.evaluate(async () => {
+      const tok = sessionStorage.getItem("casesifter_session_token") || "";
+      const res = await fetch("https://casesifter-alex-analysis.onrender.com/api/v1/matters", {
+        credentials: "include",
+        headers: {
+          Accept: "application/json",
+          ...(tok ? { Authorization: `Bearer ${tok}` } : {}),
+        },
       });
-      record(
-        "3. Login under 3P-cookie strip → entitlement",
-        state.entStatus === 200 && (state.active === true || state.bearerStored || state.hint),
-        `ent=${state.entStatus} active=${state.active} bearer=${state.bearerStored} hint=${state.hint}`
-      );
-      record("4. Analysis matters with Bearer/cookie", true, "skipped-ui-path-covered-by-api");
-    }
+      return { status: res.status };
+    });
+    record(
+      "4. Analysis matters with Bearer/cookie",
+      matters.status >= 200 && matters.status < 300,
+      `http=${matters.status}`
+    );
   } catch (e) {
     record("3. Login under 3P-cookie strip → entitlement", false, String(e.message || e));
   }
