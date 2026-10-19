@@ -28,6 +28,9 @@ import {
   createSeatInvite,
   revokeSeatInvite,
   setMemberRole,
+  removeOrgMember,
+  revokeMemberSessions,
+  revokeFirmSessions,
   updateCase,
   loginCloud,
   loginMfaCloud,
@@ -73,6 +76,12 @@ import {
   rowClearance,
 } from "./scanChecks.js";
 import { localCacheAdapter } from "./storage/localCache.js";
+import {
+  buildAppHref,
+  parseAppRoute,
+  parseNextTarget,
+  writeAppHref,
+} from "./appRoute.js";
 
 const STAGES = [
   ["queued", "Queued"],
@@ -550,12 +559,18 @@ function SearchField({ value, onChange, placeholder, autoFocus, onKeyDown }) {
 }
 
 export default function App() {
-  // Hosted soft-launch: land on Account until a firm session exists (no case list flash).
-  const [view, setView] = useState(() => (isHostedAnalysis() ? "account" : "cases")); // cases | case | report | account | admin
+  // Restore view/matter from the URL so refresh and deep links survive entitlement boot.
+  const bootRoute = useMemo(() => parseAppRoute(), []);
+  const [view, setView] = useState(() => {
+    if (bootRoute.view === "case" || bootRoute.view === "report") return bootRoute.view;
+    if (bootRoute.view === "account" || bootRoute.view === "admin") return bootRoute.view;
+    // Hosted bare `/`: wait for entitlement (avoid case-list flash for signed-out users).
+    return isHostedAnalysis() ? "boot" : "cases";
+  }); // boot | cases | case | report | account | admin
   const [cases, setCases] = useState([]);
-  const [caseId, setCaseId] = useState(null);
+  const [caseId, setCaseId] = useState(() => bootRoute.matterId || null);
   const [caseData, setCaseData] = useState(null);
-  const [selectedDocId, setSelectedDocId] = useState(null);
+  const [selectedDocId, setSelectedDocId] = useState(() => bootRoute.docId || null);
   const [job, setJob] = useState(null);
   const [tab, setTab] = useState("summary");
   const [error, setError] = useState("");
@@ -565,6 +580,53 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [query, setQuery] = useState("");
   const checkoutTrialStarted = useRef(false);
+  const routeBootstrapped = useRef(false);
+  const applyingPopState = useRef(false);
+  const openCaseRef = useRef(null);
+  const openDocumentReportRef = useRef(null);
+  /** Last known signed-in entitlement — used so a control-plane blip does not wipe the vault. */
+  const lastSignedInRef = useRef(null);
+
+  function navigateApp(route, { replace = false, history = true } = {}) {
+    const next = {
+      view: route.view,
+      matterId: "matterId" in route ? (route.matterId ?? null) : caseId,
+      docId: "docId" in route ? (route.docId ?? null) : selectedDocId,
+      next: route.next ?? null,
+    };
+    if (route.view) setView(route.view);
+    if ("matterId" in route) {
+      setCaseId(next.matterId);
+      if (!next.matterId) {
+        setCaseData(null);
+        setSelectedDocId(null);
+        setJob(null);
+      }
+    }
+    if ("docId" in route) {
+      setSelectedDocId(next.docId);
+      if (!next.docId && route.view !== "report") setJob(null);
+    }
+    if (history && !applyingPopState.current) {
+      writeAppHref(
+        {
+          view: route.view || view,
+          matterId: next.matterId,
+          docId: route.view === "report" ? next.docId : null,
+          next: next.next,
+        },
+        { replace }
+      );
+    }
+  }
+
+  function goCases({ replace = false } = {}) {
+    setBusy(false);
+    setQuery("");
+    setSelectedDocId(null);
+    setJob(null);
+    navigateApp({ view: "cases", matterId: null, docId: null }, { replace });
+  }
 
   function markAnalysisOffline(err) {
     if (!isHostedAnalysis() || !isAnalysisUnreachableError(err)) return false;
@@ -620,9 +682,11 @@ export default function App() {
 
   async function refreshEntitlement() {
     try {
-      setEntitlement(await getEntitlement());
+      const next = await getEntitlement();
+      setEntitlement(next);
+      if (next?.hasSession) lastSignedInRef.current = next;
     } catch {
-      setEntitlement(null);
+      // Never null out a good session on a transient failure — that hides Cases.
     }
   }
 
@@ -637,29 +701,130 @@ export default function App() {
     })();
   }, []);
 
-  // After entitlement resolves: load cases only when allowed.
+  // Browser back/forward: restore view from the URL without clobbering history.
+  useEffect(() => {
+    function onPopState() {
+      const route = parseAppRoute();
+      applyingPopState.current = true;
+      setView(route.view);
+      setCaseId(route.matterId);
+      setSelectedDocId(route.docId);
+      if (!route.matterId) {
+        setCaseData(null);
+        setJob(null);
+      } else if (entitlement?.hasSession || !isHostedAnalysis()) {
+        const open = openCaseRef.current;
+        if (open) {
+          open(route.matterId, { history: false }).then(() => {
+            if (route.docId && openDocumentReportRef.current) {
+              const doc = { id: route.docId };
+              openDocumentReportRef.current(doc, { history: false });
+            }
+          }).catch(() => {});
+        }
+      }
+      applyingPopState.current = false;
+    }
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [entitlement?.hasSession]);
+
+  // After entitlement resolves: load cases when allowed; restore matter from URL once.
   useEffect(() => {
     if (!entitlement) return;
     const hosted = isHostedAnalysis();
     const signedIn = Boolean(entitlement.hasSession);
+    // Control-plane unreachable with a prior/hint session: do not wipe the vault or bounce routes.
+    if (hosted && !signedIn && entitlement.cached) {
+      return;
+    }
     if (hosted && !signedIn) {
+      // Truly signed out (auth failure cleared the session). Keep return path for post-login.
+      const intended = parseAppRoute();
+      const returnHref = intended.matterId
+        ? buildAppHref({
+            view: intended.docId ? "report" : "case",
+            matterId: intended.matterId,
+            docId: intended.docId,
+          })
+        : intended.view === "admin" || intended.view === "cases"
+          ? buildAppHref({ view: intended.view })
+          : null;
+      // Only clear the list when we know there is no session — never on flicker.
       setCases([]);
       setCaseData(null);
       setCaseId(null);
-      setView("account");
+      setSelectedDocId(null);
+      setJob(null);
+      lastSignedInRef.current = null;
+      routeBootstrapped.current = false;
+      navigateApp(
+        {
+          view: "account",
+          matterId: null,
+          docId: null,
+          next:
+            returnHref && returnHref !== "/account" && returnHref !== "/"
+              ? returnHref
+              : intended.next,
+        },
+        { replace: true }
+      );
       return;
     }
+
+    lastSignedInRef.current = entitlement;
+
     refreshCases().catch((err) => {
       if (markAnalysisOffline(err)) return;
       const msg = String(err?.message || "Could not load cases.");
+      // Auth errors on list: soft-gate to Account without pretending Admin.
       if (/sign in/i.test(msg)) {
-        setCases([]);
-        setView("account");
+        navigateApp({ view: "account", matterId: null, docId: null }, { replace: true });
         return;
       }
       setError(msg);
     });
-  }, [entitlement?.hasSession, entitlement?.mode]);
+
+    // One-shot deep-link restore after session is confirmed (refresh / login).
+    if (routeBootstrapped.current) return;
+    routeBootstrapped.current = true;
+
+    const route = parseAppRoute();
+    const fromNext = route.view === "account" ? parseNextTarget(route.next) : null;
+    const target = fromNext || route;
+
+    if (target.view === "admin") {
+      if (entitlement.is_account_admin === true) {
+        navigateApp({ view: "admin", matterId: null, docId: null }, { replace: true });
+      } else {
+        goCases({ replace: true });
+      }
+      return;
+    }
+    if (target.view === "account" && !fromNext) {
+      navigateApp({ view: "account", matterId: null, docId: null }, { replace: true });
+      return;
+    }
+    if (target.matterId) {
+      const open = openCaseRef.current;
+      if (open) {
+        open(target.matterId, { history: "replace" }).then((data) => {
+          if (!data) return;
+          if (target.docId && openDocumentReportRef.current) {
+            openDocumentReportRef.current({ id: target.docId }, { history: "replace" });
+          }
+        });
+      }
+      return;
+    }
+    // Signed-in default for bare `/`: Cases. Never auto-open Admin.
+    if (view === "boot") {
+      goCases({ replace: true });
+    } else if (view === "cases") {
+      writeAppHref({ view: "cases" }, { replace: true });
+    }
+  }, [entitlement?.hasSession, entitlement?.mode, entitlement?.cached]);
 
   // Post-signup: ?checkout=trial → start Stripe Checkout once when billing_state is none.
   useEffect(() => {
@@ -693,7 +858,7 @@ export default function App() {
         await refreshEntitlement();
       } catch (err) {
         setError(err.message || "Could not start checkout.");
-        setView("account");
+        navigateApp({ view: "account", matterId: null, docId: null }, { replace: true });
         await refreshEntitlement();
       }
     })();
@@ -749,11 +914,12 @@ export default function App() {
     return () => clearInterval(timer);
   }, [caseData?.id, caseData?.documents, selectedDocId]);
 
-  async function openCase(id) {
+  async function openCase(id, opts = {}) {
     if (!id) {
       setError("Could not open that case (missing id).");
-      return;
+      return null;
     }
+    const historyMode = opts.history === false ? "none" : opts.history === "replace" ? "replace" : "push";
     setError("");
     setCaseId(id);
     setSelectedDocId(null);
@@ -763,18 +929,27 @@ export default function App() {
       const data = await refreshCase(id);
       setCaseData(data);
       setView("case");
+      if (historyMode !== "none" && !applyingPopState.current) {
+        writeAppHref({ view: "case", matterId: id, docId: null }, { replace: historyMode === "replace" });
+      }
+      return data;
     } catch (err) {
       if (!markAnalysisOffline(err)) {
         setError(err?.message || "Could not open that case.");
       }
+      return null;
     }
   }
+  openCaseRef.current = openCase;
 
-  async function openDocumentReport(doc) {
+  async function openDocumentReport(doc, opts = {}) {
+    if (!doc?.id) return;
+    const historyMode = opts.history === false ? "none" : opts.history === "replace" ? "replace" : "push";
+    const matter = caseId || caseData?.id;
     setSelectedDocId(doc.id);
     setTab("summary");
     if (isDesktopApp()) {
-      const report = await getDesktopReport(caseId || caseData?.id, doc.id);
+      const report = await getDesktopReport(matter, doc.id);
       if (!report) {
         setJob(null);
         setError("This document has not been scanned yet. Use Scan on the filing list.");
@@ -791,14 +966,28 @@ export default function App() {
         ephemeral: true,
       });
       setView("report");
+      if (historyMode !== "none" && !applyingPopState.current && matter) {
+        writeAppHref(
+          { view: "report", matterId: matter, docId: doc.id },
+          { replace: historyMode === "replace" }
+        );
+      }
       return;
     }
+    const syncReportUrl = () => {
+      if (historyMode !== "none" && !applyingPopState.current && matter) {
+        writeAppHref(
+          { view: "report", matterId: matter, docId: doc.id },
+          { replace: historyMode === "replace" }
+        );
+      }
+    };
     // Hosted matter memory: prefer persisted report, then live job.
     try {
       const { getMatterDocumentReport } = await import("./api");
       if (doc.has_report || !doc.scan_job_id) {
         try {
-          const report = await getMatterDocumentReport(caseId || caseData?.id, doc.id);
+          const report = await getMatterDocumentReport(matter, doc.id);
           setJob({
             job_id: doc.scan_job_id || doc.id,
             status: "complete",
@@ -811,6 +1000,7 @@ export default function App() {
             persist_facts: true,
           });
           setView("report");
+          syncReportUrl();
           return;
         } catch {
           /* fall through to job */
@@ -827,7 +1017,9 @@ export default function App() {
     const progress = await getJob(doc.scan_job_id, { includeReport: true });
     setJob(progress);
     setView("report");
+    syncReportUrl();
   }
+  openDocumentReportRef.current = openDocumentReport;
 
   const activeCases = useMemo(() => cases.filter((item) => !item.archived_at), [cases]);
   const archivedCases = useMemo(() => cases.filter((item) => item.archived_at), [cases]);
@@ -850,9 +1042,7 @@ export default function App() {
     try {
       await archiveCase(item.id);
       if (caseId === item.id) {
-        setView("cases");
-        setCaseId(null);
-        setCaseData(null);
+        goCases({ replace: true });
       }
       await refreshCases();
     } catch (err) {
@@ -885,10 +1075,7 @@ export default function App() {
     try {
       await deleteCase(item.id);
       if (caseId === item.id) {
-        setView("cases");
-        setCaseId(null);
-        setCaseData(null);
-        setJob(null);
+        goCases({ replace: true });
       }
       await refreshCases();
     } catch (err) {
@@ -906,11 +1093,7 @@ export default function App() {
     try {
       for (const id of ids) {
         await archiveCase(id);
-        if (caseId === id) {
-          setView("cases");
-          setCaseId(null);
-          setCaseData(null);
-        }
+        if (caseId === id) goCases({ replace: true });
       }
       await refreshCases();
     } catch (err) {
@@ -943,12 +1126,7 @@ export default function App() {
     try {
       for (const id of ids) {
         await deleteCase(id);
-        if (caseId === id) {
-          setView("cases");
-          setCaseId(null);
-          setCaseData(null);
-          setJob(null);
-        }
+        if (caseId === id) goCases({ replace: true });
       }
       await refreshCases();
     } catch (err) {
@@ -965,12 +1143,12 @@ export default function App() {
   async function handleNewCaseIntent() {
     if (!signedIn) {
       setError("");
-      setView("account");
+      navigateApp({ view: "account", matterId: null, docId: null });
       return false;
     }
     if (!canCreateCase) {
       setError("");
-      setView("account");
+      navigateApp({ view: "account", matterId: null, docId: null });
       if (billingState === "none") {
         try {
           const session = await startCheckout(true, 1);
@@ -1014,7 +1192,7 @@ export default function App() {
           onClick={() => {
             setError("");
             refreshEntitlement();
-            setView("account");
+            navigateApp({ view: "account", matterId: null, docId: null });
           }}
         >
           Start 14-day trial
@@ -1035,7 +1213,7 @@ export default function App() {
           className="status-dot clickable"
           onClick={() => {
             setError("");
-            setView("account");
+            navigateApp({ view: "account", matterId: null, docId: null });
           }}
         >
           Sign in
@@ -1049,13 +1227,23 @@ export default function App() {
         onClick={() => {
           setError("");
           refreshEntitlement();
-          setView("account");
+          navigateApp({ view: "account", matterId: null, docId: null });
         }}
       >
         {billingState === "past_due" ? "Past due" : "No active plan"}
       </button>
     );
   }
+
+  const sessionOk = Boolean(entitlement?.hasSession) || !isHostedAnalysis();
+  const showBoot =
+    view === "boot"
+    || (!entitlement && isHostedAnalysis() && view !== "account" && view !== "admin");
+  const showMatterLoading =
+    sessionOk
+    && (view === "case" || view === "report")
+    && caseId
+    && !caseData;
 
   return (
     <div className="app">
@@ -1064,13 +1252,11 @@ export default function App() {
           type="button"
           className="brand"
           onClick={() => {
-            setBusy(false);
-            setQuery("");
-            if (isHostedAnalysis() && !entitlement?.hasSession) {
-              setView("account");
+            if (isHostedAnalysis() && entitlement && !entitlement.hasSession && !entitlement.cached) {
+              navigateApp({ view: "account", matterId: null, docId: null });
               return;
             }
-            setView("cases");
+            goCases();
           }}
         >
           <div className="seal">CS</div>
@@ -1079,7 +1265,7 @@ export default function App() {
             <p>Find what matters in the record.</p>
           </div>
         </button>
-        {(entitlement?.hasSession || !isHostedAnalysis()) ? (
+        {sessionOk ? (
         <div className="mast-search">
           <SearchField
             value={query}
@@ -1118,30 +1304,34 @@ export default function App() {
           </div>
         )}
         <nav className="mast-nav">
-          {(entitlement?.hasSession || !isHostedAnalysis()) ? (
-            <button type="button" className={view !== "account" && view !== "admin" ? "on" : ""} onClick={() => { setBusy(false); setView("cases"); }}>
+          {sessionOk ? (
+            <button
+              type="button"
+              className={view !== "account" && view !== "admin" && view !== "boot" ? "on" : ""}
+              onClick={() => goCases()}
+            >
               Cases
             </button>
           ) : null}
           <button
             type="button"
-            className={view === "account" || (isHostedAnalysis() && !entitlement?.hasSession) ? "on" : ""}
+            className={view === "account" || (isHostedAnalysis() && entitlement && !entitlement.hasSession && !entitlement.cached) ? "on" : ""}
             onClick={() => {
               // Account talks to the control plane; drop leftover case/analysis noise.
               setError("");
               refreshEntitlement();
-              setView("account");
+              navigateApp({ view: "account", matterId: null, docId: null });
             }}
           >
             Account
           </button>
-          {entitlement?.hasSession && (entitlement?.is_account_admin !== false) ? (
+          {entitlement?.hasSession && entitlement?.is_account_admin === true ? (
             <button
               type="button"
               className={view === "admin" ? "on" : ""}
               onClick={() => {
                 setError("");
-                setView("admin");
+                navigateApp({ view: "admin", matterId: null, docId: null });
               }}
             >
               Admin
@@ -1173,7 +1363,13 @@ export default function App() {
         );
       })()}
 
-      {view === "cases" && (entitlement?.hasSession || !isHostedAnalysis()) && (
+      {showBoot && (
+        <div className="card">
+          <p>Loading your firm session…</p>
+        </div>
+      )}
+
+      {view === "cases" && sessionOk && (
         <CasesPage
           cases={filteredActive}
           archived={filteredArchived}
@@ -1206,12 +1402,18 @@ export default function App() {
         />
       )}
 
-      {view === "case" && caseData && (entitlement?.hasSession || !isHostedAnalysis()) && (
+      {showMatterLoading && (
+        <div className="card">
+          <p>Opening matter…</p>
+        </div>
+      )}
+
+      {view === "case" && caseData && sessionOk && (
         <CaseWorkspace
           caseData={caseData}
           busy={busy}
           entitlement={entitlement}
-          onBack={() => setView("cases")}
+          onBack={() => goCases()}
           onRefresh={() => refreshCase(caseData.id)}
           onError={setError}
           onOpenReport={openDocumentReport}
@@ -1222,10 +1424,21 @@ export default function App() {
         />
       )}
 
-      {view === "report" && (entitlement?.hasSession || !isHostedAnalysis()) && (
+      {view === "report" && sessionOk && (
         <>
           <div className="crumb-bar">
-            <button className="text-link" type="button" onClick={() => setView("case")}>
+            <button
+              className="text-link"
+              type="button"
+              onClick={() => {
+                const id = caseId || caseData?.id;
+                if (id) {
+                  navigateApp({ view: "case", matterId: id, docId: null });
+                } else {
+                  goCases();
+                }
+              }}
+            >
               ← Back to case
             </button>
           </div>
@@ -1273,6 +1486,10 @@ export default function App() {
           entitlement={entitlement}
           onError={setError}
           onRefresh={refreshEntitlement}
+          onOpenAccount={() => {
+            setError("");
+            navigateApp({ view: "account", matterId: null, docId: null });
+          }}
         />
       )}
     </div>
@@ -4879,9 +5096,17 @@ function accessActionLabel(action) {
     "2fa.recovery_used": "Used a recovery code",
     "session.revoke": "Revoked a session",
     "session.revoke_all": "Revoked other sessions",
+    "session.revoke_member": "Revoked a member's sessions",
+    "session.revoke_firm": "Revoked firm-wide sessions",
     "admin.settings_view": "Opened admin overview",
     "admin.settings_update": "Updated admin settings",
     "admin.overview": "Opened firm admin",
+    "admin.invite": "Invited a seat",
+    "admin.invite_revoke": "Revoked a seat invite",
+    "admin.role_change": "Changed a member role",
+    "admin.member_remove": "Removed a member",
+    "firm.member_remove": "Removed a firm member",
+    "firm.member_join": "Member joined the firm",
     "firm.settings_update": "Updated firm settings",
     "matter.list": "Listed matters",
     "matter.view": "Opened a matter",
@@ -5074,10 +5299,12 @@ function SecurityPanel({ entitlement, onRefresh, onError, authStatus }) {
   );
 }
 
-function AdminPanel({ entitlement, onError, onRefresh }) {
+function AdminPanel({ entitlement, onError, onRefresh, onOpenAccount }) {
   const [overview, setOverview] = useState(null);
   const [firm, setFirm] = useState(null);
+  const [matterAudit, setMatterAudit] = useState([]);
   const [loadError, setLoadError] = useState("");
+  const [forbidden, setForbidden] = useState(false);
   const [working, setWorking] = useState("");
   const [firmName, setFirmName] = useState("");
   const [persistFacts, setPersistFacts] = useState(true);
@@ -5086,25 +5313,46 @@ function AdminPanel({ entitlement, onError, onRefresh }) {
   const [inviteRole, setInviteRole] = useState("member");
   const [inviteLink, setInviteLink] = useState("");
 
+  const myRole = (
+    entitlement?.account_role
+    || overview?.account?.role
+    || (entitlement?.is_account_admin ? "owner" : "member")
+  ).toLowerCase();
+  const isOwner = myRole === "owner";
+  const isAdmin = myRole === "owner" || myRole === "admin";
+
+  async function reloadAdmin() {
+    const [cp, fm, access] = await Promise.all([
+      fetchAdminOverview(),
+      fetchFirmAdminOverview().catch(() => null),
+      listAccessLog().catch(() => ({ matter_events: [] })),
+    ]);
+    setOverview(cp);
+    setFirm(fm);
+    setMatterAudit(access.matter_events || []);
+    if (fm?.firm) {
+      setFirmName(fm.firm.name || "");
+      setPersistFacts(Boolean(fm.firm.persist_facts));
+      setStoreSnippets(Boolean(fm.firm.store_snippets !== false));
+    }
+    return cp;
+  }
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      if (entitlement?.hasSession && entitlement?.is_account_admin !== true) {
+        setForbidden(true);
+        setLoadError("Firm admin access is required. Ask an owner or admin, or use Account for your personal security settings.");
+        return;
+      }
       try {
-        const [cp, fm] = await Promise.all([
-          fetchAdminOverview(),
-          fetchFirmAdminOverview().catch(() => null),
-        ]);
-        if (cancelled) return;
-        setOverview(cp);
-        setFirm(fm);
-        if (fm?.firm) {
-          setFirmName(fm.firm.name || "");
-          setPersistFacts(Boolean(fm.firm.persist_facts));
-          setStoreSnippets(Boolean(fm.firm.store_snippets !== false));
-        }
+        await reloadAdmin();
       } catch (err) {
         if (cancelled) return;
         const msg = err.message || "Could not load admin overview.";
+        const denied = /403|forbidden|admin access/i.test(msg);
+        setForbidden(denied);
         setLoadError(msg);
         onError(msg);
       }
@@ -5126,11 +5374,21 @@ function AdminPanel({ entitlement, onError, onRefresh }) {
     }
   }
 
-  if (loadError && !overview) {
+  if (forbidden || (loadError && !overview)) {
     return (
       <div className="card">
-        <h2 className="serif">Admin</h2>
-        <p className="footnote">{loadError}</p>
+        <p className="kicker">Firm admin</p>
+        <h2 className="serif" style={{ marginTop: 4 }}>Admin</h2>
+        <p className="footnote">
+          {forbidden
+            ? "Permission denied. Only firm owners and admins can open this panel."
+            : loadError}
+        </p>
+        {onOpenAccount ? (
+          <button className="btn secondary" type="button" onClick={onOpenAccount}>
+            Open Account
+          </button>
+        ) : null}
       </div>
     );
   }
@@ -5147,8 +5405,11 @@ function AdminPanel({ entitlement, onError, onRefresh }) {
   const security = overview.security || {};
   const sessions = overview.sessions || [];
   const audit = overview.audit || [];
+  const users = overview.users || [];
+  const invites = overview.invites || [];
   const jobs = firm?.jobs || null;
-  const members = firm?.members || [];
+  const ownerCount = users.filter((u) => (u.role || "").toLowerCase() === "owner").length;
+  const myEmail = (account.email || entitlement?.email || "").toLowerCase();
 
   return (
     <div className="card">
@@ -5159,57 +5420,118 @@ function AdminPanel({ entitlement, onError, onRefresh }) {
       </p>
       <div className="role-legend">
         <p className="footnote" style={{ margin: 0 }}>
-          <strong>Owner / Admin</strong> — Admin tab, firm settings, firm matter access log, seat overview.
+          <strong>Owner</strong> — seats, roles (including admin), firm-wide session revoke, billing seats.
+          {" "}
+          <strong>Admin</strong> — invite members, firm settings, matter access log, revoke member sessions.
           {" "}
           <strong>Member</strong> — cases and scans only; Account shows personal sign-in log and 2FA.
-          {" "}
-          Platform sales token (<code>CONTROL_ADMIN_TOKEN</code>) is separate and cannot read firm files.
         </p>
       </div>
 
-      <h3 className="serif" style={{ marginBottom: 4, marginTop: 20 }}>Account & seats</h3>
-      <p>
+      <h3 className="serif" style={{ marginBottom: 4, marginTop: 20 }}>Firm overview</h3>
+      <p className="footnote" style={{ marginTop: 0 }}>
+        {firm?.firm?.name || firmName || "Firm"}
+        {" · "}
         {account.email || entitlement?.email}
         {account.role ? ` · ${account.role}` : ""}
+        {account.plan ? ` · plan ${account.plan}` : ""}
+        {account.billing_state ? ` · billing ${account.billing_state}` : ""}
         {account.seats != null
           ? ` · ${account.seats_used != null ? `${account.seats_used}/` : ""}${account.seats} seat${account.seats === 1 ? "" : "s"}`
           : " · seats from billing"}
         {account.support_code ? ` · ${account.support_code}` : ""}
       </p>
       <p className="footnote">{overview.message}</p>
-      <ul className="footnote" style={{ paddingLeft: 18 }}>
-        {(overview.users || []).map((u) => (
-          <li key={u.user_id || u.email}>
-            {u.email} · {u.role || "owner"}
-            {u.totp_enabled ? " · 2FA on" : ""}
-            {u.oidc_linked ? " · SSO" : ""}
-            {u.user_id && u.email !== (account.email || entitlement?.email) ? (
-              <>
+
+      <h3 className="serif" style={{ marginBottom: 4, marginTop: 20 }}>Members</h3>
+      {users.length === 0 ? (
+        <p className="footnote">No members listed yet.</p>
+      ) : (
+        <ul className="footnote" style={{ paddingLeft: 18 }}>
+          {users.map((u) => {
+            const role = (u.role || "member").toLowerCase();
+            const isSelf = (u.email || "").toLowerCase() === myEmail;
+            const canEditRole = Boolean(u.user_id) && (
+              isOwner
+              || (isAdmin && role === "member" && !isSelf)
+            );
+            const canRemove = Boolean(u.user_id) && !isSelf && (
+              isOwner
+              || (isAdmin && role === "member")
+            ) && !(role === "owner" && ownerCount <= 1);
+            return (
+              <li key={u.user_id || u.email}>
+                {u.email}
                 {" · "}
-                <select
-                  aria-label={`Role for ${u.email}`}
-                  value={u.role || "member"}
-                  disabled={Boolean(working)}
-                  onChange={(e) => guard(`role-${u.user_id}`, async () => {
-                    await setMemberRole(u.user_id, e.target.value);
-                    const fresh = await fetchAdminOverview();
-                    setOverview(fresh);
-                  })}
-                >
-                  <option value="owner">owner</option>
-                  <option value="admin">admin</option>
-                  <option value="member">member</option>
-                </select>
-              </>
-            ) : null}
-          </li>
-        ))}
-      </ul>
-      {(overview.invites || []).length > 0 ? (
-        <ul className="footnote" style={{ paddingLeft: 18, marginTop: 8 }}>
-          {(overview.invites || []).map((inv) => (
+                {canEditRole ? (
+                  <select
+                    aria-label={`Role for ${u.email}`}
+                    value={role}
+                    disabled={Boolean(working)}
+                    onChange={(e) => guard(`role-${u.user_id}`, async () => {
+                      await setMemberRole(u.user_id, e.target.value);
+                      await reloadAdmin();
+                      await onRefresh();
+                    })}
+                  >
+                    {isOwner ? <option value="owner">owner</option> : null}
+                    {isOwner || role === "admin" ? <option value="admin">admin</option> : null}
+                    <option value="member">member</option>
+                  </select>
+                ) : (
+                  <span>{role}{isSelf ? " (you)" : ""}</span>
+                )}
+                {u.totp_enabled ? " · 2FA on" : " · 2FA off"}
+                {u.oidc_linked ? " · SSO" : ""}
+                {u.user_id ? (
+                  <>
+                    {" · "}
+                    <button
+                      type="button"
+                      className="linkish"
+                      disabled={Boolean(working)}
+                      onClick={() => guard(`sess-${u.user_id}`, async () => {
+                        await revokeMemberSessions(u.user_id);
+                        await reloadAdmin();
+                        if (isSelf) await onRefresh();
+                      })}
+                    >
+                      Revoke sessions
+                    </button>
+                  </>
+                ) : null}
+                {canRemove ? (
+                  <>
+                    {" · "}
+                    <button
+                      type="button"
+                      className="linkish"
+                      disabled={Boolean(working)}
+                      onClick={() => guard(`rm-${u.user_id}`, async () => {
+                        if (!window.confirm(`Remove ${u.email} from this firm?`)) return;
+                        await removeOrgMember(u.user_id);
+                        await reloadAdmin();
+                      })}
+                    >
+                      Remove
+                    </button>
+                  </>
+                ) : null}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
+      <h3 className="serif" style={{ marginBottom: 4, marginTop: 20 }}>Pending invites</h3>
+      {invites.length === 0 ? (
+        <p className="footnote">No pending invites.</p>
+      ) : (
+        <ul className="footnote" style={{ paddingLeft: 18 }}>
+          {invites.map((inv) => (
             <li key={inv.id}>
-              Pending: {inv.email} · {inv.role}
+              {inv.email} · {inv.role}
+              {inv.expires_at ? ` · expires ${inv.expires_at}` : ""}
               {" · "}
               <button
                 type="button"
@@ -5217,8 +5539,7 @@ function AdminPanel({ entitlement, onError, onRefresh }) {
                 disabled={Boolean(working)}
                 onClick={() => guard(`rev-inv-${inv.id}`, async () => {
                   await revokeSeatInvite(inv.id);
-                  const fresh = await fetchAdminOverview();
-                  setOverview(fresh);
+                  await reloadAdmin();
                 })}
               >
                 Revoke
@@ -5226,7 +5547,7 @@ function AdminPanel({ entitlement, onError, onRefresh }) {
             </li>
           ))}
         </ul>
-      ) : null}
+      )}
       <form
         className="case-form"
         style={{ marginTop: 12 }}
@@ -5237,8 +5558,7 @@ function AdminPanel({ entitlement, onError, onRefresh }) {
             const res = await createSeatInvite(inviteEmail.trim(), inviteRole);
             setInviteEmail("");
             setInviteLink(res.invite_url || "");
-            const fresh = await fetchAdminOverview();
-            setOverview(fresh);
+            await reloadAdmin();
           });
         }}
       >
@@ -5256,7 +5576,7 @@ function AdminPanel({ entitlement, onError, onRefresh }) {
           Role
           <select value={inviteRole} onChange={(e) => setInviteRole(e.target.value)}>
             <option value="member">member</option>
-            <option value="admin">admin</option>
+            {isOwner ? <option value="admin">admin</option> : null}
           </select>
         </label>
         <button className="btn gold" type="submit" disabled={Boolean(working) || !inviteEmail.trim()}>
@@ -5268,21 +5588,27 @@ function AdminPanel({ entitlement, onError, onRefresh }) {
           Invite link (share if email was not sent): <code>{inviteLink}</code>
         </p>
       ) : null}
-      {members.length > 0 ? (
-        <p className="footnote" style={{ marginTop: 8 }}>
-          Analysis firm members: {members.map((m) => `${m.email} (${m.role})`).join(", ")}
-        </p>
-      ) : null}
 
       <h3 className="serif" style={{ marginBottom: 4, marginTop: 20 }}>Security posture</h3>
       <p className="footnote">
-        2FA: {security.totp_enabled ? "on" : "off"}
+        Your 2FA: {security.totp_enabled ? "on" : "off"}
         {" · "}
         SSO available: {security.sso_available ? "yes" : "no"}
         {" · "}
         SSO linked: {security.oidc_linked ? "yes" : "no"}
         {" · "}
         IdP MFA trusted: {security.oidc_trusts_idp_mfa ? "yes" : "no"}
+      </p>
+      <p className="footnote">
+        Manage authenticator enrollment on Account.
+        {onOpenAccount ? (
+          <>
+            {" "}
+            <button type="button" className="linkish" onClick={onOpenAccount}>
+              Open Account security
+            </button>
+          </>
+        ) : null}
       </p>
       <label className="footnote" style={{ display: "flex", gap: 8, alignItems: "center" }}>
         <input
@@ -5334,7 +5660,11 @@ function AdminPanel({ entitlement, onError, onRefresh }) {
             </button>
           </form>
         </>
-      ) : null}
+      ) : (
+        <p className="footnote" style={{ marginTop: 16 }}>
+          Hosted analysis firm settings appear here once the analysis service is reachable.
+        </p>
+      )}
 
       {jobs ? (
         <>
@@ -5365,6 +5695,9 @@ function AdminPanel({ entitlement, onError, onRefresh }) {
       ) : null}
 
       <h3 className="serif" style={{ marginBottom: 4, marginTop: 20 }}>Sessions</h3>
+      <p className="footnote" style={{ marginTop: 0 }}>
+        Your sessions below. Use member “Revoke sessions” above for another seat, or firm-wide (owner).
+      </p>
       <div className="actions" style={{ marginBottom: 8 }}>
         <button
           className="btn secondary"
@@ -5372,13 +5705,27 @@ function AdminPanel({ entitlement, onError, onRefresh }) {
           disabled={Boolean(working)}
           onClick={() => guard("revoke-others", async () => {
             await revokeOtherSessions();
-            const fresh = await fetchAdminOverview();
-            setOverview(fresh);
+            await reloadAdmin();
             await onRefresh();
           })}
         >
-          {working === "revoke-others" ? "Revoking…" : "Revoke other sessions"}
+          {working === "revoke-others" ? "Revoking…" : "Revoke my other sessions"}
         </button>
+        {isOwner ? (
+          <button
+            className="btn secondary"
+            type="button"
+            disabled={Boolean(working)}
+            onClick={() => guard("revoke-firm", async () => {
+              if (!window.confirm("Revoke all sessions for every firm member except this one?")) return;
+              await revokeFirmSessions();
+              await reloadAdmin();
+              await onRefresh();
+            })}
+          >
+            {working === "revoke-firm" ? "Revoking…" : "Revoke firm-wide sessions"}
+          </button>
+        ) : null}
       </div>
       {sessions.length === 0 ? <p className="footnote">No sessions listed.</p> : null}
       <ul className="footnote" style={{ paddingLeft: 18 }}>
@@ -5395,8 +5742,7 @@ function AdminPanel({ entitlement, onError, onRefresh }) {
                   disabled={Boolean(working)}
                   onClick={() => guard(`rev-${s.id}`, async () => {
                     await revokeAdminSession(s.id);
-                    const fresh = await fetchAdminOverview();
-                    setOverview(fresh);
+                    await reloadAdmin();
                   })}
                 >
                   Revoke
@@ -5409,16 +5755,25 @@ function AdminPanel({ entitlement, onError, onRefresh }) {
 
       <h3 className="serif" style={{ marginBottom: 4, marginTop: 20 }}>Access / audit log</h3>
       <p className="footnote" style={{ marginTop: 0 }}>
-        Auth and admin events for this account. Matter activity stays on the Account access log when you are a firm admin.
+        Auth and admin events for your account, plus firm matter activity (owner/admin).
       </p>
-      {audit.length === 0 ? <p className="footnote">No audit events yet.</p> : null}
+      {audit.length === 0 && matterAudit.length === 0 ? (
+        <p className="footnote">No audit events yet.</p>
+      ) : null}
       <ul className="footnote" style={{ paddingLeft: 18, marginBottom: 0 }}>
-        {audit.slice(0, 40).map((row, index) => (
-          <li key={`${row.at}-${row.action}-${index}`}>
-            {accessActionLabel(row.action)}
-            {row.at ? ` · ${row.at}` : ""}
-          </li>
-        ))}
+        {[
+          ...audit.map((row) => ({ ...row, source: "account" })),
+          ...matterAudit.map((row) => ({ ...row, source: "firm" })),
+        ]
+          .sort((a, b) => String(b.at || "").localeCompare(String(a.at || "")))
+          .slice(0, 50)
+          .map((row, index) => (
+            <li key={`${row.source}-${row.at}-${row.action}-${index}`}>
+              {row.source === "firm" ? "Firm · " : "Account · "}
+              {accessActionLabel(row.action)}
+              {row.at ? ` · ${row.at}` : ""}
+            </li>
+          ))}
       </ul>
     </div>
   );
