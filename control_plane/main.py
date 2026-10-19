@@ -785,9 +785,17 @@ def _client_is_desktop(request: Request) -> bool:
     return (request.headers.get("x-casesifter-client") or "").strip().lower() == "desktop"
 
 
+def _accept_bearer_in_body(request: Request) -> bool:
+    """Embedded browsers that block cross-site cookies may request the opaque session token in JSON."""
+    flag = (request.headers.get("x-casesifter-accept-bearer") or "").strip().lower()
+    return flag in {"1", "true", "yes"}
+
+
 def _include_session_token(request: Request) -> bool:
-    """Desktop and local tests still receive the token. Production browsers do not."""
+    """Desktop, local tests, and cookie-blocked browsers (Accept-Bearer) receive the token."""
     if _client_is_desktop(request):
+        return True
+    if _accept_bearer_in_body(request):
         return True
     return not _is_production()
 

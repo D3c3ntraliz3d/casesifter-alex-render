@@ -71,6 +71,50 @@ def test_login_sets_httponly_cookie_and_keeps_dev_token(client):
     assert logged.json().get("analysis_code")
 
 
+def test_production_login_returns_token_with_accept_bearer(tmp_path, monkeypatch):
+    """Cookie-blocked browsers request the opaque session token via Accept-Bearer."""
+    monkeypatch.setenv("CONTROL_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'auth.db'}")
+    monkeypatch.setenv("SESSION_SECRET", "prod-session-secret-bearer")
+    monkeypatch.delenv("AUTH_DEV_TOKENS", raising=False)
+    monkeypatch.setenv("CASESIFTER_INVITE_REQUIRED", "false")
+    monkeypatch.setenv("CASESIFTER_REQUIRE_EMAIL_VERIFY", "false")
+
+    import auth_store
+
+    auth_store.reset_auth_store_for_tests()
+    import main as mod
+
+    importlib.reload(mod)
+    mod.SESSION_SECRET = "prod-session-secret-bearer"
+    http = TestClient(mod.app)
+    su = http.post(
+        "/v1/signup",
+        json={"email": "bearer@example.com", "password": "correct-horse", "accepted_terms": True},
+    )
+    assert su.status_code == 200, su.text
+    assert not su.json().get("token")
+
+    no_hdr = http.post(
+        "/v1/login",
+        json={"email": "bearer@example.com", "password": "correct-horse"},
+    )
+    assert no_hdr.status_code == 200, no_hdr.text
+    assert not no_hdr.json().get("token")
+    assert "cs_session=" in (no_hdr.headers.get("set-cookie") or "")
+
+    with_hdr = http.post(
+        "/v1/login",
+        json={"email": "bearer@example.com", "password": "correct-horse"},
+        headers={"X-Casesifter-Accept-Bearer": "1"},
+    )
+    assert with_hdr.status_code == 200, with_hdr.text
+    assert with_hdr.json().get("token")
+    assert with_hdr.json().get("analysis_code")
+    auth_store.reset_auth_store_for_tests()
+
+
 def test_short_password_rejected(client):
     http, _mod = client
     res = http.post(

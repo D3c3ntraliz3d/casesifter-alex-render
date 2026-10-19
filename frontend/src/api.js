@@ -4,9 +4,15 @@ import { isAllowedStripeUrl } from "./stripeUrl.js";
 const jsonHeaders = { Accept: "application/json" };
 
 /** Soft-launch hosted URLs (Vite build-time). Fallbacks keep local + marketing signup working. */
-const CONTROL_PLANE_URL = String(
-  import.meta.env.VITE_CONTROL_PLANE_URL || "https://casesifter-control.onrender.com"
-).replace(/\/$/, "");
+const CONTROL_SAME_ORIGIN =
+  import.meta.env.VITE_CONTROL_SAME_ORIGIN === "1" ||
+  import.meta.env.VITE_CONTROL_SAME_ORIGIN === "true";
+// Empty / same-origin: SPA hits relative /v1 so Set-Cookie is first-party (Render rewrite or nginx).
+const CONTROL_PLANE_URL = CONTROL_SAME_ORIGIN
+  ? ""
+  : String(
+      import.meta.env.VITE_CONTROL_PLANE_URL || "https://casesifter-control.onrender.com"
+    ).replace(/\/$/, "");
 const ANALYSIS_API_URL = String(import.meta.env.VITE_ANALYSIS_API_URL || "").replace(/\/$/, "");
 const ANALYSIS_API_KEY = String(import.meta.env.VITE_ANALYSIS_API_KEY || "").trim();
 
@@ -19,8 +25,24 @@ function desktop() {
 }
 
 function getSessionToken() {
-  // Browser sessions are HttpOnly cookies. Never read a bearer out of storage.
-  return "";
+  // Prefer HttpOnly cookie (credentials: include). Opaque bearer in sessionStorage is the
+  // fallback when embedded browsers block cross-site Set-Cookie.
+  try {
+    return sessionStorage.getItem(SESSION_TOKEN_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+function rememberSessionToken(token) {
+  try {
+    const t = String(token || "").trim();
+    if (t) sessionStorage.setItem(SESSION_TOKEN_KEY, t);
+    else sessionStorage.removeItem(SESSION_TOKEN_KEY);
+    localStorage.removeItem(SESSION_TOKEN_KEY);
+  } catch {
+    /* private mode */
+  }
 }
 
 function rememberEmail(email) {
@@ -62,6 +84,7 @@ function clearSession() {
   try {
     sessionStorage.removeItem(SESSION_FLAG);
     sessionStorage.removeItem(SESSION_EMAIL_KEY);
+    sessionStorage.removeItem(SESSION_TOKEN_KEY);
     localStorage.removeItem(SESSION_TOKEN_KEY);
     localStorage.removeItem(SESSION_EMAIL_KEY);
   } catch {
@@ -129,10 +152,15 @@ export async function exchangeSessionCode(code) {
   const res = await fetch(controlUrl("/v1/session/exchange"), {
     method: "POST",
     credentials: "include",
-    headers: { ...jsonHeaders, "Content-Type": "application/json" },
+    headers: {
+      ...jsonHeaders,
+      "Content-Type": "application/json",
+      "X-Casesifter-Accept-Bearer": "1",
+    },
     body: JSON.stringify({ code }),
   });
   const data = await readJson(res);
+  if (data?.token) rememberSessionToken(data.token);
   if (data?.analysis_code) await acceptAnalysisSession(data.analysis_code);
   markSignedIn(data?.entitlement?.email);
   return data;
@@ -156,7 +184,9 @@ export function openCheckoutUrl(url) {
 }
 
 function controlUrl(path) {
-  return `${CONTROL_PLANE_URL}${path.startsWith("/") ? path : `/${path}`}`;
+  const p = path.startsWith("/") ? path : `/${path}`;
+  if (!CONTROL_PLANE_URL) return p;
+  return `${CONTROL_PLANE_URL}${p}`;
 }
 
 /** Analysis/API base: remote Render URL when set, else same-origin (Vite proxy / nginx). */
@@ -238,10 +268,24 @@ function entitlementFromLogin(data, fallbackEmail) {
   };
 }
 
-async function sessionCookieWorks() {
+/** True when cookie and/or stored bearer can load entitlement. */
+async function sessionAuthWorks() {
   try {
     const res = await fetch(controlUrl("/v1/entitlement"), {
       headers: controlHeaders(),
+      credentials: "include",
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Cookie-only probe (no Authorization) — detects third-party cookie block. */
+async function sessionCookieAloneWorks() {
+  try {
+    const res = await fetch(controlUrl("/v1/entitlement"), {
+      headers: { ...jsonHeaders },
       credentials: "include",
     });
     return res.ok;
@@ -1385,8 +1429,9 @@ export async function getEntitlement() {
 function controlUnreachableError(cause) {
   const raw = String(cause?.message || cause || "");
   if (/failed to fetch|networkerror|load failed/i.test(raw)) {
+    const where = CONTROL_PLANE_URL || "same-origin /v1";
     return new Error(
-      `Control plane unreachable (${CONTROL_PLANE_URL}). Confirm VITE_CONTROL_PLANE_URL at build time and that casesifter-control is live.`
+      `Control plane unreachable (${where}). Confirm VITE_CONTROL_PLANE_URL / VITE_CONTROL_SAME_ORIGIN at build time and that casesifter-control is live.`
     );
   }
   return cause instanceof Error ? cause : new Error(raw || "Control plane request failed.");
@@ -1420,7 +1465,11 @@ export async function confirmPasswordReset(token, password) {
     res = await fetch(controlUrl("/v1/password-reset/confirm"), {
       method: "POST",
       credentials: "include",
-      headers: { ...jsonHeaders, "Content-Type": "application/json" },
+      headers: {
+        ...jsonHeaders,
+        "Content-Type": "application/json",
+        "X-Casesifter-Accept-Bearer": "1",
+      },
       body: JSON.stringify({ token, password }),
     });
   } catch (err) {
@@ -1435,27 +1484,27 @@ export async function confirmPasswordReset(token, password) {
       message: data.message || "Password updated. Enter your authenticator code.",
     };
   }
-  if (data?.analysis_code) await acceptAnalysisSession(data.analysis_code);
-  if (data?.email || data?.entitlement?.email) {
-    markSignedIn(data.email || data.entitlement.email);
-  }
-  return getEntitlement();
+  return finishBrowserLogin(data, data?.email || data?.entitlement?.email);
 }
 
 async function finishBrowserLogin(data, email) {
+  if (data?.token) rememberSessionToken(data.token);
   if (data?.analysis_code) {
     try {
       await acceptAnalysisSession(data.analysis_code);
     } catch {
-      /* analysis cookie is best-effort; control session is the source of truth */
+      /* analysis cookie is best-effort; control Bearer covers analysis auth */
     }
   }
   const addr = data?.entitlement?.email || email;
   markSignedIn(addr);
 
   const fromLogin = entitlementFromLogin(data, addr);
-  const cookieOk = await sessionCookieWorks();
-  if (cookieOk) {
+  if (await sessionAuthWorks()) {
+    // Cookie alone is enough; drop XSS-visible bearer when first-party cookie stuck.
+    if ((await sessionCookieAloneWorks()) && getSessionToken()) {
+      rememberSessionToken("");
+    }
     try {
       return await getEntitlement();
     } catch {
@@ -1464,9 +1513,8 @@ async function finishBrowserLogin(data, email) {
     }
   }
 
-  // Login POST succeeded but Set-Cookie did not stick (third-party / partitioned
-  // cookie block in embedded browsers). Prefer a same-window handoff code when
-  // control minted one; otherwise surface a clear cookies-blocked error.
+  // Login POST succeeded but neither cookie nor bearer stuck. Prefer a same-window
+  // handoff code when control minted one (sets cookie + optional Accept-Bearer token).
   const handoff = String(data?.handoff_code || "").trim();
   if (handoff && typeof window !== "undefined") {
     try {
@@ -1474,15 +1522,21 @@ async function finishBrowserLogin(data, email) {
       url.searchParams.set("cs_code", handoff);
       window.history.replaceState({}, "", `${url.pathname}${url.search}`);
       await exchangeSessionCode(handoff);
-      if (await sessionCookieWorks()) return getEntitlement();
+      if (await sessionAuthWorks()) {
+        if ((await sessionCookieAloneWorks()) && getSessionToken()) {
+          rememberSessionToken("");
+        }
+        return getEntitlement();
+      }
     } catch {
       /* fall through to cookies-blocked message */
     }
   }
 
+  // Surface only when both cookie AND bearer failed.
   throw new Error(
-    "Sign-in succeeded, but this browser blocked the cross-site session cookie. " +
-      "Open this app in a normal browser tab (not an embedded/automated browser) and sign in again."
+    "Sign-in succeeded, but this browser blocked the session cookie and no bearer " +
+      "handoff was available. Open this app in a normal browser tab and sign in again."
   );
 }
 
@@ -1498,7 +1552,11 @@ export async function loginCloud(email, password) {
     res = await fetch(controlUrl("/v1/login"), {
       method: "POST",
       credentials: "include",
-      headers: { ...jsonHeaders, "Content-Type": "application/json" },
+      headers: {
+        ...jsonHeaders,
+        "Content-Type": "application/json",
+        "X-Casesifter-Accept-Bearer": "1",
+      },
       body: JSON.stringify({ email: addr, password }),
     });
   } catch (err) {
@@ -1522,7 +1580,11 @@ export async function loginMfaCloud(mfaToken, code) {
     res = await fetch(controlUrl("/v1/login/mfa"), {
       method: "POST",
       credentials: "include",
-      headers: { ...jsonHeaders, "Content-Type": "application/json" },
+      headers: {
+        ...jsonHeaders,
+        "Content-Type": "application/json",
+        "X-Casesifter-Accept-Bearer": "1",
+      },
       body: JSON.stringify({ mfa_token: mfaToken, code }),
     });
   } catch (err) {
@@ -1785,13 +1847,15 @@ export async function verifyEmailCloud(token) {
   const res = await fetch(controlUrl("/v1/verify-email"), {
     method: "POST",
     credentials: "include",
-    headers: { ...jsonHeaders, "Content-Type": "application/json" },
+    headers: {
+      ...jsonHeaders,
+      "Content-Type": "application/json",
+      "X-Casesifter-Accept-Bearer": "1",
+    },
     body: JSON.stringify({ token }),
   });
   const data = await readJson(res);
-  if (data?.analysis_code) await acceptAnalysisSession(data.analysis_code);
-  markSignedIn(data?.entitlement?.email);
-  return getEntitlement();
+  return finishBrowserLogin(data, data?.entitlement?.email);
 }
 
 export async function reportProblem(note) {
