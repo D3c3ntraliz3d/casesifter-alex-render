@@ -589,8 +589,14 @@ _ACCOUNT_AUDIT_ACTIONS = (
     "2fa.recovery_used",
     "session.revoke",
     "session.revoke_all",
+    "session.revoke_member",
+    "session.revoke_firm",
     "admin.settings_view",
     "admin.settings_update",
+    "admin.invite",
+    "admin.invite_revoke",
+    "admin.role_change",
+    "admin.member_remove",
 )
 
 
@@ -786,6 +792,22 @@ def list_org_members(s: Session, org_id: str) -> list[CpUser]:
     return list(
         s.execute(select(CpUser).where(CpUser.org_id == org_id).order_by(CpUser.created_at)).scalars()
     )
+
+
+def count_org_owners(s: Session, org_id: str) -> int:
+    return sum(
+        1
+        for m in list_org_members(s, org_id)
+        if (m.account_role or "owner").strip().lower() == "owner"
+    )
+
+
+def detach_org_member(s: Session, user: CpUser) -> None:
+    """Remove a user from a shared org: solo firm + revoke all sessions."""
+    user.org_id = user.id
+    user.account_role = "owner"
+    s.add(user)
+    revoke_all_sessions_for_user(s, user.id)
 
 
 def count_org_seats_used(s: Session, org_id: str) -> int:

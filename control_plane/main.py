@@ -874,11 +874,21 @@ def _analysis_code_for(sid: str, email: str) -> str | None:
 
 
 def _session_response(email: str, user_dict: dict[str, Any], request: Request) -> JSONResponse:
+    import auth_store as auth
+
     token, sid = _issue_session_for_user(email)
     body: dict[str, Any] = {
         "entitlement": _entitlement_payload(user_dict),
         "analysis_code": _analysis_code_for(sid, email),
     }
+    # One-time code for browsers that block cross-site Set-Cookie on the login
+    # response (embedded/automated browsers). Frontend may retry via ?cs_code=.
+    try:
+        _ensure_auth_db()
+        with auth.session_scope() as s:
+            body["handoff_code"] = auth.create_exchange_code(s, sid, email)
+    except Exception:
+        pass
     if _include_session_token(request) or _internal_exchange(request):
         body["token"] = token
     response = JSONResponse(body)
@@ -2054,7 +2064,9 @@ def admin_overview(request: Request, authorization: str | None = Header(default=
                 "id": inv.id,
                 "email": inv.email,
                 "role": inv.role,
-                "expires_at": inv.expires_at,
+                "expires_at": time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(inv.expires_at or 0))
+                ),
             }
             for inv in pending
         ]
@@ -2122,6 +2134,9 @@ def admin_create_invite(
         row = s.execute(select(auth.CpUser).where(auth.CpUser.email == email)).scalar_one_or_none()
         if row is None:
             raise HTTPException(401, "Unknown user.")
+        actor_role = (row.account_role or "owner").strip().lower()
+        if role == "admin" and actor_role != "owner":
+            raise HTTPException(403, "Only the account owner can invite admins.")
         oid = auth.ensure_org_id(s, row)
         owner = auth.billing_owner(s, row)
         owner_dict = auth.user_to_dict(owner)
@@ -2207,7 +2222,7 @@ def admin_set_member_role(
     request: Request,
     authorization: str | None = Header(default=None),
 ):
-    """Assign owner/admin/member. Only the org owner may grant owner or demote another owner."""
+    """Assign owner/admin/member. Owner-only for admin/owner grants; cannot demote last owner."""
     import auth_store as auth
     from sqlalchemy import select
 
@@ -2227,12 +2242,16 @@ def admin_set_member_role(
         if target is None or auth.org_id_of(target) != oid:
             raise HTTPException(404, "Member not found.")
         actor_role = (actor_row.account_role or "owner").lower()
+        target_role = (target.account_role or "owner").lower()
+        if role in {"owner", "admin"} and actor_role != "owner":
+            raise HTTPException(403, "Only the account owner can grant owner or admin.")
+        if target_role in {"owner", "admin"} and actor_role != "owner":
+            raise HTTPException(403, "Only the account owner can change owner or admin roles.")
+        if target_role == "owner" and role != "owner":
+            if auth.count_org_owners(s, oid) <= 1:
+                raise HTTPException(400, "Cannot demote the last owner.")
         if target.id == actor_row.id and role == "member" and actor_role == "owner":
             raise HTTPException(400, "Transfer ownership to another user before leaving owner.")
-        if role == "owner" and actor_role != "owner":
-            raise HTTPException(403, "Only the account owner can transfer ownership.")
-        if (target.account_role or "").lower() == "owner" and actor_role != "owner":
-            raise HTTPException(403, "Only the account owner can change another owner's role.")
         if role == "owner":
             members = list(auth.list_org_members(s, oid))
             for m in members:
@@ -2248,6 +2267,74 @@ def admin_set_member_role(
         s.add(target)
     _record_auth(actor["email"], "admin.role_change", request, target=f"{user_id}:{role}")
     return {"ok": True, "user_id": user_id, "role": role}
+
+
+@app.delete("/v1/admin/users/{user_id}")
+def admin_remove_member(
+    user_id: str,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """Detach a seat from the org (solo account) and revoke their sessions."""
+    import auth_store as auth
+    from sqlalchemy import select
+
+    actor = _require_account_admin(authorization, request)
+    _ensure_auth_db()
+    with auth.session_scope() as s:
+        actor_row = s.execute(
+            select(auth.CpUser).where(auth.CpUser.email == actor["email"])
+        ).scalar_one_or_none()
+        if actor_row is None:
+            raise HTTPException(401, "Unknown user.")
+        oid = auth.ensure_org_id(s, actor_row)
+        target = s.get(auth.CpUser, user_id)
+        if target is None or auth.org_id_of(target) != oid:
+            raise HTTPException(404, "Member not found.")
+        if target.id == actor_row.id:
+            raise HTTPException(400, "You cannot remove yourself. Transfer ownership first.")
+        actor_role = (actor_row.account_role or "owner").lower()
+        target_role = (target.account_role or "owner").lower()
+        if target_role in {"owner", "admin"} and actor_role != "owner":
+            raise HTTPException(403, "Only the account owner can remove an owner or admin.")
+        if target_role == "owner" and auth.count_org_owners(s, oid) <= 1:
+            raise HTTPException(400, "Cannot remove the last owner.")
+        email_t = target.email
+        auth.detach_org_member(s, target)
+    _record_auth(actor["email"], "admin.member_remove", request, target=email_t)
+    return {"ok": True, "user_id": user_id}
+
+
+@app.post("/v1/admin/users/{user_id}/sessions/revoke")
+def admin_revoke_member_sessions(
+    user_id: str,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """Revoke all sessions for another org member (or self)."""
+    import auth_store as auth
+    from sqlalchemy import select
+
+    actor = _require_account_admin(authorization, request)
+    _ensure_auth_db()
+    with auth.session_scope() as s:
+        actor_row = s.execute(
+            select(auth.CpUser).where(auth.CpUser.email == actor["email"])
+        ).scalar_one_or_none()
+        if actor_row is None:
+            raise HTTPException(401, "Unknown user.")
+        oid = auth.ensure_org_id(s, actor_row)
+        target = s.get(auth.CpUser, user_id)
+        if target is None or auth.org_id_of(target) != oid:
+            raise HTTPException(404, "Member not found.")
+        except_sid = None
+        if target.id == actor_row.id:
+            user, token, _ = _session_user(authorization, request)
+            parsed = _parse_session_token(token)
+            except_sid = (parsed or {}).get("sid")
+        count = auth.revoke_all_sessions_for_user(s, target.id, except_sid=except_sid)
+    _record_auth(actor["email"], "session.revoke_member", request, target=f"{user_id}:{count}")
+    return {"ok": True, "revoked": count}
 
 
 class AdminSettingsBody(BaseModel):
@@ -2334,5 +2421,36 @@ def admin_revoke_other_sessions(
             raise HTTPException(401, "Unknown user.")
         count = auth.revoke_all_sessions_for_user(s, row.id, except_sid=current_sid)
     _record_auth(email, "session.revoke_all", request, target=str(count))
+    return {"ok": True, "revoked": count}
+
+
+@app.post("/v1/admin/sessions/revoke-firm")
+def admin_revoke_firm_sessions(
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """Owner-only: revoke all sessions for every org member except the current session."""
+    import auth_store as auth
+    from sqlalchemy import select
+
+    user, token, _ = _session_user(authorization, request)
+    if not auth.is_account_admin(user):
+        raise HTTPException(403, "Account admin access is required.")
+    email = user["email"]
+    parsed = _parse_session_token(token)
+    current_sid = (parsed or {}).get("sid")
+    _ensure_auth_db()
+    with auth.session_scope() as s:
+        row = s.execute(select(auth.CpUser).where(auth.CpUser.email == email)).scalar_one_or_none()
+        if row is None:
+            raise HTTPException(401, "Unknown user.")
+        if (row.account_role or "owner").strip().lower() != "owner":
+            raise HTTPException(403, "Only the account owner can revoke firm-wide sessions.")
+        oid = auth.ensure_org_id(s, row)
+        count = 0
+        for member in auth.list_org_members(s, oid):
+            except_sid = current_sid if member.id == row.id else None
+            count += auth.revoke_all_sessions_for_user(s, member.id, except_sid=except_sid)
+    _record_auth(email, "session.revoke_firm", request, target=str(count))
     return {"ok": True, "revoked": count}
 

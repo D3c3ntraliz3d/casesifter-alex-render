@@ -6018,29 +6018,51 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
     await onRefresh();
   }
 
-  async function startTrialSignedOut() {
-    if (!email || !email.includes("@")) throw new Error("Enter a valid work email.");
-    if (!password || password.length < 8) throw new Error("Password must be at least 8 characters.");
+  /** Prefer DOM values so browser/ChatGPT autofill works with controlled inputs. */
+  function credentialsFromForm(form) {
+    const fd = form instanceof HTMLFormElement ? new FormData(form) : null;
+    const domEmail = String(fd?.get("email") || "").trim();
+    const domPassword = String(fd?.get("password") || "");
+    const domName = String(fd?.get("name") || "").trim();
+    const domInvite = String(fd?.get("invite_code") || "").trim();
+    const nextEmail = (domEmail || email || "").trim();
+    const nextPassword = domPassword || password || "";
+    const nextName = domName || name.trim() || "";
+    const nextInvite = domInvite || inviteCode.trim() || "";
+    if (domEmail && domEmail !== email) setEmail(domEmail);
+    if (domPassword && domPassword !== password) setPassword(domPassword);
+    if (domName && domName !== name) setName(domName);
+    if (domInvite && domInvite !== inviteCode) setInviteCode(domInvite);
+    return { email: nextEmail, password: nextPassword, name: nextName, inviteCode: nextInvite };
+  }
+
+  async function startTrialSignedOut(form) {
+    const creds = credentialsFromForm(form);
+    if (!creds.email || !creds.email.includes("@")) throw new Error("Enter a valid work email.");
+    if (!creds.password || creds.password.length < 8) throw new Error("Password must be at least 8 characters.");
     if (!acceptedTerms) {
       throw new Error("Agree to the Terms of Service and Privacy Policy to continue.");
     }
     try {
       await signupCloud(
-        email,
-        password,
-        name.trim() || null,
+        creds.email,
+        creds.password,
+        creds.name || null,
         true,
-        inviteCode.trim() || null,
+        creds.inviteCode || null,
         peekSeatInviteToken() || null
       );
     } catch (err) {
       const msg = String(err?.message || "");
       if (/already exists/i.test(msg)) {
         try {
-          await loginCloud(email, password);
-        } catch {
+          await loginCloud(creds.email, creds.password);
+        } catch (loginErr) {
+          const loginMsg = String(loginErr?.message || "");
           throw new Error(
-            "That email already has an account, but the password did not match. Sign in with the correct password, then start your trial.",
+            loginMsg && !/invalid email or password/i.test(loginMsg)
+              ? loginMsg
+              : "That email already has an account, but the password did not match. Sign in with the correct password, then start your trial.",
           );
         }
       } else {
@@ -6414,10 +6436,14 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
           className="case-form"
           onSubmit={(e) => {
             e.preventDefault();
+            const form = e.currentTarget;
             guard("login", async () => {
-              if (!email || !email.includes("@")) throw new Error("Enter a valid work email.");
-              if (!password || password.length < 8) throw new Error("Password must be at least 8 characters.");
-              const result = await loginCloud(email, password);
+              const creds = credentialsFromForm(form);
+              if (!creds.email || !creds.email.includes("@")) throw new Error("Enter a valid work email.");
+              if (!creds.password || creds.password.length < 8) {
+                throw new Error("Password must be at least 8 characters.");
+              }
+              const result = await loginCloud(creds.email, creds.password);
               if (result?.mfa_required && result?.mfa_token) {
                 setMfaToken(result.mfa_token);
                 return;
@@ -6430,6 +6456,7 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
             Name <span className="field-optional">(optional)</span>
             <input
               type="text"
+              name="name"
               value={name}
               onChange={(e) => setName(e.target.value)}
               autoComplete="name"
@@ -6440,6 +6467,7 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
             Email
             <input
               type="email"
+              name="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               required
@@ -6451,6 +6479,7 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
             Password
             <input
               type="password"
+              name="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
@@ -6476,6 +6505,7 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
               : <>Invite code <span className="field-optional">(optional)</span></>}
             <input
               type="text"
+              name="invite_code"
               value={inviteCode}
               onChange={(e) => setInviteCode(e.target.value)}
               autoComplete="off"
@@ -6519,7 +6549,10 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
               className="btn gold"
               type="button"
               disabled={busy}
-              onClick={() => guard("trial", () => startTrialSignedOut())}
+              onClick={(e) => {
+                const form = e.currentTarget.closest("form");
+                guard("trial", () => startTrialSignedOut(form));
+              }}
             >
               {working === "trial" ? "Opening checkout…" : "Start a 14-day free trial"}
             </button>

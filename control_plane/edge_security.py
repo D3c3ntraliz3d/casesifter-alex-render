@@ -49,7 +49,9 @@ def apply_security_headers(response, *, https: bool = False, production: bool | 
         "camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()"
     )
     response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
-    response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+    # cross-origin: SPA on app.* must read credentialed JSON from control/analysis.
+    # same-origin CORP can break cross-site fetch in stricter / embedded browsers.
+    response.headers["Cross-Origin-Resource-Policy"] = "cross-origin"
     response.headers["X-Permitted-Cross-Domain-Policies"] = "none"
     response.headers.setdefault(
         "Content-Security-Policy",

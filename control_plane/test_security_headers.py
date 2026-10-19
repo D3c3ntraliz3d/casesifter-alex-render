@@ -20,6 +20,7 @@ def test_control_plane_hsts_on_https_production():
     assert response.headers["Strict-Transport-Security"] == HSTS_VALUE
     assert response.headers["X-Content-Type-Options"] == "nosniff"
     assert response.headers["Cross-Origin-Opener-Policy"] == "same-origin"
+    assert response.headers["Cross-Origin-Resource-Policy"] == "cross-origin"
 
 
 def test_control_plane_skips_hsts_on_cleartext():

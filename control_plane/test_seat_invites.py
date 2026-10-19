@@ -122,6 +122,26 @@ def test_admin_invite_and_role(client):
     member_id = next(
         u["user_id"] for u in overview2.json()["users"] if u["email"] == "member-invite@example.com"
     )
+
+    # Member cannot open admin overview.
+    client.post("/v1/logout")
+    assert (
+        client.post(
+            "/v1/login",
+            json={"email": "member-invite@example.com", "password": "correct-horse"},
+        ).status_code
+        == 200
+    )
+    assert client.get("/v1/admin/overview").status_code == 403
+
+    client.post("/v1/logout")
+    assert (
+        client.post(
+            "/v1/login",
+            json={"email": "owner-invite@example.com", "password": "correct-horse"},
+        ).status_code
+        == 200
+    )
     patch = client.patch(f"/v1/admin/users/{member_id}", json={"role": "admin"})
     assert patch.status_code == 200, patch.text
     with auth.session_scope() as s:
@@ -129,3 +149,93 @@ def test_admin_invite_and_role(client):
             select(auth.CpUser).where(auth.CpUser.email == "member-invite@example.com")
         ).scalar_one()
         assert member.account_role == "admin"
+
+    # Admin cannot invite another admin.
+    client.post("/v1/logout")
+    assert (
+        client.post(
+            "/v1/login",
+            json={"email": "member-invite@example.com", "password": "correct-horse"},
+        ).status_code
+        == 200
+    )
+    assert client.get("/v1/admin/overview").status_code == 200
+    invite_admin = client.post(
+        "/v1/admin/invites",
+        json={"email": "second-admin@example.com", "role": "admin"},
+    )
+    assert invite_admin.status_code == 403
+
+    # Owner can remove the admin seat.
+    client.post("/v1/logout")
+    assert (
+        client.post(
+            "/v1/login",
+            json={"email": "owner-invite@example.com", "password": "correct-horse"},
+        ).status_code
+        == 200
+    )
+    removed = client.delete(f"/v1/admin/users/{member_id}")
+    assert removed.status_code == 200, removed.text
+    with auth.session_scope() as s:
+        member = s.execute(
+            select(auth.CpUser).where(auth.CpUser.email == "member-invite@example.com")
+        ).scalar_one()
+        assert member.org_id == member.id
+        assert (member.account_role or "") == "owner"
+
+    # Cannot demote the last owner.
+    with auth.session_scope() as s:
+        owner = s.execute(
+            select(auth.CpUser).where(auth.CpUser.email == "owner-invite@example.com")
+        ).scalar_one()
+        owner_id = owner.id
+    last = client.patch(f"/v1/admin/users/{owner_id}", json={"role": "member"})
+    assert last.status_code == 400
+
+
+def test_member_forbidden_on_admin_routes(client):
+    import auth_store as auth
+    from sqlalchemy import select
+
+    _signup_verify_login(client, "solo-owner@example.com")
+    with auth.session_scope() as s:
+        row = s.execute(
+            select(auth.CpUser).where(auth.CpUser.email == "solo-owner@example.com")
+        ).scalar_one()
+        row.subscription_json = '{"status":"active","plan":"pro","seats":2}'
+        s.add(row)
+
+    invite = client.post(
+        "/v1/admin/invites",
+        json={"email": "plain-member@example.com", "role": "member"},
+    )
+    assert invite.status_code == 200
+    token = invite.json()["invite_token"]
+    su = client.post(
+        "/v1/signup",
+        json={
+            "email": "plain-member@example.com",
+            "password": "correct-horse",
+            "name": "Plain",
+            "accepted_terms": True,
+            "seat_invite_token": token,
+        },
+    )
+    assert su.status_code == 200
+    vtok = su.json().get("dev_verify_token")
+    if vtok:
+        assert client.post("/v1/verify-email", json={"token": vtok}).status_code == 200
+
+    client.post("/v1/logout")
+    assert (
+        client.post(
+            "/v1/login",
+            json={"email": "plain-member@example.com", "password": "correct-horse"},
+        ).status_code
+        == 200
+    )
+    assert client.get("/v1/admin/overview").status_code == 403
+    assert client.get("/v1/admin/audit").status_code == 403
+    assert client.post("/v1/admin/invites", json={"email": "x@example.com", "role": "member"}).status_code == 403
+    assert client.post("/v1/admin/sessions/revoke-firm").status_code == 403

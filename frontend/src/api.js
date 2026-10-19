@@ -209,9 +209,44 @@ async function callDesktop(promise) {
 async function safeDetail(res) {
   try {
     const data = await res.json();
-    return data.detail || JSON.stringify(data);
+    const detail = data?.detail;
+    if (typeof detail === "string") return detail;
+    if (Array.isArray(detail)) {
+      return detail
+        .map((item) => (typeof item === "string" ? item : item?.msg || JSON.stringify(item)))
+        .filter(Boolean)
+        .join("; ");
+    }
+    if (detail != null) return JSON.stringify(detail);
+    return data?.message || JSON.stringify(data);
   } catch {
-    return res.statusText;
+    return res.statusText || `HTTP ${res.status}`;
+  }
+}
+
+/** Map login response entitlement into the shape AccountPanel expects. */
+function entitlementFromLogin(data, fallbackEmail) {
+  const raw = data?.entitlement;
+  if (!raw || typeof raw !== "object") return null;
+  const email = raw.email || fallbackEmail || undefined;
+  return {
+    ...raw,
+    mode: "cloud",
+    hasSession: true,
+    email,
+    share_anonymized_outcomes: true,
+  };
+}
+
+async function sessionCookieWorks() {
+  try {
+    const res = await fetch(controlUrl("/v1/entitlement"), {
+      headers: controlHeaders(),
+      credentials: "include",
+    });
+    return res.ok;
+  } catch {
+    return false;
   }
 }
 
@@ -1407,19 +1442,64 @@ export async function confirmPasswordReset(token, password) {
   return getEntitlement();
 }
 
+async function finishBrowserLogin(data, email) {
+  if (data?.analysis_code) {
+    try {
+      await acceptAnalysisSession(data.analysis_code);
+    } catch {
+      /* analysis cookie is best-effort; control session is the source of truth */
+    }
+  }
+  const addr = data?.entitlement?.email || email;
+  markSignedIn(addr);
+
+  const fromLogin = entitlementFromLogin(data, addr);
+  const cookieOk = await sessionCookieWorks();
+  if (cookieOk) {
+    try {
+      return await getEntitlement();
+    } catch {
+      if (fromLogin) return fromLogin;
+      throw new Error("Signed in, but entitlement refresh failed. Reload the page.");
+    }
+  }
+
+  // Login POST succeeded but Set-Cookie did not stick (third-party / partitioned
+  // cookie block in embedded browsers). Prefer a same-window handoff code when
+  // control minted one; otherwise surface a clear cookies-blocked error.
+  const handoff = String(data?.handoff_code || "").trim();
+  if (handoff && typeof window !== "undefined") {
+    try {
+      const url = new URL(window.location.href);
+      url.searchParams.set("cs_code", handoff);
+      window.history.replaceState({}, "", `${url.pathname}${url.search}`);
+      await exchangeSessionCode(handoff);
+      if (await sessionCookieWorks()) return getEntitlement();
+    } catch {
+      /* fall through to cookies-blocked message */
+    }
+  }
+
+  throw new Error(
+    "Sign-in succeeded, but this browser blocked the cross-site session cookie. " +
+      "Open this app in a normal browser tab (not an embedded/automated browser) and sign in again."
+  );
+}
+
 export async function loginCloud(email, password) {
   const cs = desktop();
   if (cs) {
     await callDesktop(cs.login(email, password));
     return callDesktop(cs.entitlement());
   }
+  const addr = String(email || "").trim().toLowerCase();
   let res;
   try {
     res = await fetch(controlUrl("/v1/login"), {
       method: "POST",
       credentials: "include",
       headers: { ...jsonHeaders, "Content-Type": "application/json" },
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify({ email: addr, password }),
     });
   } catch (err) {
     throw controlUnreachableError(err);
@@ -1429,13 +1509,11 @@ export async function loginCloud(email, password) {
     return {
       mfa_required: true,
       mfa_token: data.mfa_token,
-      email: data.email || email,
+      email: data.email || addr,
       message: data.message || "Enter your authenticator code.",
     };
   }
-  if (data?.analysis_code) await acceptAnalysisSession(data.analysis_code);
-  markSignedIn(email);
-  return getEntitlement();
+  return finishBrowserLogin(data, addr);
 }
 
 export async function loginMfaCloud(mfaToken, code) {
@@ -1451,9 +1529,7 @@ export async function loginMfaCloud(mfaToken, code) {
     throw controlUnreachableError(err);
   }
   const data = await readJson(res);
-  if (data?.analysis_code) await acceptAnalysisSession(data.analysis_code);
-  markSignedIn(data?.entitlement?.email);
-  return getEntitlement();
+  return finishBrowserLogin(data, data?.entitlement?.email);
 }
 
 export function ssoStartUrl() {
