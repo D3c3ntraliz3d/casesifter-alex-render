@@ -170,7 +170,11 @@ function authHeaders(extra = {}) {
   const headers = { ...jsonHeaders, ...extra };
   const token = getSessionToken();
   if (token) headers.Authorization = `Bearer ${token}`;
-  if (ANALYSIS_API_KEY) headers["X-API-Key"] = ANALYSIS_API_KEY;
+  // Never bake ops API keys into the hosted browser client — that bypasses
+  // firm tenancy (shared ops firm / cross-job reads). Desktop/local vault only.
+  if (ANALYSIS_API_KEY && !ANALYSIS_API_URL) {
+    headers["X-API-Key"] = ANALYSIS_API_KEY;
+  }
   return headers;
 }
 
@@ -411,7 +415,15 @@ export async function listCases() {
   const cs = desktop();
   if (cs) return cs.listCases();
   if (isHostedAnalysis()) {
+    // Fail closed: hosted matters require a firm session cookie.
+    if (!hasSessionHint()) {
+      throw new Error("Sign in to view your firm’s cases.");
+    }
     const res = await analysisFetch("/api/v1/matters");
+    if (res.status === 401 || res.status === 403) {
+      clearSession();
+      throw new Error("Sign in to view your firm’s cases.");
+    }
     const data = await readJson(res);
     return data.matters || data.cases || [];
   }
@@ -1343,6 +1355,56 @@ function controlUnreachableError(cause) {
     );
   }
   return cause instanceof Error ? cause : new Error(raw || "Control plane request failed.");
+}
+
+/** Request a password-reset email (always returns ok; does not reveal if account exists). */
+export async function requestPasswordReset(email) {
+  const addr = String(email || "").trim().toLowerCase();
+  if (!addr.includes("@")) throw new Error("Enter a valid work email.");
+  let res;
+  try {
+    res = await fetch(controlUrl("/v1/password-reset/request"), {
+      method: "POST",
+      credentials: "include",
+      headers: { ...jsonHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({ email: addr }),
+    });
+  } catch (err) {
+    throw controlUnreachableError(err);
+  }
+  const data = await readJson(res);
+  return data;
+}
+
+/** Confirm reset with token from email link (marketing reset.html or app ?reset_token=). */
+export async function confirmPasswordReset(token, password) {
+  if (!token || String(token).length < 8) throw new Error("Invalid or missing reset token.");
+  if (!password || password.length < 8) throw new Error("Password must be at least 8 characters.");
+  let res;
+  try {
+    res = await fetch(controlUrl("/v1/password-reset/confirm"), {
+      method: "POST",
+      credentials: "include",
+      headers: { ...jsonHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({ token, password }),
+    });
+  } catch (err) {
+    throw controlUnreachableError(err);
+  }
+  const data = await readJson(res);
+  if (data?.mfa_required && data?.mfa_token) {
+    return {
+      mfa_required: true,
+      mfa_token: data.mfa_token,
+      email: data.email,
+      message: data.message || "Password updated. Enter your authenticator code.",
+    };
+  }
+  if (data?.analysis_code) await acceptAnalysisSession(data.analysis_code);
+  if (data?.email || data?.entitlement?.email) {
+    markSignedIn(data.email || data.entitlement.email);
+  }
+  return getEntitlement();
 }
 
 export async function loginCloud(email, password) {

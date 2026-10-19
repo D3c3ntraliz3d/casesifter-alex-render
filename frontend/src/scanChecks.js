@@ -3,15 +3,19 @@
  *
  * Green: that check finished (a finding is a result, not a failure).
  * Yellow: that check is still running.
- * Red: that check failed or never returned.
+ * Amber (warn): soft-fail — finished with a non-blocking module error (Meta).
+ * Red: that check failed or never returned (blocks Complete clearance).
  *
  * Dots come only from module rows and review flags already stored on the
  * document or its report. A required visual review with no response is red.
  * Skipped modules stay omitted.
  *
+ * Meta packaging/timestamp crashes are warn-only: they must not drive
+ * hasFailedCheck / Incomplete when the rest of the scan finished.
+ *
  * A rescan clears the previous colors: every included dot is yellow until
- * that check finishes, then green or red. The previous ok/failed colors are
- * not reused while the new scan is in progress.
+ * that check finishes, then green, warn, or red. The previous ok/failed
+ * colors are not reused while the new scan is in progress.
  */
 
 const MODULE_LABELS = {
@@ -184,8 +188,22 @@ function moduleFailTitle(label, name, error) {
     }
     return "Image check did not finish (module error — not a manipulation finding)";
   }
+  if (name === "metadata") {
+    if (/can not convert date|convert date/i.test(detail)) {
+      return "Meta warning: unreadable PDF timestamps (e-file date junk) — packaging only, not a fraud finding";
+    }
+    if (detail) {
+      return `Meta warning (${detail.slice(0, 120)}) — packaging / timestamps only, not a fraud finding`;
+    }
+    return "Meta warning: check did not finish — packaging / timestamps only, not a fraud finding";
+  }
   if (detail) return `${label} check did not finish (${detail.slice(0, 120)})`;
   return `${label} check did not finish`;
+}
+
+/** Meta errors are soft-fail: warn light + chip, never Incomplete clearance. */
+function isSoftFailModule(name) {
+  return name === "metadata";
 }
 
 function finishedLights(doc) {
@@ -204,7 +222,11 @@ function finishedLights(doc) {
     }
     const label = MODULE_LABELS[name] || shortName(name);
     if (status === "ok") lights.push(light(name, label, "ok", `${label} finished`));
-    else lights.push(light(name, label, "failed", moduleFailTitle(label, name, mod?.error)));
+    else if (isSoftFailModule(name)) {
+      lights.push(light(name, label, "warn", moduleFailTitle(label, name, mod?.error)));
+    } else {
+      lights.push(light(name, label, "failed", moduleFailTitle(label, name, mod?.error)));
+    }
   }
   const visual = visualLight(doc);
   if (visual) lights.push(visual);
@@ -341,7 +363,8 @@ export function checkLights(doc) {
   return finishedLights(doc);
 }
 
-/** True when a finished row has any red check (failed / never returned). */
+/** True when a finished row has any red check (failed / never returned).
+ * Soft-fail Meta (warn) does not count — packaging/timestamps only. */
 export function hasFailedCheck(doc) {
   if (!doc || typeof doc !== "object") return false;
   if (isScanInProgress(doc)) return false;
@@ -350,7 +373,8 @@ export function hasFailedCheck(doc) {
 
 /**
  * Row clearance for the status column.
- * A red Image (or any failed required check) is not a clean Complete.
+ * A red Image (or any hard-failed required check) is not a clean Complete.
+ * Meta soft-fail (warn) alone still clears as Complete.
  */
 export function rowClearance(doc) {
   if (!doc || typeof doc !== "object") return "unknown";

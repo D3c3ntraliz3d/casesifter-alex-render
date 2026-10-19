@@ -309,12 +309,12 @@ def require_job_owner(job_id: str, auth: dict) -> dict:
     row = get_store().get_analysis_job(job_id)
     if not row:
         raise HTTPException(404, "Unknown or expired job.")
-    if auth.get("auth") == "api_key":
-        logger.info("auth=api_key job=%s", job_id[:8])
-        return {"job": row, "firm_ctx": resolve_firm_context(auth)}
     firm_ctx = resolve_firm_context(auth)
-    if row.get("firm_id") != firm_ctx.get("firm_id"):
+    # Ops API keys map to the shared ops firm — never cross-read another firm's jobs.
+    if row.get("firm_id") and row.get("firm_id") != firm_ctx.get("firm_id"):
         raise HTTPException(404, "Unknown or expired job.")
+    if auth.get("auth") == "api_key":
+        logger.info("auth=api_key job=%s firm=%s", job_id[:8], (firm_ctx.get("firm_id") or "")[:8])
     return {"job": row, "firm_ctx": firm_ctx}
 
 

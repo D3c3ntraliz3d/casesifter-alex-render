@@ -47,9 +47,15 @@ def _verified_token(client, email: str, password: str = "correct-horse") -> str:
         json={"email": email, "password": password, "accepted_terms": True},
     )
     assert su.status_code == 200, su.text
-    v = client.post("/v1/verify-email", json={"token": su.json()["dev_verify_token"]})
-    assert v.status_code == 200, v.text
-    return v.json()["token"]
+    token = su.json().get("dev_verify_token")
+    if token:
+        v = client.post("/v1/verify-email", json={"token": token})
+        assert v.status_code == 200, v.text
+        return v.json()["token"]
+    assert su.json().get("email_verified") is True
+    logged = client.post("/v1/login", json={"email": email, "password": password})
+    assert logged.status_code == 200, logged.text
+    return logged.json()["token"]
 
 
 def test_checkout_rejects_bad_session(client):

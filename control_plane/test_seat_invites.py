@@ -45,8 +45,11 @@ def _signup_verify_login(http: TestClient, email: str, password: str = "correct-
         json={"email": email, "password": password, "name": "Owner", "accepted_terms": True},
     )
     assert su.status_code == 200, su.text
-    token = su.json()["dev_verify_token"]
-    assert http.post("/v1/verify-email", json={"token": token}).status_code == 200
+    token = su.json().get("dev_verify_token")
+    if token:
+        assert http.post("/v1/verify-email", json={"token": token}).status_code == 200
+    else:
+        assert su.json().get("email_verified") is True
     login = http.post("/v1/login", json={"email": email, "password": password})
     assert login.status_code == 200, login.text
 
@@ -87,8 +90,11 @@ def test_admin_invite_and_role(client):
         },
     )
     assert su2.status_code == 200, su2.text
-    vtok = su2.json()["dev_verify_token"]
-    assert client.post("/v1/verify-email", json={"token": vtok}).status_code == 200
+    vtok = su2.json().get("dev_verify_token")
+    if vtok:
+        assert client.post("/v1/verify-email", json={"token": vtok}).status_code == 200
+    else:
+        assert su2.json().get("email_verified") is True
 
     with auth.session_scope() as s:
         owner = s.execute(

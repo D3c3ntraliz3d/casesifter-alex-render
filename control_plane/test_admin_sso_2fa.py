@@ -50,8 +50,11 @@ def _signup_and_verify(http: TestClient, email: str = "2fa@example.com") -> None
         json={"email": email, "password": "correct-horse", "accepted_terms": True},
     )
     assert su.status_code == 200, su.text
-    token = su.json()["dev_verify_token"]
-    assert http.post("/v1/verify-email", json={"token": token}).status_code == 200
+    token = su.json().get("dev_verify_token")
+    if token:
+        assert http.post("/v1/verify-email", json={"token": token}).status_code == 200
+    else:
+        assert su.json().get("email_verified") is True
 
 
 def test_auth_status_without_oidc(client):

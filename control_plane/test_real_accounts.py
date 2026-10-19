@@ -23,6 +23,8 @@ def client(tmp_path, monkeypatch):
     monkeypatch.delenv("RESEND_API_KEY", raising=False)
     monkeypatch.setenv("SESSION_SECRET", "unit-test-session-secret-p05")
     monkeypatch.setenv("CASESIFTER_INVITE_REQUIRED", "false")
+    # Enforce verify-before-login for legacy flow tests in this module.
+    monkeypatch.setenv("CASESIFTER_REQUIRE_EMAIL_VERIFY", "true")
     monkeypatch.setenv("STRIPE_SECRET_KEY", "")
     monkeypatch.setenv("STRIPE_PRICE_ID", "")
 
@@ -85,6 +87,47 @@ def test_signup_unverified_until_email_link(client):
         json={"email": "b@example.com", "password": "correct-horse"},
     )
     assert ok.status_code == 200
+
+
+def test_demo_mode_signup_skips_verify(tmp_path, monkeypatch):
+    monkeypatch.setenv("CONTROL_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("APP_ENV", "development")
+    monkeypatch.setenv("AUTH_DEV_TOKENS", "true")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("SESSION_SECRET", "unit-test-demo-verify-off")
+    monkeypatch.setenv("CASESIFTER_INVITE_REQUIRED", "false")
+    monkeypatch.setenv("CASESIFTER_REQUIRE_EMAIL_VERIFY", "false")
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "")
+    monkeypatch.setenv("STRIPE_PRICE_ID", "")
+
+    import auth_store
+    import importlib
+    import main as mod
+
+    auth_store.reset_auth_store_for_tests()
+    importlib.reload(mod)
+    mod.SESSION_SECRET = "unit-test-demo-verify-off"
+    mod.STORE = tmp_path / "accounts.json"
+    mod.DATA = tmp_path
+    http = TestClient(mod.app)
+    su = http.post(
+        "/v1/signup",
+        json={
+            "email": "demo-skip@example.com",
+            "password": "correct-horse",
+            "accepted_terms": True,
+        },
+    )
+    assert su.status_code == 200, su.text
+    body = su.json()
+    assert body.get("email_verified") is True
+    assert "dev_verify_token" not in body
+    ok = http.post(
+        "/v1/login",
+        json={"email": "demo-skip@example.com", "password": "correct-horse"},
+    )
+    assert ok.status_code == 200, ok.text
+    auth_store.reset_auth_store_for_tests()
 
 
 def test_password_reset_flow(client):

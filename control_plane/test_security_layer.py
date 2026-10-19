@@ -49,10 +49,14 @@ def _verified(client: TestClient) -> None:
         json={"email": "layer@example.com", "password": "correct-horse", "accepted_terms": True},
     )
     assert su.status_code == 200, su.text
-    assert "token" not in su.json() or not su.json().get("token")
-    token = su.json()["dev_verify_token"]
-    verified = client.post("/v1/verify-email", json={"token": token})
-    assert verified.status_code == 200, verified.text
+    body = su.json()
+    assert "token" not in body or not body.get("token")
+    token = body.get("dev_verify_token")
+    if token:
+        verified = client.post("/v1/verify-email", json={"token": token})
+        assert verified.status_code == 200, verified.text
+    else:
+        assert body.get("email_verified") is True
 
 
 def test_login_sets_httponly_cookie_and_keeps_dev_token(client):
@@ -98,6 +102,10 @@ def test_mailer_does_not_echo_verify_token(client, monkeypatch):
         sent["text"] = text
         return True
 
+    monkeypatch.setenv("CASESIFTER_REQUIRE_EMAIL_VERIFY", "true")
+    importlib.reload(mod)
+    mod.SESSION_SECRET = "unit-test-session-secret-layer"
+    http = TestClient(mod.app)
     monkeypatch.setattr(mod.mailer, "mailer_configured", lambda: True)
     monkeypatch.setattr(mod.mailer, "send_auth_email", fake_send)
     res = http.post(
@@ -124,6 +132,7 @@ def test_production_hides_docs_and_requires_mail(tmp_path, monkeypatch):
     monkeypatch.delenv("EMAIL_FROM", raising=False)
     monkeypatch.delenv("RESEND_API_KEY", raising=False)
     monkeypatch.setenv("CASESIFTER_INVITE_REQUIRED", "false")
+    monkeypatch.setenv("CASESIFTER_REQUIRE_EMAIL_VERIFY", "true")
 
     import auth_store
 
@@ -163,6 +172,7 @@ def test_production_signup_rolls_back_when_send_fails(tmp_path, monkeypatch):
     monkeypatch.setenv("RESEND_API_KEY", "re_test_key")
     monkeypatch.setenv("SMTP_FROM", "CaseSifter <noreply@example.com>")
     monkeypatch.setenv("CASESIFTER_INVITE_REQUIRED", "false")
+    monkeypatch.setenv("CASESIFTER_REQUIRE_EMAIL_VERIFY", "true")
 
     import auth_store
 

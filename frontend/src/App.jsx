@@ -32,6 +32,8 @@ import {
   loginCloud,
   loginMfaCloud,
   logoutCloud,
+  requestPasswordReset,
+  confirmPasswordReset,
   openCheckoutUrl,
   reportProblem,
   signupCloud,
@@ -548,7 +550,8 @@ function SearchField({ value, onChange, placeholder, autoFocus, onKeyDown }) {
 }
 
 export default function App() {
-  const [view, setView] = useState("cases"); // cases | case | report | account | admin
+  // Hosted soft-launch: land on Account until a firm session exists (no case list flash).
+  const [view, setView] = useState(() => (isHostedAnalysis() ? "account" : "cases")); // cases | case | report | account | admin
   const [cases, setCases] = useState([]);
   const [caseId, setCaseId] = useState(null);
   const [caseData, setCaseData] = useState(null);
@@ -624,17 +627,39 @@ export default function App() {
   }
 
   useEffect(() => {
-    // Marketing signup stores the session on casesifter.com; absorb ?cs_token= handoff here.
+    // Marketing signup stores the session on casesifter.com; absorb ?cs_code= handoff here.
     absorbSessionHandoff();
     absorbSeatInviteToken();
-    // Hosted analysis: list/create matters hit casesifter-analysis. Surface a clear
-    // ops banner + gate New case — do not leave an empty "No cases yet" state.
+    // Hosted multi-tenant: never list matters until we know there is a firm session.
+    // Signed-out users see Account only — not another firm's cases or an empty vault tease.
+    (async () => {
+      await refreshEntitlement();
+    })();
+  }, []);
+
+  // After entitlement resolves: load cases only when allowed.
+  useEffect(() => {
+    if (!entitlement) return;
+    const hosted = isHostedAnalysis();
+    const signedIn = Boolean(entitlement.hasSession);
+    if (hosted && !signedIn) {
+      setCases([]);
+      setCaseData(null);
+      setCaseId(null);
+      setView("account");
+      return;
+    }
     refreshCases().catch((err) => {
       if (markAnalysisOffline(err)) return;
-      setError(String(err?.message || "Could not load cases."));
+      const msg = String(err?.message || "Could not load cases.");
+      if (/sign in/i.test(msg)) {
+        setCases([]);
+        setView("account");
+        return;
+      }
+      setError(msg);
     });
-    refreshEntitlement();
-  }, []);
+  }, [entitlement?.hasSession, entitlement?.mode]);
 
   // Post-signup: ?checkout=trial → start Stripe Checkout once when billing_state is none.
   useEffect(() => {
@@ -1035,13 +1060,26 @@ export default function App() {
   return (
     <div className="app">
       <header className="masthead">
-        <button type="button" className="brand" onClick={() => { setBusy(false); setView("cases"); setQuery(""); }}>
+        <button
+          type="button"
+          className="brand"
+          onClick={() => {
+            setBusy(false);
+            setQuery("");
+            if (isHostedAnalysis() && !entitlement?.hasSession) {
+              setView("account");
+              return;
+            }
+            setView("cases");
+          }}
+        >
           <div className="seal">CS</div>
           <div>
             <h1>CaseSifter</h1>
             <p>Find what matters in the record.</p>
           </div>
         </button>
+        {(entitlement?.hasSession || !isHostedAnalysis()) ? (
         <div className="mast-search">
           <SearchField
             value={query}
@@ -1074,13 +1112,20 @@ export default function App() {
             </div>
           )}
         </div>
+        ) : (
+          <div className="mast-search mast-search-locked">
+            <p className="footnote" style={{ margin: 0 }}>Sign in to open your firm&apos;s matters.</p>
+          </div>
+        )}
         <nav className="mast-nav">
-          <button type="button" className={view !== "account" && view !== "admin" ? "on" : ""} onClick={() => { setBusy(false); setView("cases"); }}>
-            Cases
-          </button>
+          {(entitlement?.hasSession || !isHostedAnalysis()) ? (
+            <button type="button" className={view !== "account" && view !== "admin" ? "on" : ""} onClick={() => { setBusy(false); setView("cases"); }}>
+              Cases
+            </button>
+          ) : null}
           <button
             type="button"
-            className={view === "account" ? "on" : ""}
+            className={view === "account" || (isHostedAnalysis() && !entitlement?.hasSession) ? "on" : ""}
             onClick={() => {
               // Account talks to the control plane; drop leftover case/analysis noise.
               setError("");
@@ -1128,7 +1173,7 @@ export default function App() {
         );
       })()}
 
-      {view === "cases" && (
+      {view === "cases" && (entitlement?.hasSession || !isHostedAnalysis()) && (
         <CasesPage
           cases={filteredActive}
           archived={filteredArchived}
@@ -1161,7 +1206,7 @@ export default function App() {
         />
       )}
 
-      {view === "case" && caseData && (
+      {view === "case" && caseData && (entitlement?.hasSession || !isHostedAnalysis()) && (
         <CaseWorkspace
           caseData={caseData}
           busy={busy}
@@ -1177,7 +1222,7 @@ export default function App() {
         />
       )}
 
-      {view === "report" && (
+      {view === "report" && (entitlement?.hasSession || !isHostedAnalysis()) && (
         <>
           <div className="crumb-bar">
             <button className="text-link" type="button" onClick={() => setView("case")}>
@@ -5531,10 +5576,31 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
   const [mfaToken, setMfaToken] = useState("");
   const [mfaCode, setMfaCode] = useState("");
   const [authStatus, setAuthStatus] = useState({ sso_available: false, totp_available: false });
+  const [forgotMode, setForgotMode] = useState(false);
+  const [forgotSent, setForgotSent] = useState(false);
+  const [resetToken, setResetToken] = useState("");
+  const [resetPassword, setResetPassword] = useState("");
 
   useEffect(() => {
     if (entitlement?.email && !email) setEmail(entitlement.email);
   }, [entitlement?.email]);
+
+  useEffect(() => {
+    // Deep-link from marketing reset email: /?reset_token=…
+    if (typeof window === "undefined") return;
+    try {
+      const params = new URLSearchParams(window.location.search || "");
+      const token = (params.get("reset_token") || "").trim();
+      if (!token) return;
+      setResetToken(token);
+      setForgotMode(true);
+      params.delete("reset_token");
+      const next = `${window.location.pathname}${params.toString() ? `?${params}` : ""}${window.location.hash || ""}`;
+      window.history.replaceState({}, "", next);
+    } catch {
+      /* ignore */
+    }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -5812,6 +5878,7 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
               onClick={() => guard("signout", async () => {
                 await logoutCloud();
                 await onRefresh();
+                // Parent clears matter state when hasSession flips false.
               })}
             >
               Sign out
@@ -5881,7 +5948,113 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
         </form>
       )}
 
-      {entitlement.mode === "cloud" && !signedIn && !mfaToken && (
+      {entitlement.mode === "cloud" && !signedIn && !mfaToken && forgotMode && resetToken && (
+        <form
+          className="case-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            guard("reset-confirm", async () => {
+              const result = await confirmPasswordReset(resetToken, resetPassword);
+              if (result?.mfa_required && result?.mfa_token) {
+                setMfaToken(result.mfa_token);
+                setForgotMode(false);
+                setResetToken("");
+                setResetPassword("");
+                return;
+              }
+              setForgotMode(false);
+              setResetToken("");
+              setResetPassword("");
+              await onRefresh();
+            });
+          }}
+        >
+          <h3 className="serif" style={{ marginBottom: 4 }}>Choose a new password</h3>
+          <p className="footnote" style={{ marginTop: 0 }}>
+            This replaces your password and signs out other sessions on your account.
+          </p>
+          <label>
+            New password
+            <input
+              type="password"
+              value={resetPassword}
+              onChange={(e) => setResetPassword(e.target.value)}
+              required
+              minLength={8}
+              autoComplete="new-password"
+            />
+          </label>
+          <div className="actions">
+            <button className="btn" type="submit" disabled={busy}>
+              {working === "reset-confirm" ? "Updating…" : "Update password"}
+            </button>
+            <button
+              className="btn secondary"
+              type="button"
+              disabled={busy}
+              onClick={() => {
+                setForgotMode(false);
+                setResetToken("");
+                setResetPassword("");
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        </form>
+      )}
+
+      {entitlement.mode === "cloud" && !signedIn && !mfaToken && forgotMode && !resetToken && (
+        <form
+          className="case-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            guard("reset-request", async () => {
+              await requestPasswordReset(email);
+              setForgotSent(true);
+            });
+          }}
+        >
+          <h3 className="serif" style={{ marginBottom: 4 }}>Forgot password</h3>
+          <p className="footnote" style={{ marginTop: 0 }}>
+            We email a one-hour reset link if that address has an account. We never reveal whether the email is registered.
+          </p>
+          <label>
+            Email
+            <input
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              required
+              autoComplete="email"
+              placeholder="you@firm.com"
+            />
+          </label>
+          {forgotSent ? (
+            <p className="footnote" style={{ color: "var(--teal)" }}>
+              If that account exists, a reset link was sent. Check your inbox (and spam).
+            </p>
+          ) : null}
+          <div className="actions">
+            <button className="btn" type="submit" disabled={busy}>
+              {working === "reset-request" ? "Sending…" : "Send reset link"}
+            </button>
+            <button
+              className="btn secondary"
+              type="button"
+              disabled={busy}
+              onClick={() => {
+                setForgotMode(false);
+                setForgotSent(false);
+              }}
+            >
+              Back to sign in
+            </button>
+          </div>
+        </form>
+      )}
+
+      {entitlement.mode === "cloud" && !signedIn && !mfaToken && !forgotMode && (
         <form
           className="case-form"
           onSubmit={(e) => {
@@ -5926,10 +6099,22 @@ function AccountPanel({ entitlement, onRefresh, onError }) {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
-              minLength={6}
+              minLength={8}
               autoComplete="current-password"
             />
           </label>
+          <p className="footnote" style={{ margin: "0 0 8px" }}>
+            <button
+              type="button"
+              className="linkish"
+              onClick={() => {
+                setForgotMode(true);
+                setForgotSent(false);
+              }}
+            >
+              Forgot password?
+            </button>
+          </p>
           <label>
             {peekSeatInviteToken()
               ? "Firm seat invite (email must match the invite)"

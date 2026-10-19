@@ -1,0 +1,438 @@
+# CaseSifter — Alex parallel stack (SAFE route)
+# Distinct names only. Do NOT manage or retarget John's casesifter-* services.
+# Blueprint path: render.alex.yaml  |  repo: D3c3ntraliz3d/court-exhibit-scanner2
+#
+# Shared secrets: SESSION_SECRET from envVarGroup casesifter-alex-auth
+# so control + analysis always match (generateValue sets once; re-sync does not rotate).
+envVarGroups:
+  - name: casesifter-alex-auth
+    envVars:
+      - key: SESSION_SECRET
+        generateValue: true
+
+databases:
+  # Private network only (empty IP allow list). Control + analysis use this.
+  - name: casesifter-alex-fact-memory
+    plan: basic-256mb
+    databaseName: fact_memory
+    user: casesifter
+    ipAllowList: []
+
+services:
+  - type: web
+    name: casesifter-alex-analysis
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    # Plan owned in Dashboard — do not set `plan:` here.
+    healthCheckPath: /api/health
+    buildFilter:
+      paths:
+        - backend/**
+        - render.alex.yaml
+    envVars:
+      - fromGroup: casesifter-alex-auth
+      - key: APP_MODE
+        value: analysis
+      - key: APP_ENV
+        value: production
+      # Alex onrender origins only — not casesifter.com / John's hosts.
+      - key: CORS_ALLOW_ORIGINS
+        value: "https://casesifter-alex-app.onrender.com,https://casesifter-alex-marketing.onrender.com"
+      - key: EPHEMERAL_JOBS
+        value: "true"
+      - key: EPHEMERAL_TTL_HOURS
+        value: "6"
+      - key: SOURCE_FILE_RETENTION
+        value: immediate
+      - key: PERSIST_FACTS
+        value: "true"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: casesifter-alex-fact-memory
+          property: connectionString
+      - key: FACT_MEMORY_MASTER_KEY
+        sync: false
+      - key: ENTITLEMENT_MODE
+        value: cloud
+      - key: CLOUD_CONTROL_URL
+        value: https://casesifter-alex-control.onrender.com
+      - key: SESSION_TTL_DAYS
+        value: "30"
+      - key: ANALYSIS_API_KEYS
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: CONTEXTUAL_MULTIMODAL
+        value: "true"
+      - key: OCR_MAX_PAGES
+        value: "40"
+      - key: TASK_A_EXTRACT_PRIMARY
+        value: "gemini-3.6-flash"
+      - key: TASK_A_EXTRACT_BACKUP
+        value: "gemini-3.5-flash-lite"
+      - key: TASK_A_EXTRACT_THINKING_LEVEL
+        value: "minimal"
+      - key: TASK_B_ENTITY_PRIMARY
+        value: "gemini-3.6-flash"
+      - key: TASK_B_ENTITY_BACKUP
+        value: "gemini-3.5-flash-lite"
+      - key: TASK_B_ENTITY_THINKING_LEVEL
+        value: "minimal"
+      - key: TASK_C_CONTRA_PRIMARY
+        value: "gemini-3.6-flash"
+      - key: TASK_C_CONTRA_BACKUP
+        value: "gemini-3.5-flash-lite"
+      - key: TASK_C_CONTRA_THINKING_LEVEL
+        value: "minimal"
+      - key: TASK_D_VISUAL_PRIMARY
+        value: "gemini-3.6-flash"
+      - key: TASK_D_VISUAL_BACKUP
+        value: "gemini-3.5-flash-lite"
+      - key: TASK_D_VISUAL_THINKING_LEVEL
+        value: "minimal"
+      - key: GEMINI_SERVICE_TIER
+        value: "standard"
+      - key: SCAN_MAX_CONCURRENT
+        sync: false
+      - key: GEMINI_MAX_CONCURRENT
+        sync: false
+      - key: GEMINI_MAX_INFLIGHT_MB
+        sync: false
+      - key: SCAN_MEMORY_GUARD_MB
+        sync: false
+      - key: SCAN_JOB_TIMEOUT_S
+        value: "600"
+      - key: SCAN_JOB_TIMEOUT_BASE_S
+        value: "120"
+      - key: SCAN_JOB_TIMEOUT_PER_PAGE_S
+        value: "10"
+      - key: GEMINI_STAGE_TIMEOUT_S
+        value: "900"
+      - key: GEMINI_ORPHAN_SOURCE_GRACE_S
+        value: "60"
+      - key: GOTCHA_VERIFY_PROVIDER
+        value: auto
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: CLAUDE_MODEL
+        sync: false
+      - key: SENTRY_BACKEND_DSN
+        sync: false
+      - key: SENTRY_DSN
+        sync: false
+      - key: SENTRY_ENVIRONMENT
+        value: production
+      # Scans run on casesifter-alex-scan-worker (R2 + Redis).
+      # Link a Dashboard env group (e.g. casesifter-alex-r2) by hand for
+      # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / WORKER_SERVICE_TOKEN —
+      # not declared here so a sync can never blank them.
+      - key: SCAN_BACKEND
+        value: worker
+      - key: BLOB_BACKEND
+        value: s3
+      - key: QUEUE_BACKEND
+        value: redis
+      - key: S3_BUCKET
+        sync: false
+      - key: S3_ENDPOINT_URL
+        sync: false
+      - key: S3_REGION
+        value: auto
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: casesifter-alex-queue
+          property: connectionString
+
+  - type: keyvalue
+    name: casesifter-alex-queue
+    region: oregon
+    plan: 256mb
+    maxmemoryPolicy: noeviction
+    ipAllowList: []
+
+  - type: worker
+    name: casesifter-alex-scan-worker
+    runtime: docker
+    region: oregon
+    plan: 1c-2g
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    dockerCommand: python -m worker.main
+    buildFilter:
+      paths:
+        - backend/**
+        - render.alex.yaml
+    envVars:
+      - key: APP_MODE
+        value: analysis
+      - key: APP_ENV
+        value: production
+      - key: SCAN_BACKEND
+        value: worker
+      - key: BLOB_BACKEND
+        value: s3
+      - key: QUEUE_BACKEND
+        value: redis
+      - key: S3_BUCKET
+        sync: false
+      - key: S3_ENDPOINT_URL
+        sync: false
+      - key: S3_REGION
+        value: auto
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: casesifter-alex-queue
+          property: connectionString
+      - key: WORKER_CALLBACK_BASE_URL
+        fromService:
+          type: web
+          name: casesifter-alex-analysis
+          property: hostport
+      - key: WORKER_MAX_ATTEMPTS
+        value: "3"
+      - key: WORKER_CONCURRENCY
+        value: "3"
+      - key: WORKER_JOB_TIMEOUT_S
+        value: "1800"
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: TASK_A_EXTRACT_PRIMARY
+        value: "gemini-3.6-flash"
+      - key: TASK_A_EXTRACT_BACKUP
+        value: "gemini-3.5-flash-lite"
+      - key: TASK_A_EXTRACT_THINKING_LEVEL
+        value: "minimal"
+      - key: TASK_B_ENTITY_PRIMARY
+        value: "gemini-3.6-flash"
+      - key: TASK_B_ENTITY_BACKUP
+        value: "gemini-3.5-flash-lite"
+      - key: TASK_B_ENTITY_THINKING_LEVEL
+        value: "minimal"
+      - key: TASK_C_CONTRA_PRIMARY
+        value: "gemini-3.6-flash"
+      - key: TASK_C_CONTRA_BACKUP
+        value: "gemini-3.5-flash-lite"
+      - key: TASK_C_CONTRA_THINKING_LEVEL
+        value: "minimal"
+      - key: TASK_D_VISUAL_PRIMARY
+        value: "gemini-3.6-flash"
+      - key: TASK_D_VISUAL_BACKUP
+        value: "gemini-3.5-flash-lite"
+      - key: TASK_D_VISUAL_THINKING_LEVEL
+        value: "minimal"
+      - key: GEMINI_SERVICE_TIER
+        value: "standard"
+      - key: GEMINI_MAX_CONCURRENT
+        sync: false
+      - key: GEMINI_MAX_INFLIGHT_MB
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: CLAUDE_MODEL
+        sync: false
+      - key: GOTCHA_VERIFY_PROVIDER
+        value: auto
+      - key: CONTEXTUAL_MULTIMODAL
+        value: "true"
+      - key: OCR_MAX_PAGES
+        value: "40"
+      - key: SCAN_JOB_TIMEOUT_S
+        value: "600"
+      - key: SCAN_JOB_TIMEOUT_BASE_S
+        value: "120"
+      - key: SCAN_JOB_TIMEOUT_PER_PAGE_S
+        value: "10"
+      - key: GEMINI_STAGE_TIMEOUT_S
+        value: "900"
+      - key: SENTRY_DSN
+        sync: false
+      - key: SENTRY_BACKEND_DSN
+        sync: false
+      - key: SENTRY_ENVIRONMENT
+        value: production
+
+  - type: web
+    name: casesifter-alex-control
+    runtime: docker
+    dockerfilePath: ./control_plane/Dockerfile
+    dockerContext: ./control_plane
+    healthCheckPath: /health
+    buildFilter:
+      paths:
+        - control_plane/**
+        - render.alex.yaml
+    disk:
+      name: casesifter-alex-control-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - fromGroup: casesifter-alex-auth
+      - key: CONTROL_DATA_DIR
+        value: /var/data
+      - key: APP_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: casesifter-alex-fact-memory
+          property: connectionString
+      - key: SESSION_TTL_DAYS
+        value: "30"
+      - key: CONTROL_CORS_ORIGINS
+        value: "https://casesifter-alex-app.onrender.com,https://casesifter-alex-marketing.onrender.com"
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: STRIPE_PRICE_ID
+        sync: false
+      - key: CONTROL_ADMIN_TOKEN
+        sync: false
+      - key: CASESIFTER_PUBLIC_URL
+        value: https://casesifter-alex-app.onrender.com
+      - key: CASESIFTER_TRIAL_DAYS
+        value: "14"
+      - key: CASESIFTER_INVITE_REQUIRED
+        value: "false"
+      # Demo-friendly: signup marks verified; login skips verify gate.
+      - key: CASESIFTER_REQUIRE_EMAIL_VERIFY
+        value: "false"
+      - key: CASESIFTER_INVITE_CODES
+        sync: false
+      - key: CASESIFTER_MARKETING_URL
+        value: https://casesifter-alex-marketing.onrender.com
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: casesifter-alex-queue
+          property: connectionString
+      - key: RESEND_API_KEY
+        sync: false
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USERNAME
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: SMTP_FROM
+        sync: false
+      - key: SMTP_USE_TLS
+        value: "true"
+
+  - type: web
+    name: casesifter-alex-app
+    runtime: static
+    rootDir: frontend
+    buildCommand: npm ci && node scripts/write-build-info.mjs && npm run build
+    staticPublishPath: dist
+    buildFilter:
+      paths:
+        - frontend/**
+        - render.alex.yaml
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    headers:
+      - path: /index.html
+        name: Cache-Control
+        value: public, max-age=0, must-revalidate
+      - path: /
+        name: Cache-Control
+        value: public, max-age=0, must-revalidate
+      - path: /assets/*
+        name: Cache-Control
+        value: public, max-age=31536000, immutable
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+      - path: /*
+        name: X-Frame-Options
+        value: DENY
+      - path: /*
+        name: Referrer-Policy
+        value: strict-origin-when-cross-origin
+      - path: /*
+        name: Permissions-Policy
+        value: "camera=(), microphone=(), geolocation=()"
+      - path: /*
+        name: Strict-Transport-Security
+        value: max-age=63072000; includeSubDomains; preload
+      - path: /*
+        name: Cross-Origin-Opener-Policy
+        value: same-origin
+      - path: /*
+        name: Cross-Origin-Resource-Policy
+        value: same-site
+      - path: /*
+        name: X-Permitted-Cross-Domain-Policies
+        value: none
+      - path: /*
+        name: Content-Security-Policy
+        value: "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob:; connect-src 'self' https://casesifter-alex-control.onrender.com https://casesifter-alex-analysis.onrender.com https://*.ingest.sentry.io https://*.sentry.io; form-action 'self' https://checkout.stripe.com https://billing.stripe.com; upgrade-insecure-requests"
+    envVars:
+      - key: VITE_CONTROL_PLANE_URL
+        value: https://casesifter-alex-control.onrender.com
+      - key: VITE_ANALYSIS_API_URL
+        value: https://casesifter-alex-analysis.onrender.com
+      - key: VITE_SENTRY_ENVIRONMENT
+        value: production
+      - key: VITE_SENTRY_DSN
+        sync: false
+
+  - type: web
+    name: casesifter-alex-marketing
+    runtime: static
+    staticPublishPath: ./marketing
+    buildFilter:
+      paths:
+        - marketing/**
+        - render.alex.yaml
+    routes:
+      - type: redirect
+        source: /download.html
+        destination: /signup.html
+      - type: redirect
+        source: /downloads/*
+        destination: /signup.html
+      - type: redirect
+        source: /assets/downloads.json
+        destination: /signup.html
+    headers:
+      - path: /*.html
+        name: Cache-Control
+        value: public, max-age=0, must-revalidate
+      - path: /
+        name: Cache-Control
+        value: public, max-age=0, must-revalidate
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+      - path: /*
+        name: X-Frame-Options
+        value: DENY
+      - path: /*
+        name: Referrer-Policy
+        value: strict-origin-when-cross-origin
+      - path: /*
+        name: Permissions-Policy
+        value: "camera=(), microphone=(), geolocation=()"
+      - path: /*
+        name: Strict-Transport-Security
+        value: max-age=63072000; includeSubDomains; preload
+      - path: /*
+        name: Cross-Origin-Opener-Policy
+        value: same-origin
+      - path: /*
+        name: Cross-Origin-Resource-Policy
+        value: same-site
+      - path: /*
+        name: X-Permitted-Cross-Domain-Policies
+        value: none
+      - path: /*
+        name: Content-Security-Policy
+        value: "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob:; connect-src 'self' https://casesifter-alex-control.onrender.com https://casesifter-alex-analysis.onrender.com https://*.ingest.sentry.io https://*.sentry.io; form-action 'self'; upgrade-insecure-requests"

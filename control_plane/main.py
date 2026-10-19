@@ -48,6 +48,19 @@ def _is_production() -> bool:
     return (os.environ.get("APP_ENV") or "").strip().lower() == "production"
 
 
+def _require_email_verify() -> bool:
+    """When false (default), signup marks verified and login skips the verify gate.
+
+    Set CASESIFTER_REQUIRE_EMAIL_VERIFY=true to enforce verify-before-login.
+    /v1/verify-email stays available either way.
+    """
+    return (os.environ.get("CASESIFTER_REQUIRE_EMAIL_VERIFY") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
 def _resolve_session_secret() -> str:
     """Production: env SESSION_SECRET only (shared Blueprint group). Refuse if empty.
 
@@ -887,7 +900,13 @@ def signup(body: SignupBody, request: Request):
     email = body.email.lower().strip()
     client = (request.client.host if request.client else "unknown") or "unknown"
     _rate_limit(f"signup:{client}:{email}", limit=5, window_s=3600)
-    if _is_production() and not mailer.mailer_configured() and not _allow_dev_auth_tokens():
+    require_verify = _require_email_verify()
+    if (
+        require_verify
+        and _is_production()
+        and not mailer.mailer_configured()
+        and not _allow_dev_auth_tokens()
+    ):
         raise HTTPException(503, "Email delivery is not configured.")
     _ensure_auth_db()
     with auth.session_scope() as s:
@@ -909,13 +928,14 @@ def signup(body: SignupBody, request: Request):
             org_id = seat_invite.org_id
         cohort = "beta" if (body.invite_code or INVITE_REQUIRED or seat_invite) else "general"
         uid = uuid.uuid4().hex
+        verified_now = not require_verify
         user = auth.CpUser(
             id=uid,
             email=email,
             name=body.name or "",
             password_hash=auth.hash_password(body.password),
             password_algo="argon2id",
-            email_verified=False,
+            email_verified=verified_now,
             created_at=time.time(),
             accepted_terms_at=time.time(),
             trial_until=0,
@@ -932,7 +952,7 @@ def signup(body: SignupBody, request: Request):
         verify_raw = auth.create_email_token(s, user, purpose="verify", ttl_s=86400)
         link = f"{_marketing_base()}/verify.html?verify_token={verify_raw}"
         mailed = False
-        if mailer.mailer_configured():
+        if mailer.mailer_configured() and require_verify:
             mailed = mailer.send_auth_email(
                 email,
                 "Verify your CaseSifter account",
@@ -942,18 +962,26 @@ def signup(body: SignupBody, request: Request):
                     "This link expires in 24 hours. If you did not sign up, ignore this message."
                 ),
             )
-        if not mailed and _is_production() and not _allow_dev_auth_tokens():
+        if (
+            require_verify
+            and not mailed
+            and _is_production()
+            and not _allow_dev_auth_tokens()
+        ):
             # Roll back the new account so a failed send does not leave an unverified user.
             raise HTTPException(503, "We could not send the verification email. Try again shortly.")
-    # No session until email is verified.
     payload = {
         "ok": True,
         "email": email,
-        "email_verified": False,
-        "message": "Check your email to verify your account before signing in.",
+        "email_verified": verified_now,
+        "message": (
+            "Account created. You can sign in now."
+            if verified_now
+            else "Check your email to verify your account before signing in."
+        ),
     }
     # A sent mail must not also echo the token. Dev tokens only when mail was not sent.
-    if not mailed and _allow_dev_auth_tokens():
+    if require_verify and not mailed and _allow_dev_auth_tokens():
         payload["dev_verify_token"] = verify_raw
     return payload
 
@@ -972,7 +1000,7 @@ def login(body: LoginBody, request: Request):
         if row is None or not auth.verify_password(row, body.password):
             _record_auth(email, "login.failure", request)
             raise HTTPException(401, "Invalid email or password.")
-        if not row.email_verified:
+        if _require_email_verify() and not row.email_verified:
             raise HTTPException(403, "Verify your email before signing in.")
         auth.upgrade_password_if_needed(s, row, body.password)
         if bool(getattr(row, "totp_enabled", False)):
