@@ -189,6 +189,7 @@ def run_local_stage(
         cases_db.update_document(document_id, sha256=digest)
 
     update_job(job_id, stage="metadata", percent=15, message="Extracting timestamps and authorship…")
+    # analyze_metadata retries once on error; Meta remains soft-fail for clearance.
     metadata = analyze_metadata(source)
 
     if court_filing:

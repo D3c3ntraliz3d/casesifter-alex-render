@@ -397,7 +397,12 @@ def profile_tags(report: dict[str, Any] | None, modules: list[dict[str, str]] | 
             continue
         name = str(mod.get("name") or "")
         short = _MODULE_TAG_LABELS.get(name) or (name.replace("_", " ").title() if name else "Module")
-        add(f"{short} error")
+        # Meta packaging/timestamp crashes are soft-fail: quiet warning chip,
+        # not an "error" tag that reads like a blocked check.
+        if name == "metadata":
+            add("Meta warning")
+        else:
+            add(f"{short} error")
 
     if str(report.get("ai_review") or "").lower() == "incomplete":
         add("AI review incomplete")

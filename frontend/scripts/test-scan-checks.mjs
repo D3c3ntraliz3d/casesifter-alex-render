@@ -262,4 +262,36 @@ const datesFailed = checkLights({
 });
 assert.equal(datesFailed.find((item) => item.label === "Dates")?.state, "failed");
 
+// Meta soft-fail: warn light + Complete clearance (not Incomplete).
+const metaSoft = {
+  ...clean,
+  scan_modules: [
+    {
+      name: "metadata",
+      status: "error",
+      error: "Can not convert date: D:20260211214524Z'",
+    },
+    { name: "image_forensics", status: "ok" },
+    { name: "ocr_text", status: "ok" },
+    { name: "contextual_logic", status: "ok" },
+  ],
+};
+const metaLights = checkLights(metaSoft);
+assert.equal(metaLights.find((item) => item.label === "Meta")?.state, "warn");
+assert.match(metaLights.find((item) => item.label === "Meta").title, /Meta warning|packaging/i);
+assert.equal(rowClearance(metaSoft), "complete");
+
+// Meta warn + hard Image fail still Incomplete.
+const metaAndImage = {
+  ...metaSoft,
+  scan_modules: [
+    { name: "metadata", status: "error", error: "Can not convert date" },
+    { name: "image_forensics", status: "error", error: "No module named 'cv2'" },
+    { name: "ocr_text", status: "ok" },
+  ],
+};
+assert.equal(rowClearance(metaAndImage), "incomplete");
+assert.equal(checkLights(metaAndImage).find((item) => item.label === "Meta")?.state, "warn");
+assert.equal(checkLights(metaAndImage).find((item) => item.label === "Image")?.state, "failed");
+
 console.log("scan check rescan lights ok");

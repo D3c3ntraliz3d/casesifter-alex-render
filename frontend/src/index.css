@@ -1071,6 +1071,7 @@ table.data.docs .doc-check-dot {
 }
 table.data.docs .doc-check-dot.ok { background: var(--green); }
 table.data.docs .doc-check-dot.running { background: var(--yellow); }
+table.data.docs .doc-check-dot.warn { background: color-mix(in srgb, var(--yellow) 75%, #c47a00); }
 table.data.docs .doc-check-dot.failed { background: var(--red); }
 table.data.docs tr.risk-row.risk-red > td {
   background: color-mix(in srgb, var(--red) 7%, transparent);
