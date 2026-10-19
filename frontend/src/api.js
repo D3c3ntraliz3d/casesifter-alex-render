@@ -1542,10 +1542,54 @@ export async function revokeSeatInvite(inviteId) {
 }
 
 export async function setMemberRole(userId, role) {
-  return controlAuthedJson(`/v1/admin/users/${encodeURIComponent(userId)}`, {
+  const out = await controlAuthedJson(`/v1/admin/users/${encodeURIComponent(userId)}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ role }),
+  });
+  if (isHostedAnalysis()) {
+    try {
+      const res = await analysisFetch(`/api/v1/matters/admin/members/${encodeURIComponent(userId)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ role }),
+      });
+      await readJson(res);
+    } catch {
+      /* control-plane role is source of truth; analysis syncs on next request */
+    }
+  }
+  return out;
+}
+
+export async function removeOrgMember(userId) {
+  const out = await controlAuthedJson(`/v1/admin/users/${encodeURIComponent(userId)}`, {
+    method: "DELETE",
+  });
+  if (isHostedAnalysis()) {
+    try {
+      const res = await analysisFetch(`/api/v1/matters/admin/members/${encodeURIComponent(userId)}`, {
+        method: "DELETE",
+      });
+      await readJson(res);
+    } catch {
+      /* CP detach already revoked sessions; analysis detach best-effort */
+    }
+  }
+  return out;
+}
+
+export async function revokeMemberSessions(userId) {
+  return controlAuthedJson(
+    `/v1/admin/users/${encodeURIComponent(userId)}/sessions/revoke`,
+    { method: "POST", body: "{}" }
+  );
+}
+
+export async function revokeFirmSessions() {
+  return controlAuthedJson("/v1/admin/sessions/revoke-firm", {
+    method: "POST",
+    body: "{}",
   });
 }
 
