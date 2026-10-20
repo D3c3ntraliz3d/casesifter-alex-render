@@ -932,6 +932,9 @@ export default function App() {
       const data = await refreshCase(id);
       setCaseData(data);
       setView("case");
+      if (data?.storage_key_recovered && data?.message) {
+        setError(String(data.message));
+      }
       if (historyMode !== "none" && !applyingPopState.current) {
         writeAppHref({ view: "case", matterId: id, docId: null }, { replace: historyMode === "replace" });
       }

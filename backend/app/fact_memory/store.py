@@ -416,6 +416,40 @@ class FactMemoryStore:
             firm.persist_facts = bool(enabled)
             s.commit()
 
+    def reset_firm_data_key_after_master_loss(
+        self, firm_id: str, *, user_id: str | None = None
+    ) -> dict[str, Any]:
+        """Mint a new firm data key under the *current* FACT_MEMORY_MASTER_KEY.
+
+        Use when the master secret was rotated/lost and unwrap fails. Prior
+        ciphertext (reports/facts) cannot be recovered — documents are removed
+        so the matter can open and accept re-uploads. Matter rows stay.
+        """
+        with self.session() as s:
+            firm = s.get(Firm, firm_id)
+            if not firm:
+                raise KeyError("firm not found")
+            docs = s.execute(select(Document).where(Document.firm_id == firm_id)).scalars().all()
+            removed = len(docs)
+            for doc in docs:
+                s.delete(doc)
+            firm.wrapped_data_key = enc.wrap_firm_key(enc.generate_firm_key())
+            s.add(firm)
+            self._audit(
+                s,
+                firm_id,
+                user_id,
+                "firm.storage_key_reset",
+                firm_id,
+            )
+            s.commit()
+            logger.warning(
+                "reset firm data key after master loss firm=%s removed_docs=%s",
+                firm_id[:8],
+                removed,
+            )
+            return {"firm_id": firm_id, "documents_removed": removed}
+
     def list_members(self, firm_id: str) -> list[dict[str, Any]]:
         with self.session() as s:
             if not s.get(Firm, firm_id):

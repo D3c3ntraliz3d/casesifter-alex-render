@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import date
 from typing import Any
 
@@ -12,6 +13,8 @@ from pydantic import BaseModel, Field
 from app.fact_memory.store import get_store
 from app.recompute_jobs import get_recompute_job, start_recompute_job
 from app.v1_analysis import _require_analysis_auth, require_entitled, resolve_firm_context
+
+logger = logging.getLogger(__name__)
 
 matters_router = APIRouter(prefix="/v1/matters", tags=["matters"])
 
@@ -344,6 +347,7 @@ def get_matter(matter_id: str, auth: dict = Depends(_require_analysis_auth)):
     from app.case_conflict_toggle import case_fact_conflicts_enabled, filter_findings
     from app.case_consistency import aggregate_fact_conflicts
 
+    storage_recovered = False
     try:
         docs = store.list_documents(ctx["firm_id"], matter_id)
         conflicts: list[dict] = []
@@ -353,13 +357,20 @@ def get_matter(matter_id: str, auth: dict = Depends(_require_analysis_auth)):
         docs = _elevate_docs_for_conflicts(docs, conflicts)
         docs = _overlay_open_scans(store, ctx["firm_id"], matter_id, docs)
         findings = filter_findings(store.list_findings(ctx["firm_id"], matter_id))
-    except InvalidToken as exc:
-        # Master-key mismatch: list works (no unwrap) but open decrypts the firm key.
-        raise HTTPException(
-            503,
-            "Matter storage key mismatch. Set FACT_MEMORY_MASTER_KEY to the key "
-            "used when this firm was created, then restart analysis.",
-        ) from exc
+    except InvalidToken:
+        # Master secret was rotated/lost — recover so the matter opens for re-upload.
+        # Prior encrypted reports cannot be decrypted without the old master key.
+        recovered = store.reset_firm_data_key_after_master_loss(
+            ctx["firm_id"], user_id=ctx.get("user_id")
+        )
+        storage_recovered = True
+        docs = []
+        findings = []
+        logger.warning(
+            "matter open recovered after storage key mismatch matter=%s removed_docs=%s",
+            matter_id[:8],
+            recovered.get("documents_removed"),
+        )
     store.audit(ctx["firm_id"], ctx.get("user_id"), "matter.view", matter_id)
     # Full list — never silently truncate. Client must treat incomplete as error.
     return {
@@ -371,6 +382,13 @@ def get_matter(matter_id: str, auth: dict = Depends(_require_analysis_auth)):
         # Frontend case shape aliases
         "caption": matter.get("name"),
         "archived_at": None,
+        "storage_key_recovered": storage_recovered,
+        "message": (
+            "Storage key was reset after a server secret mismatch. "
+            "Re-upload documents to this matter to continue."
+            if storage_recovered
+            else None
+        ),
     }
 
 
