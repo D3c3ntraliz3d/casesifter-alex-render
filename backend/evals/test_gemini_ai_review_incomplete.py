@@ -175,7 +175,8 @@ def test_pipeline_records_incomplete_ai_review_not_clean_complete(tmp_path, monk
     progress = storage.load_progress(job_id)
     assert progress is not None
     assert progress.status == "complete"
-    assert "incomplete" in (progress.message or "").lower()
+    msg = (progress.message or "").lower()
+    assert "not cleared" in msg or "did not finish" in msg or "incomplete" in msg
 
 
 def test_forensic_file_not_sent_marks_incomplete(tmp_path, monkeypatch):

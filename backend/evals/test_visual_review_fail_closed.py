@@ -140,6 +140,53 @@ def test_multimodal_off_with_key_is_not_cleared(monkeypatch):
     assert "routine file" not in presented["executive_summary"].lower()
 
 
+def test_ocr_starved_light_triage_still_runs_visual(tmp_path, monkeypatch):
+    """Sparse OCR that forces FULL must call Gemini, not skip via raw triage.bucket."""
+    from app.ai_triage import AiTriage, BUCKET_LIGHT
+    from app.engines import contextual_logic as cl
+    from app.gemini_review_state import get_ai_review_failure, reset_ai_review_state
+
+    reset_ai_review_state()
+    source = tmp_path / "sparse.pdf"
+    source.write_bytes(b"%PDF-1.4 sparse exhibit")
+
+    monkeypatch.setattr(cl.settings, "gemini_api_key", "test-key", raising=False)
+    monkeypatch.setattr(cl.settings, "contextual_multimodal", True, raising=False)
+    monkeypatch.setattr(cl.settings, "local_only_review", False, raising=False)
+    monkeypatch.setattr(cl.settings, "logo_chrome_pass", False, raising=False)
+    monkeypatch.setattr(
+        "app.ai_triage.triage_document_ai",
+        lambda *_a, **_k: AiTriage(
+            bucket=BUCKET_LIGHT, reason="light_signal", confidence="high", signal="notice"
+        ),
+    )
+    called = {"n": 0}
+
+    def fake_run(text, source_file, extras):
+        called["n"] += 1
+        extras["document_analysis_result"] = {
+            "count": 0,
+            "file_sent": "application/pdf",
+            "overall_note": "ok",
+        }
+        return [], "enabled"
+
+    monkeypatch.setattr(cl, "_run_document_analysis", fake_run)
+
+    result = cl.analyze_contextual(
+        "x y z",  # too thin for statement checks; ocr_starved forces FULL
+        {"filename": "Exhibit_U.pdf", "doc_kind": "exhibit", "ocr_starved": True},
+        source_file=source,
+        scan_profile="forensic",
+    )
+    extras = result.extras or {}
+    assert extras.get("ai_bucket_forced") == "ocr_starved"
+    assert extras.get("visual_review_required") is True
+    assert called["n"] == 1
+    assert extras.get("visual_review") == "complete"
+    assert get_ai_review_failure() is None
+
+
 def test_court_filing_skip_is_not_a_gemini_failure(monkeypatch):
     from app.engines import contextual_logic as cl
     from app.gemini_review_state import get_ai_review_failure, reset_ai_review_state

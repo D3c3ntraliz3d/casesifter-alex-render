@@ -603,11 +603,14 @@ def _run(
         # Tier 3 multimodal fraud review is for exhibits only.
         from app.config import gemini_model_is_valid
 
+        # Use the effective bucket (includes ocr_starved → FULL), not the raw
+        # triage value — otherwise sparse-OCR exhibits require visual review but
+        # never call Gemini and fail closed as not_attempted.
         visual_ok = (
             settings.contextual_multimodal
             and not court_filing
             and not local_only
-            and triage.bucket == BUCKET_FULL
+            and bucket == BUCKET_FULL
         )
 
         if settings.contextual_multimodal and not court_filing and not gemini_model_is_valid(
@@ -670,11 +673,11 @@ def _run(
             extras["document_analysis"] = "skipped_court_filing"
             extras["external_verification"] = "skipped_court_filing"
             return findings, extras
-        elif settings.contextual_multimodal and triage.bucket != BUCKET_FULL:
-            extras["document_analysis"] = f"skipped_ai_bucket_{triage.bucket}"
+        elif settings.contextual_multimodal and bucket != BUCKET_FULL:
+            extras["document_analysis"] = f"skipped_ai_bucket_{bucket}"
             logger.info(
                 "contextual_logic visual skip ai_bucket=%s reason=%s doc=%s",
-                triage.bucket,
+                bucket,
                 triage.reason,
                 (filename or "-")[:80],
             )

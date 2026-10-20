@@ -763,6 +763,17 @@ def run_gemini_stage(
         and isinstance(dar, dict)
         and bool(dar.get("file_sent"))
     )
+    ctx_visual = ctx_extras.get("visual_review")
+    # Soften a stale not_attempted when the contextual module already stamped
+    # a finished visual pass (file sent, no failed page ranges). Real Gemini
+    # failures (partial / billing / rate_limited / timeout / empty) stay Incomplete.
+    if (
+        visual_succeeded
+        and ctx_visual == "complete"
+        and not failed_ranges
+        and fail_reason in (None, "not_attempted")
+    ):
+        fail_reason = None
     # Required visual review that never returned a parsed file response.
     if visual_required and not fail_reason and not visual_succeeded:
         fail_reason = "not_attempted"
@@ -867,9 +878,9 @@ def run_gemini_stage(
                 bits += f" (+{len(failed_ranges) - 8} more)"
             range_note = f" Failed page ranges: {bits}."
         complete_msg = (
-            f"Scan finished but visual review is incomplete ({ai_review_reason or 'error'}). "
-            "This file was not cleared."
-            f"{range_note} Re-run AI review (full re-scan from your local file)."
+            f"Scan finished but visual model pass did not finish ({ai_review_reason or 'error'}). "
+            "Not a fraud finding — this file was not cleared."
+            f"{range_note} Re-run AI when the file is cached."
         )
     elif ai_review == "local_only":
         complete_msg = (

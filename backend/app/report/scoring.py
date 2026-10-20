@@ -9,7 +9,7 @@ from app.gotcha import TYPE_SCORE_WEIGHT
 from app.models import Finding, RiskLevel
 
 CRITICAL_RISK_LABEL = "Critical risk — strong indicators of alteration"
-VISUAL_REVIEW_INCOMPLETE_LABEL = "Visual review did not complete — not cleared"
+VISUAL_REVIEW_INCOMPLETE_LABEL = "Visual model pass did not finish — not cleared"
 RISK_LABEL = {
     "green": "Low risk",
     "yellow": "Moderate risk",
@@ -179,8 +179,8 @@ def recommended_actions(
                 actions.append(item.recommended_action)
     if uncleared:
         actions.append(
-            "Visual review did not complete. Do not treat this exhibit as cleared. "
-            "Re-run the scan when the visual review can finish."
+            "Visual model pass did not finish — not a fraud finding. "
+            "Do not treat this exhibit as cleared. Re-run AI when the file is cached."
         )
     elif risk == "red":
         actions.append(
@@ -213,8 +213,8 @@ def _critical_clause(item: Finding) -> str:
 
 def _incomplete_visual_summary(filename: str) -> str:
     return (
-        f"Visual review of “{filename}” did not complete, so this file was not cleared. "
-        "This is not a low-risk result. No fraud finding is recorded from a review that did not finish."
+        f"Visual model pass for “{filename}” did not finish, so this file was not cleared. "
+        "This is not a low-risk result and not a fraud finding. Re-run AI when the file is cached."
     )
 
 

@@ -144,7 +144,9 @@ function visualLight(doc) {
       "visual",
       "Visual",
       "failed",
-      reason ? `Visual review did not complete (${reason})` : "Visual review did not complete"
+      reason
+        ? `Visual model pass did not finish (${reason}) — not a fraud finding`
+        : "Visual model pass did not finish — not a fraud finding"
     );
   }
   if (ai === "local_only" || mode === "local_only" || mode === "court_filing" || mode === "not_required") {

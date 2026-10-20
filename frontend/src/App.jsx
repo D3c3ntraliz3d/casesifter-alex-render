@@ -4010,8 +4010,8 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
                     ? formatScanError(doc) || "Scan did not finish"
                     : clearance === "incomplete"
                       ? doc.ai_review === "incomplete"
-                        ? "Visual review incomplete"
-                        : "Check failed"
+                        ? "Visual model pass did not finish — not a fraud finding. Re-run AI when file is cached."
+                        : "Check failed — not a fraud finding. Re-scan when file is cached."
                       : clearance === "scanning"
                         ? "Scan in progress"
                         : null;
@@ -4181,8 +4181,8 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
                       <button
                         className="btn secondary"
                         type="button"
-                        title="Re-run AI review from the cached PDF on this computer"
-                        disabled={busy}
+                        title="Visual model pass did not finish — re-run AI from the cached PDF (not a fraud finding)"
+                        disabled={Boolean(busy) && Boolean(inProgress)}
                         onClick={() => rerunAi(doc)}
                       >
                         Re-run AI
@@ -4201,7 +4201,7 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
                         className="btn secondary"
                         type="button"
                         title="Re-scan from the cached PDF on this computer"
-                        disabled={busy}
+                        disabled={Boolean(busy) && Boolean(inProgress)}
                         onClick={() => rescan(doc)}
                       >
                         {clearance === "complete" ||
@@ -7113,9 +7113,10 @@ function ReportViewer({
             {reviewDidNotComplete(report) && (
               <div className="ai-review-banner">
                 <div>
-                  <p>Visual review did not complete — this file was not cleared</p>
+                  <p>Visual model pass did not finish — not a fraud finding</p>
                   <p className="footnote">
-                    This is not a low-risk result. Gemini did not return a successful visual review (
+                    This file was not cleared as low risk. Gemini did not return a successful visual
+                    review (
                     {report.ai_review_reason || report.comparison?.ai_review_reason || "error"}
                     ).
                     {(report.comparison?.ai_review_failed_page_ranges || []).length
@@ -7128,7 +7129,7 @@ function ReportViewer({
                             : ""
                         }.`
                       : ""}{" "}
-                    Re-uploads the file from this computer’s cache and runs the full scan again.
+                    Re-run AI when the file is cached on this computer (full re-scan from the PDF).
                   </p>
                 </div>
                 <button
@@ -7824,7 +7825,10 @@ function ReportFindingsList({ caseId, docKind, findings, reviewIncomplete = fals
         ignored.length > 0 ? (
           <p>All findings are ignored. Use Show ignored to review or undo.</p>
         ) : reviewIncomplete ? (
-          <p>Visual review did not complete. This file was not cleared.</p>
+          <p>
+            Visual model pass did not finish — not a fraud finding. This file was not cleared.
+            Re-run AI when the file is cached.
+          </p>
         ) : (
           <p>The automated modules did not flag this file.</p>
         )
