@@ -69,6 +69,16 @@ def _health_payload() -> dict:
     git_commit = (os.environ.get("RENDER_GIT_COMMIT") or "").strip() or None
     mode = settings.resolve_app_mode()
     missing_img = missing_image_forensics_deps()
+    db_url = (os.environ.get("DATABASE_URL") or "").strip()
+    if db_url.lower().startswith("postgres"):
+        fact_memory_backend = "postgres"
+    elif db_url:
+        fact_memory_backend = "other"
+    elif mode == "analysis" and (settings.app_env or "").strip().lower() == "production":
+        # Missing DATABASE_URL in hosted prod → ephemeral SQLite (cases vanish on restart).
+        fact_memory_backend = "sqlite_ephemeral_risk"
+    else:
+        fact_memory_backend = "sqlite"
     payload = {
         "status": "ok",
         "name": settings.app_name,
@@ -81,6 +91,7 @@ def _health_payload() -> dict:
         "gemini_max_inflight_mb": max(16, int(settings.gemini_max_inflight_mb or 150)),
         "image_forensics_ready": not missing_img,
         "image_forensics_missing": missing_img,
+        "fact_memory_backend": fact_memory_backend,
     }
     if git_commit:
         payload["git_commit"] = git_commit

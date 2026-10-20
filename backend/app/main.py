@@ -107,6 +107,15 @@ def _startup() -> None:
             "APP_MODE=analysis but ANALYSIS_API_KEYS and CLOUD_CONTROL_URL are empty — "
             "/api/v1 will return 401."
         )
+    if (
+        _mode == "analysis"
+        and (settings.app_env or "").strip().lower() == "production"
+        and not (os.environ.get("DATABASE_URL") or settings.database_url or "").strip()
+    ):
+        raise RuntimeError(
+            "DATABASE_URL is required for production analysis. "
+            "Without it, matters are stored on ephemeral SQLite and disappear after restart."
+        )
     try:
         from app.image_deps import missing_image_forensics_deps
 
@@ -123,7 +132,10 @@ def _startup() -> None:
         logger.warning("Image forensics dep probe failed: %s", exc)
     cases_db.ensure_schema()
     try:
+        from app.fact_memory.models import fact_memory_backend_label
+
         store = get_store()  # init SQLite/Postgres fact memory schema
+        logger.info("Fact memory backend=%s", fact_memory_backend_label())
         n = store.mark_active_jobs_interrupted()
         if n:
             logger.warning("Marked %s queued/running analysis job(s) interrupted after restart", n)

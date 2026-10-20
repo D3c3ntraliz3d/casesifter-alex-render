@@ -276,7 +276,21 @@ _engine = None
 _SessionLocal = None
 
 
-def database_url_from_env() -> str:
+def fact_memory_backend_label(url: str | None = None) -> str:
+    """postgres | sqlite — for health/ops; never log the full URL."""
+    import os
+
+    raw = (url or os.environ.get("DATABASE_URL") or "").strip().lower()
+    if raw.startswith("postgres"):
+        return "postgres"
+    if raw.startswith("sqlite"):
+        return "sqlite"
+    if not raw:
+        return "sqlite"
+    return "unknown"
+
+
+def database_url_from_env(*, allow_sqlite_fallback: bool | None = None) -> str:
     import os
     from pathlib import Path
 
@@ -288,6 +302,21 @@ def database_url_from_env() -> str:
         elif url.startswith("postgresql://") and "+psycopg" not in url:
             url = "postgresql+psycopg://" + url[len("postgresql://") :]
         return url
+
+    app_env = (os.environ.get("APP_ENV") or os.environ.get("ENV") or "").strip().lower()
+    app_mode = (os.environ.get("APP_MODE") or "").strip().lower()
+    # Hosted analysis must never silently fall back to container-local SQLite —
+    # redeploys wipe the file and cases "disappear" after refresh.
+    if allow_sqlite_fallback is None:
+        allow_sqlite_fallback = not (
+            app_env == "production" and app_mode == "analysis"
+        )
+    if not allow_sqlite_fallback:
+        raise RuntimeError(
+            "DATABASE_URL is required when APP_MODE=analysis and APP_ENV=production. "
+            "Refusing ephemeral SQLite so matters survive restart."
+        )
+
     # SQLite fallback for local/CI — same schema via SQLAlchemy.
     data = Path(os.environ.get("FACT_MEMORY_SQLITE_PATH") or "")
     if not data.parts:
