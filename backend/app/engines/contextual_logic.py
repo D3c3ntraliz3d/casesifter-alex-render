@@ -631,7 +631,9 @@ def _run(
             t_mm = _time.perf_counter()
             extras["doc_kind"] = doc_kind
             extras["filename"] = filename
-            document_findings, status = _run_document_analysis(text, source_file, extras)
+            document_findings, status = _run_document_analysis_with_retry(
+                text, source_file, extras
+            )
             extras["multimodal_ms"] = int((_time.perf_counter() - t_mm) * 1000)
             findings.extend(document_findings)
             extras["document_analysis"] = status
@@ -1410,6 +1412,99 @@ def analyze_document(
         "pages_sent": list(pages_label),
         "payload_bytes": est_payload,
     }
+
+
+# One automatic retry of the whole visual pass (2 attempts total) before Incomplete.
+_VISUAL_PASS_MAX_ATTEMPTS = 2
+# Config / billing — not transient. multimodal_off never reaches the retry path.
+_VISUAL_PASS_NO_RETRY_REASONS = frozenset({"multimodal_off", "no_api_key", "billing"})
+_VISUAL_RETRY_EXTRAS_KEYS = (
+    "document_analysis_error",
+    "document_analysis_note",
+    "document_analysis_result",
+    "document_analysis_failed_page_ranges",
+    "document_analysis_transport",
+    "document_analysis_selected_pdf_bytes",
+    "document_analysis_pages_selected",
+    "document_analysis_long_side_px",
+)
+
+
+def _visual_pass_succeeded(status: str, extras: dict[str, Any]) -> bool:
+    from app.gemini_review_state import get_ai_review_failure, get_failed_page_ranges
+
+    dar = extras.get("document_analysis_result")
+    if status != "enabled":
+        return False
+    if not isinstance(dar, dict) or not dar.get("file_sent"):
+        return False
+    if get_ai_review_failure():
+        return False
+    if get_failed_page_ranges():
+        return False
+    return True
+
+
+def _prepare_visual_pass_retry(extras: dict[str, Any]) -> None:
+    from app.gemini_review_state import clear_ai_review_failure
+
+    clear_ai_review_failure()
+    for key in _VISUAL_RETRY_EXTRAS_KEYS:
+        extras.pop(key, None)
+
+
+def _run_document_analysis_with_retry(
+    text: str, source_file: Path | None, extras: dict[str, Any]
+) -> tuple[list[Finding], str]:
+    """Run Task D visual once; on fail-closed outcome, retry the whole pass once.
+
+    multimodal_off / no_api_key never enter this path (handled earlier). Billing
+    is not retried. Timeout, API error, partial, empty, and file_not_sent get
+    exactly one automatic retry (2 attempts total), then stay fail-closed.
+    """
+    from app.gemini_review_state import get_ai_review_failure
+
+    doc_label = str(extras.get("filename") or "-")[:80]
+    last_findings: list[Finding] = []
+    last_status = "error"
+    for attempt in range(1, _VISUAL_PASS_MAX_ATTEMPTS + 1):
+        if attempt > 1:
+            _prepare_visual_pass_retry(extras)
+        extras["visual_review_attempt"] = attempt
+        extras["visual_review_attempts"] = attempt
+        logger.info(
+            "visual review attempt=%s/%s doc=%s",
+            attempt,
+            _VISUAL_PASS_MAX_ATTEMPTS,
+            doc_label,
+        )
+        last_findings, last_status = _run_document_analysis(text, source_file, extras)
+        if _visual_pass_succeeded(last_status, extras):
+            logger.info(
+                "visual review attempt=%s succeeded doc=%s",
+                attempt,
+                doc_label,
+            )
+            return last_findings, last_status
+        fail_reason = get_ai_review_failure() or last_status
+        if (
+            attempt >= _VISUAL_PASS_MAX_ATTEMPTS
+            or str(fail_reason) in _VISUAL_PASS_NO_RETRY_REASONS
+        ):
+            logger.warning(
+                "visual review attempt=%s failed reason=%s doc=%s; not retrying",
+                attempt,
+                fail_reason,
+                doc_label,
+            )
+            break
+        logger.warning(
+            "visual review attempt=%s failed reason=%s doc=%s; retrying once",
+            attempt,
+            fail_reason,
+            doc_label,
+        )
+    return last_findings, last_status
 
 
 def _run_document_analysis(

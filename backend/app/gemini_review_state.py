@@ -44,6 +44,11 @@ def reset_ai_review_state() -> None:
     _tls.failed_page_ranges = None
 
 
+def clear_ai_review_failure() -> None:
+    """Drop recorded failure so a successful visual retry can clear Incomplete."""
+    reset_ai_review_state()
+
+
 def note_ai_review_failure(reason: AiReviewReason | str) -> None:
     """Record a failure; keep the highest-priority reason if several occur."""
     key = str(reason or "error")

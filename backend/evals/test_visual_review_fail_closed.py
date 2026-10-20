@@ -275,6 +275,116 @@ def test_empty_gemini_response_is_not_a_clearance():
     assert "routine file" not in presented["executive_summary"].lower()
 
 
+def test_visual_pass_retries_once_then_succeeds(tmp_path, monkeypatch):
+    """First visual failure must not Incomplete when the second attempt succeeds."""
+    from app.ai_triage import AiTriage, BUCKET_FULL
+    from app.engines import contextual_logic as cl
+    from app.gemini_review_state import get_ai_review_failure, note_ai_review_failure, reset_ai_review_state
+
+    reset_ai_review_state()
+    source = tmp_path / "Exhibit_retry.pdf"
+    source.write_bytes(b"%PDF-1.4 retry exhibit")
+
+    monkeypatch.setattr(cl.settings, "gemini_api_key", "test-key", raising=False)
+    monkeypatch.setattr(cl.settings, "contextual_multimodal", True, raising=False)
+    monkeypatch.setattr(cl.settings, "local_only_review", False, raising=False)
+    monkeypatch.setattr(cl.settings, "logo_chrome_pass", False, raising=False)
+    monkeypatch.setattr(
+        "app.ai_triage.triage_document_ai",
+        lambda *_a, **_k: AiTriage(
+            bucket=BUCKET_FULL, reason="full", confidence="high", signal="statement"
+        ),
+    )
+    calls = {"n": 0}
+
+    def fail_then_ok(text, source_file, extras):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            note_ai_review_failure("timeout")
+            extras["document_analysis_error"] = "timeout"
+            return [], "error"
+        extras["document_analysis_result"] = {
+            "count": 0,
+            "file_sent": "image/jpeg",
+            "overall_note": "ok",
+        }
+        return [], "enabled"
+
+    monkeypatch.setattr(cl, "_run_document_analysis", fail_then_ok)
+    # Keep tier-2 claim calls from overwriting the visual retry success state.
+    monkeypatch.setattr(cl, "_verify_claims_parallel", lambda *_a, **_k: [])
+    monkeypatch.setattr(cl, "build_claims", lambda *_a, **_k: [])
+
+    result = cl.analyze_contextual(
+        STATEMENT,
+        {"filename": "Exhibit_retry.pdf", "doc_kind": "exhibit"},
+        source_file=source,
+        scan_profile="forensic",
+    )
+    extras = result.extras or {}
+    assert calls["n"] == 2
+    assert extras.get("visual_review_attempt") == 2
+    assert extras.get("visual_review") == "complete"
+    assert get_ai_review_failure() is None
+    presented = apply_review_presentation(
+        result.findings,
+        "Exhibit_retry.pdf",
+        ai_review="complete",
+    )
+    assert presented["risk_level"] == "green"
+
+
+def test_visual_pass_double_fail_stays_incomplete(tmp_path, monkeypatch):
+    """Two failed visual attempts still fail closed as Incomplete — no third try."""
+    from app.ai_triage import AiTriage, BUCKET_FULL
+    from app.engines import contextual_logic as cl
+    from app.gemini_review_state import get_ai_review_failure, note_ai_review_failure, reset_ai_review_state
+
+    reset_ai_review_state()
+    source = tmp_path / "Exhibit_fail.pdf"
+    source.write_bytes(b"%PDF-1.4 fail exhibit")
+
+    monkeypatch.setattr(cl.settings, "gemini_api_key", "test-key", raising=False)
+    monkeypatch.setattr(cl.settings, "contextual_multimodal", True, raising=False)
+    monkeypatch.setattr(cl.settings, "local_only_review", False, raising=False)
+    monkeypatch.setattr(cl.settings, "logo_chrome_pass", False, raising=False)
+    monkeypatch.setattr(
+        "app.ai_triage.triage_document_ai",
+        lambda *_a, **_k: AiTriage(
+            bucket=BUCKET_FULL, reason="full", confidence="high", signal="statement"
+        ),
+    )
+    calls = {"n": 0}
+
+    def always_fail(text, source_file, extras):
+        calls["n"] += 1
+        note_ai_review_failure("error")
+        extras["document_analysis_error"] = f"boom-{calls['n']}"
+        return [], "error"
+
+    monkeypatch.setattr(cl, "_run_document_analysis", always_fail)
+    monkeypatch.setattr(cl, "_verify_claims_parallel", lambda *_a, **_k: [])
+    monkeypatch.setattr(cl, "build_claims", lambda *_a, **_k: [])
+
+    result = cl.analyze_contextual(
+        STATEMENT,
+        {"filename": "Exhibit_fail.pdf", "doc_kind": "exhibit"},
+        source_file=source,
+        scan_profile="forensic",
+    )
+    extras = result.extras or {}
+    assert calls["n"] == 2
+    assert extras.get("visual_review_attempts") == 2
+    assert extras.get("visual_review") == "incomplete"
+    assert get_ai_review_failure() == "error"
+    presented = apply_review_presentation(
+        result.findings,
+        "Exhibit_fail.pdf",
+        ai_review="incomplete",
+    )
+    assert presented["risk_level"] == "incomplete"
+
+
 def test_pipeline_forensic_without_key_does_not_clear(tmp_path, monkeypatch):
     from app.config import Settings
     import app.config as config_mod
