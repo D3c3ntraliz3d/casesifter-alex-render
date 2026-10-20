@@ -1179,6 +1179,13 @@ def finding_stable_key(item: dict[str, Any]) -> tuple[str, ...]:
     return _gotcha_cluster_key(item)
 
 
+def finding_feedback_fingerprint(item: dict[str, Any]) -> str:
+    """Opaque fingerprint for firm judgment soft-suppress (survives finding re-ids)."""
+    key = finding_stable_key(item)
+    blob = "\x1f".join(str(part) for part in key)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:40]
+
+
 def _gotcha_cluster_key(item: dict[str, Any]) -> tuple[str, ...]:
     """One card per fact theme (service at an address, settlement date), not per sentence."""
     ev = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}

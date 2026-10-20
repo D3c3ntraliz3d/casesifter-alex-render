@@ -7,13 +7,19 @@ const jsonHeaders = { Accept: "application/json" };
 const CONTROL_SAME_ORIGIN =
   import.meta.env.VITE_CONTROL_SAME_ORIGIN === "1" ||
   import.meta.env.VITE_CONTROL_SAME_ORIGIN === "true";
+const ANALYSIS_SAME_ORIGIN =
+  import.meta.env.VITE_ANALYSIS_SAME_ORIGIN === "1" ||
+  import.meta.env.VITE_ANALYSIS_SAME_ORIGIN === "true";
 // Empty / same-origin: SPA hits relative /v1 so Set-Cookie is first-party (Render rewrite or nginx).
 const CONTROL_PLANE_URL = CONTROL_SAME_ORIGIN
   ? ""
   : String(
       import.meta.env.VITE_CONTROL_PLANE_URL || "https://casesifter-control.onrender.com"
     ).replace(/\/$/, "");
-const ANALYSIS_API_URL = String(import.meta.env.VITE_ANALYSIS_API_URL || "").replace(/\/$/, "");
+// Same-origin analysis: relative /api via Render rewrite (first-party cs_session cookie).
+const ANALYSIS_API_URL = ANALYSIS_SAME_ORIGIN
+  ? ""
+  : String(import.meta.env.VITE_ANALYSIS_API_URL || "").replace(/\/$/, "");
 const ANALYSIS_API_KEY = String(import.meta.env.VITE_ANALYSIS_API_KEY || "").trim();
 
 const SESSION_TOKEN_KEY = "casesifter_session_token";
@@ -93,8 +99,8 @@ function clearSession() {
 }
 
 async function acceptAnalysisSession(code) {
-  if (!code || !ANALYSIS_API_URL) return;
-  await fetch(`${ANALYSIS_API_URL}/api/v1/session/accept`, {
+  if (!code || (!ANALYSIS_API_URL && !ANALYSIS_SAME_ORIGIN)) return;
+  await fetch(apiUrl("/api/v1/session/accept"), {
     method: "POST",
     headers: { ...jsonHeaders, "Content-Type": "application/json" },
     credentials: "include",
@@ -202,7 +208,7 @@ function authHeaders(extra = {}) {
   if (token) headers.Authorization = `Bearer ${token}`;
   // Never bake ops API keys into the hosted browser client — that bypasses
   // firm tenancy (shared ops firm / cross-job reads). Desktop/local vault only.
-  if (ANALYSIS_API_KEY && !ANALYSIS_API_URL) {
+  if (ANALYSIS_API_KEY && !ANALYSIS_API_URL && !ANALYSIS_SAME_ORIGIN) {
     headers["X-API-Key"] = ANALYSIS_API_KEY;
   }
   return headers;
@@ -325,7 +331,7 @@ export async function getJob(jobId, { includeReport = false } = {}) {
   }
   const qs = includeReport ? "?include_report=true" : "";
   // Prefer ephemeral v1 when talking to hosted analysis; fall back to vault job route.
-  if (ANALYSIS_API_URL) {
+  if (ANALYSIS_SAME_ORIGIN || ANALYSIS_API_URL) {
     const res = await analysisFetch(`/api/v1/jobs/${jobId}${qs}`);
     return readJson(res);
   }
@@ -347,10 +353,11 @@ export async function downloadExportReport(jobId, kind) {
   if (!["html", "pdf", "json"].includes(k)) {
     throw new Error("Export kind must be html, pdf, or json.");
   }
-  const path = ANALYSIS_API_URL
+  const hosted = ANALYSIS_SAME_ORIGIN || Boolean(ANALYSIS_API_URL);
+  const path = hosted
     ? `/api/v1/jobs/${jobId}/export/${k}`
     : `/api/jobs/${jobId}/export/${k}`;
-  const res = ANALYSIS_API_URL
+  const res = hosted
     ? await analysisFetch(path)
     : await apiFetch(path);
   if (!res.ok) {
@@ -391,11 +398,12 @@ function vaultUnavailableError() {
 }
 
 /**
- * Soft-launch browser build points VITE_ANALYSIS_API_URL at APP_MODE=analysis.
- * Matters / fact memory live on /api/v1/matters (not the local vault /api/cases).
+ * Soft-launch browser build points VITE_ANALYSIS_API_URL (or same-origin rewrite)
+ * at APP_MODE=analysis. Matters / fact memory live on /api/v1/matters (not the
+ * local vault /api/cases).
  */
 export function isHostedAnalysis() {
-  return Boolean(ANALYSIS_API_URL);
+  return ANALYSIS_SAME_ORIGIN || Boolean(ANALYSIS_API_URL);
 }
 
 /** User-facing copy when hosted analysis (matters + scans) is down. Ops steps stay in docs only. */
@@ -962,10 +970,12 @@ export async function listCaseGotchas(caseId) {
     } catch {
       factConflicts = [];
     }
+    const withFb = await applyLocalFindingFeedback(caseId, gotchas, factConflicts);
     return {
-      gotchas,
-      factConflicts,
+      gotchas: withFb.gotchas,
+      factConflicts: withFb.factConflicts,
       risksElevated,
+      ignoredCount: withFb.ignoredCount,
       caseImpact: summarizeCaseImpact(allFindings),
     };
   }
@@ -975,15 +985,19 @@ export async function listCaseGotchas(caseId) {
     const findings = data.findings || [];
     const gotchas = data.gotchas || [];
     const factConflicts = data.fact_conflicts || [];
-    // Case impact count must match the filtered board cards (gotchas + conflicts).
-    const boardMaterial = [
-      ...factConflicts.filter((f) => f.severity !== "info"),
-      ...gotchas.filter((f) => f.case_impact !== "noise" && f.severity !== "info"),
-    ];
+    // Active board count excludes firm-ignored (false_positive) soft-suppress.
+    const activeGotchas = gotchas.filter(
+      (f) => f.case_impact !== "noise" && f.severity !== "info" && !isFindingIgnored(f),
+    );
+    const activeConflicts = factConflicts.filter(
+      (f) => f.severity !== "info" && !isFindingIgnored(f),
+    );
+    const boardMaterial = [...activeConflicts, ...activeGotchas];
     return {
       gotchas,
       factConflicts,
-      risksElevated: factConflicts.filter((f) => f.severity === "high").length,
+      ignoredCount: Number(data.ignored_count) || countIgnoredFindings([...gotchas, ...factConflicts]),
+      risksElevated: factConflicts.filter((f) => f.severity === "high" && !isFindingIgnored(f)).length,
       caseImpact: {
         ...summarizeCaseImpact(findings),
         material_count: boardMaterial.length,
@@ -995,20 +1009,214 @@ export async function listCaseGotchas(caseId) {
           bucket: f.case_impact_bucket,
           tainted_support: Boolean(f.tainted_support || f.evidence?.tainted_support),
           analysis_type: f.analysis_type || f.finding_type || f.evidence?.analysis_type,
+          user_feedback: f.user_feedback || null,
         })),
       },
     };
   }
   const res = await apiFetch(`/api/cases/${caseId}/gotchas`);
   if (res.status === 404) {
-    return { gotchas: [], factConflicts: [], risksElevated: 0, caseImpact: null };
+    return { gotchas: [], factConflicts: [], risksElevated: 0, ignoredCount: 0, caseImpact: null };
   }
   const data = await readJson(res);
+  const withFb = await applyLocalFindingFeedback(
+    caseId,
+    data.gotchas || [],
+    data.fact_conflicts || [],
+  );
   return {
-    gotchas: data.gotchas || [],
-    factConflicts: data.fact_conflicts || [],
+    gotchas: withFb.gotchas,
+    factConflicts: withFb.factConflicts,
     risksElevated: Number(data.risks_elevated) || 0,
+    ignoredCount: withFb.ignoredCount,
     caseImpact: data.case_impact || null,
+  };
+}
+
+const FRAUD_ANALYSIS_TYPES = new Set([
+  "math_error",
+  "historical_impossibility",
+  "template_fabrication",
+  "logo_chrome_mismatch",
+  "date_inconsistency",
+]);
+
+function _quoteKey(text) {
+  return String(text || "").trim().toLowerCase().replace(/\s+/g, " ").slice(0, 240);
+}
+
+/** Mirror backend finding_stable_key for soft-suppress fingerprints. */
+export function findingStableKeyParts(item) {
+  const ev = item?.evidence && typeof item.evidence === "object" ? item.evidence : {};
+  const field = String(ev.field || item?.field || "").trim().toLowerCase();
+  const fact = String(ev.fact_named || item?.fact_named || "").trim().toLowerCase().slice(0, 80);
+  const analysis = String(
+    ev.analysis_type || item?.finding_type || item?.analysis_type || "",
+  )
+    .trim()
+    .toLowerCase();
+  const claim = _quoteKey(ev.claim_quote || item?.claim_quote || "");
+  const evidence = _quoteKey(
+    ev.evidence_quote || item?.evidence_quote || ev.quoted_evidence || "",
+  );
+  const tainted = Boolean(item?.tainted_support || ev.tainted_support);
+  if (FRAUD_ANALYSIS_TYPES.has(analysis) || tainted) {
+    const quote = evidence || claim || _quoteKey(item?.title || "");
+    return ["fraud", analysis || "tainted", quote.slice(0, 160)];
+  }
+  const thisV = _quoteKey(ev.this_display || item?.this_display || claim);
+  const priorV = _quoteKey(ev.prior_display || item?.prior_display || evidence);
+  const values = [thisV, priorV].filter(Boolean).sort();
+  if (field || fact || values.length) {
+    return ["pair", analysis || "finding", field || fact || "fact", ...values];
+  }
+  const title = _quoteKey(item?.title || "").slice(0, 120);
+  return ["cluster", analysis || "gotcha", title];
+}
+
+export async function findingFeedbackFingerprint(item) {
+  if (item?.feedback_fingerprint) return String(item.feedback_fingerprint);
+  const parts = findingStableKeyParts(item);
+  const blob = parts.join("\x1f");
+  if (globalThis.crypto?.subtle) {
+    const data = new TextEncoder().encode(blob);
+    const digest = await crypto.subtle.digest("SHA-256", data);
+    return Array.from(new Uint8Array(digest))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("")
+      .slice(0, 40);
+  }
+  // Fallback: stable opaque key when SubtleCrypto is unavailable.
+  let h = 2166136261;
+  for (let i = 0; i < blob.length; i += 1) {
+    h ^= blob.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return `fnv_${(h >>> 0).toString(16)}_${blob.length}`;
+}
+
+function localFeedbackStorageKey(matterId) {
+  return `cs_finding_fb_v1:${matterId}`;
+}
+
+export function readLocalFindingFeedback(matterId) {
+  if (!matterId || typeof localStorage === "undefined") return {};
+  try {
+    const raw = localStorage.getItem(localFeedbackStorageKey(matterId));
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeLocalFindingFeedback(matterId, map) {
+  if (!matterId || typeof localStorage === "undefined") return;
+  try {
+    localStorage.setItem(localFeedbackStorageKey(matterId), JSON.stringify(map || {}));
+  } catch {
+    /* quota / private mode */
+  }
+}
+
+export function isFindingIgnored(item) {
+  return item?.user_feedback?.status === "false_positive";
+}
+
+function countIgnoredFindings(items) {
+  return (items || []).filter((f) => isFindingIgnored(f)).length;
+}
+
+async function annotateFindingsWithLocalFeedback(matterId, list) {
+  const map = readLocalFindingFeedback(matterId);
+  const out = [];
+  for (const item of list || []) {
+    const fp = item.feedback_fingerprint || (await findingFeedbackFingerprint(item));
+    const fb = map[fp] || (item.id ? map[`id:${item.id}`] : null);
+    out.push({
+      ...item,
+      feedback_fingerprint: fp,
+      user_feedback: fb
+        ? { status: fb.status, fingerprint: fp, updated_at: fb.updated_at }
+        : item.user_feedback || null,
+    });
+  }
+  return out;
+}
+
+export async function applyLocalFindingFeedbackToList(matterId, findings) {
+  return annotateFindingsWithLocalFeedback(matterId, findings);
+}
+
+async function applyLocalFindingFeedback(matterId, gotchas, factConflicts) {
+  const g = await annotateFindingsWithLocalFeedback(matterId, gotchas);
+  const c = await annotateFindingsWithLocalFeedback(matterId, factConflicts);
+  return {
+    gotchas: g,
+    factConflicts: c,
+    ignoredCount: countIgnoredFindings([...g, ...c]),
+  };
+}
+
+/**
+ * Soft-suppress / confirm a finding for this firm+matter.
+ * status: "false_positive" | "confirmed" | "clear"
+ */
+export async function setMatterFindingFeedback(matterId, findingId, status, opts = {}) {
+  const item = opts.item || null;
+  const fingerprint =
+    opts.fingerprint
+    || item?.feedback_fingerprint
+    || (item ? await findingFeedbackFingerprint(item) : null)
+    || String(findingId || "");
+  const statusNorm = String(status || "").toLowerCase();
+
+  // Always mirror locally so vault/desktop and refresh keep the dismissal.
+  const map = readLocalFindingFeedback(matterId);
+  if (statusNorm === "clear") {
+    delete map[fingerprint];
+    if (findingId) delete map[`id:${findingId}`];
+  } else if (statusNorm === "false_positive" || statusNorm === "confirmed") {
+    const payload = {
+      status: statusNorm,
+      fingerprint,
+      finding_id: findingId || null,
+      updated_at: new Date().toISOString(),
+    };
+    map[fingerprint] = payload;
+    if (findingId) map[`id:${findingId}`] = payload;
+  }
+  writeLocalFindingFeedback(matterId, map);
+
+  if (isHostedAnalysis() && matterId && findingId) {
+    const res = await analysisFetch(
+      `/api/v1/matters/${matterId}/findings/${encodeURIComponent(findingId)}/feedback`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: statusNorm, fingerprint }),
+      },
+    );
+    if (!res.ok && res.status !== 404) {
+      const err = await res.text().catch(() => "");
+      throw new Error(err || `Feedback failed (${res.status})`);
+    }
+    const data = res.ok ? await readJson(res).catch(() => ({})) : {};
+    return {
+      user_feedback: data.user_feedback
+        || (statusNorm === "clear"
+          ? null
+          : { status: statusNorm, fingerprint, updated_at: new Date().toISOString() }),
+      fingerprint,
+    };
+  }
+
+  return {
+    user_feedback:
+      statusNorm === "clear"
+        ? null
+        : { status: statusNorm, fingerprint, updated_at: new Date().toISOString() },
+    fingerprint,
   };
 }
 
@@ -1348,8 +1556,8 @@ export async function getEntitlement() {
 
   absorbSessionHandoff();
 
-  // Local vault / Vite proxy (no remote analysis URL): keep open/license mode for John.
-  if (!ANALYSIS_API_URL) {
+  // Local vault / Vite proxy (no hosted analysis): keep open/license mode for John.
+  if (!ANALYSIS_API_URL && !ANALYSIS_SAME_ORIGIN) {
     try {
       const res = await apiFetch("/api/entitlement");
       if (res.ok) {
@@ -1881,9 +2089,9 @@ export async function logoutCloud() {
   } catch {
     /* still clear local session */
   }
-  if (ANALYSIS_API_URL) {
+  if (ANALYSIS_SAME_ORIGIN || ANALYSIS_API_URL) {
     try {
-      await fetch(`${ANALYSIS_API_URL}/api/v1/session/logout`, {
+      await fetch(apiUrl("/api/v1/session/logout"), {
         method: "POST",
         credentials: "include",
         headers: { Accept: "application/json" },

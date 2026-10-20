@@ -194,6 +194,31 @@ class FindingRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
+class FindingFeedbackRow(Base):
+    """Firm+matter user judgment on a finding — soft-suppress only; never deletes evidence."""
+
+    __tablename__ = "finding_feedback"
+    __table_args__ = (
+        UniqueConstraint("firm_id", "matter_id", "fingerprint", name="uq_finding_feedback_fp"),
+        Index("ix_finding_feedback_matter", "matter_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_uuid)
+    firm_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("firms.id", ondelete="CASCADE"), nullable=False
+    )
+    matter_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("matters.id", ondelete="CASCADE"), nullable=False
+    )
+    # Stable key hash (survives rescan re-ids) or finding_id fallback.
+    fingerprint: Mapped[str] = mapped_column(String(128), nullable=False)
+    finding_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # false_positive | confirmed  (clear deletes the row)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    user_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
 class AuditLog(Base):
     __tablename__ = "audit_log"
     __table_args__ = (Index("ix_audit_firm", "firm_id"),)

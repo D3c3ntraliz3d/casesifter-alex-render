@@ -1767,6 +1767,36 @@ table.data td.row-actions { width: 1%; text-align: right; }
   background: transparent;
   color: var(--muted, #667);
 }
+.case-impact-pill.noise.active {
+  background: #f0f1f3;
+  border-color: rgba(15, 23, 32, 0.14);
+  color: var(--ink);
+}
+.gotcha-row.gotcha-ignored {
+  opacity: 0.72;
+}
+.gotcha-row.gotcha-ignored .gotcha-row-title {
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+  text-decoration-color: rgba(15, 23, 32, 0.35);
+}
+.gotcha-feedback-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  margin-top: 2px;
+}
+.finding.finding-ignored {
+  opacity: 0.72;
+}
+.finding-feedback-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
 .case-impact-noise-note {
   margin: 0 0 8px;
   padding: 6px 8px;

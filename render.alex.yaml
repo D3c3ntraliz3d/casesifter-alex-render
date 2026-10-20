@@ -335,11 +335,14 @@ services:
         - control_plane/**
         - render.alex.yaml
     routes:
-      # Same-origin control: browser sees Set-Cookie on the app host (first-party).
-      # Must be listed before the SPA fallback rewrite.
+      # Same-origin control + analysis: browser sees Set-Cookie on the app host
+      # (first-party). Must be listed before the SPA fallback rewrite.
       - type: rewrite
         source: /v1/*
         destination: https://casesifter-alex-control.onrender.com/v1/*
+      - type: rewrite
+        source: /api/*
+        destination: https://casesifter-alex-analysis.onrender.com/api/*
       - type: rewrite
         source: /*
         destination: /index.html
@@ -379,15 +382,17 @@ services:
         value: none
       - path: /*
         name: Content-Security-Policy
-        value: "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob:; connect-src 'self' https://casesifter-alex-control.onrender.com https://casesifter-alex-analysis.onrender.com https://*.ingest.sentry.io https://*.sentry.io; form-action 'self' https://checkout.stripe.com https://billing.stripe.com; upgrade-insecure-requests"
+        value: "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob:; connect-src 'self' https://*.ingest.sentry.io https://*.sentry.io; form-action 'self' https://checkout.stripe.com https://billing.stripe.com; upgrade-insecure-requests"
     envVars:
-      # Relative /v1 via rewrite above — first-party cookies for ChatGPT/embedded browsers.
+      # Relative /v1 and /api via rewrites — first-party cookies for ChatGPT/embedded browsers.
       - key: VITE_CONTROL_SAME_ORIGIN
         value: "1"
       - key: VITE_CONTROL_PLANE_URL
         value: ""
+      - key: VITE_ANALYSIS_SAME_ORIGIN
+        value: "1"
       - key: VITE_ANALYSIS_API_URL
-        value: https://casesifter-alex-analysis.onrender.com
+        value: ""
       - key: VITE_SENTRY_ENVIRONMENT
         value: production
       - key: VITE_SENTRY_DSN

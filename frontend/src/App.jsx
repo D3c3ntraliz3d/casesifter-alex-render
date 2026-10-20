@@ -57,12 +57,15 @@ import {
   pickDesktopDocuments,
   getDesktopReport,
   isDesktopApp,
+  applyLocalFindingFeedbackToList,
+  isFindingIgnored,
   rescanCase,
   recomputeMatterFacts,
   retitleCaseDocuments,
   saveLicense,
   scanDocument,
   sendFindingFeedback,
+  setMatterFindingFeedback,
   unarchiveCase,
   uploadCaseDocument,
 } from "./api";
@@ -2747,6 +2750,14 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
     if (isHostedAnalysis()) {
       setBusy(true);
       setFailedBatch([]);
+      // Pin matter id for the whole batch — do not read caseData.id mid-poll
+      // (refresh can replace the object and drop uploads onto a stale id).
+      const matterId = caseData.id;
+      if (!matterId) {
+        onError("Open a matter before uploading files.");
+        setBusy(false);
+        return;
+      }
       try {
         const health = await checkAnalysisHealth();
         if (!health.ok) {
@@ -2779,7 +2790,7 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
               continue;
             }
             if (sha) seenSha.add(sha);
-            const result = await uploadCaseDocument(caseData.id, valid[i], {
+            const result = await uploadCaseDocument(matterId, valid[i], {
               autoScan: true,
               waitForComplete: false,
               onProgress: (phase) => {
@@ -2833,11 +2844,14 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
           setIndexMismatchNote(indexWarnings.slice(0, 3).join(" · "));
         }
         try {
-          await retitleCaseDocuments(caseData.id);
+          await retitleCaseDocuments(matterId);
           await onRefresh();
         } catch {
           /* names/kinds still apply on scan */
         }
+        // Release global busy after queue so Re-scan / Re-run AI stay clickable
+        // while polling (source PDFs are already in the local cache).
+        setBusy(false);
         let done = 0;
         let ok = 0;
         const analysisFailed = [];
@@ -2872,7 +2886,7 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
                   }
                   if (sha) resubmittedSha.add(sha);
                   const again = await createAnalysisJob(item.file, {
-                    matterId: caseData.id,
+                    matterId,
                     submittedBy: "web-app",
                   });
                   item.jobId = again.job_id;
@@ -2898,7 +2912,7 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
                 }
                 if (sha) resubmittedSha.add(sha);
                 const again = await createAnalysisJob(item.file, {
-                  matterId: caseData.id,
+                  matterId,
                   submittedBy: "web-app",
                 });
                 item.jobId = again.job_id;
@@ -4164,7 +4178,13 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
                       !pendingOnly &&
                       doc.ai_review === "incomplete" &&
                       !docNeedsLocate(doc) && (
-                      <button className="btn secondary" type="button" disabled={busy} onClick={() => rerunAi(doc)}>
+                      <button
+                        className="btn secondary"
+                        type="button"
+                        title="Re-run AI review from the cached PDF on this computer"
+                        disabled={busy}
+                        onClick={() => rerunAi(doc)}
+                      >
                         Re-run AI
                       </button>
                     )}
@@ -4177,7 +4197,13 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
                         clearance === "incomplete" ||
                         doc.status === "uploaded" ||
                         doc.status === "failed") && (
-                      <button className="btn secondary" type="button" disabled={busy} onClick={() => rescan(doc)}>
+                      <button
+                        className="btn secondary"
+                        type="button"
+                        title="Re-scan from the cached PDF on this computer"
+                        disabled={busy}
+                        onClick={() => rescan(doc)}
+                      >
                         {clearance === "complete" ||
                         clearance === "incomplete" ||
                         clearance === "interrupted" ||
@@ -4318,12 +4344,15 @@ function CaseGotchaBoard({
   const [gotchas, setGotchas] = useState([]);
   const [factConflicts, setFactConflicts] = useState([]);
   const [caseImpact, setCaseImpact] = useState(null);
+  const [ignoredCount, setIgnoredCount] = useState(0);
   const [loadError, setLoadError] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [showNoise, setShowNoise] = useState(false);
+  const [showIgnored, setShowIgnored] = useState(false);
   const [showAll, setShowAll] = useState(false);
   const [openKey, setOpenKey] = useState("");
   const [panelOpen, setPanelOpen] = useState(false);
+  const [feedbackBusy, setFeedbackBusy] = useState("");
   const userToggledPanel = useRef(false);
   const refreshRef = useRef(onRisksElevated);
   refreshRef.current = onRisksElevated;
@@ -4344,6 +4373,7 @@ function CaseGotchaBoard({
         setGotchas(data.gotchas || []);
         setFactConflicts(data.factConflicts || []);
         setCaseImpact(data.caseImpact || null);
+        setIgnoredCount(Number(data.ignoredCount) || 0);
         setLoaded(true);
         // One refresh per document snapshot. Calling this on every response
         // reloads the matter, which changes `documents`, which fetches again.
@@ -4357,6 +4387,7 @@ function CaseGotchaBoard({
         setGotchas([]);
         setFactConflicts([]);
         setCaseImpact(null);
+        setIgnoredCount(0);
         setLoadError(true);
         setLoaded(true);
       });
@@ -4367,6 +4398,7 @@ function CaseGotchaBoard({
 
   useEffect(() => {
     setShowAll(false);
+    setShowIgnored(false);
     setOpenKey("");
     userToggledPanel.current = false;
   }, [caseId, docKey]);
@@ -4385,12 +4417,17 @@ function CaseGotchaBoard({
     return analysis !== "fact_conflict";
   });
   const uniqueConflicts = dedupeBoardItems(factConflicts);
-  const total = uniqueGotchas.length + uniqueConflicts.length;
+  const allBoardItems = [...uniqueConflicts, ...uniqueGotchas];
+  const ignoredBoardCount = allBoardItems.filter((item) => isFindingIgnored(item)).length
+    || ignoredCount;
+  const activeGotchas = uniqueGotchas.filter((item) => showIgnored || !isFindingIgnored(item));
+  const activeConflicts = uniqueConflicts.filter((item) => showIgnored || !isFindingIgnored(item));
+  const total = activeGotchas.length + activeConflicts.length;
   const impact = caseImpact || {};
   const materialCount = total;
   const noiseCount = impact.noise_collapsed ?? impact.noise_count ?? 0;
   const fraudCount = impact.fraud_count ?? 0;
-  const hasInterrupts = materialCount > 0;
+  const hasInterrupts = materialCount > 0 || ignoredBoardCount > 0;
 
   useEffect(() => {
     if (!loaded || userToggledPanel.current) return;
@@ -4402,25 +4439,30 @@ function CaseGotchaBoard({
     ? "Loading…"
     : loadError
       ? "Could not load interrupts"
-      : hasInterrupts
+      : materialCount > 0
         ? [
             `${materialCount} material interrupt${materialCount === 1 ? "" : "s"}`,
             fraudCount ? `${fraudCount} fraud exhibit${fraudCount === 1 ? "" : "s"}` : null,
+            ignoredBoardCount ? `${ignoredBoardCount} ignored` : null,
           ]
             .filter(Boolean)
             .join(" · ")
-        : "No material interrupts";
+        : ignoredBoardCount > 0
+          ? `${ignoredBoardCount} ignored interrupt${ignoredBoardCount === 1 ? "" : "s"}`
+          : "No material interrupts";
 
   const rows = [
-    ...uniqueConflicts.map((item) => ({
+    ...activeConflicts.map((item) => ({
       key: `conflict-${item.id || item.field}`,
       kind: "conflict",
       item,
       title: item.title,
       meta: item.gotcha_level || "Case fact conflict",
       tainted: false,
+      ignored: isFindingIgnored(item),
+      confirmed: item.user_feedback?.status === "confirmed",
     })),
-    ...uniqueGotchas.map((item) => {
+    ...activeGotchas.map((item) => {
       const tainted = Boolean(item.tainted_support || item.evidence?.tainted_support);
       return {
         key: `gotcha-${item.id || item.title}-${item.document_id}`,
@@ -4431,11 +4473,109 @@ function CaseGotchaBoard({
           ? item.case_impact_bucket
           : item.gotcha_level || item.contradiction_type || "",
         tainted,
+        ignored: isFindingIgnored(item),
+        confirmed: item.user_feedback?.status === "confirmed",
       };
     }),
   ];
   const visibleRows = showAll ? rows : rows.slice(0, CASE_IMPACT_PREVIEW);
   const hiddenCount = Math.max(0, rows.length - CASE_IMPACT_PREVIEW);
+
+  async function applyRowFeedback(row, status) {
+    const item = row.item;
+    const findingId = String(item.id || row.key || "").trim();
+    if (!caseId || !findingId) return;
+    const busyKey = `${row.key}:${status}`;
+    setFeedbackBusy(busyKey);
+    try {
+      const result = await setMatterFindingFeedback(caseId, findingId, status, {
+        item,
+        fingerprint: item.feedback_fingerprint,
+      });
+      const nextFb = result?.user_feedback || null;
+      const patch = (list) =>
+        (list || []).map((f) => {
+          if (f === item || f.id === item.id) {
+            return {
+              ...f,
+              feedback_fingerprint: result?.fingerprint || f.feedback_fingerprint,
+              user_feedback: nextFb,
+            };
+          }
+          return f;
+        });
+      setGotchas((prev) => patch(prev));
+      setFactConflicts((prev) => patch(prev));
+      setIgnoredCount((prev) => {
+        const wasIgnored = isFindingIgnored(item);
+        const nowIgnored = nextFb?.status === "false_positive";
+        if (!wasIgnored && nowIgnored) return prev + 1;
+        if (wasIgnored && !nowIgnored) return Math.max(0, prev - 1);
+        return prev;
+      });
+    } catch {
+      /* keep prior state */
+    } finally {
+      setFeedbackBusy("");
+    }
+  }
+
+  function renderFeedbackActions(row) {
+    const item = row.item;
+    const fbStatus = item.user_feedback?.status || null;
+    const busy = Boolean(feedbackBusy) && feedbackBusy.startsWith(`${row.key}:`);
+    return (
+      <div className="gotcha-feedback-actions">
+        {fbStatus === "false_positive" ? (
+          <button
+            type="button"
+            className="btn secondary"
+            disabled={busy}
+            onClick={() => applyRowFeedback(row, "clear")}
+          >
+            Undo ignore
+          </button>
+        ) : (
+          <>
+            <button
+              type="button"
+              className="btn secondary"
+              disabled={busy}
+              title="Hide from Case Impact (false positive)"
+              onClick={() => applyRowFeedback(row, "false_positive")}
+            >
+              Ignore (false positive)
+            </button>
+            {fbStatus === "confirmed" ? (
+              <button
+                type="button"
+                className="btn secondary"
+                disabled={busy}
+                onClick={() => applyRowFeedback(row, "clear")}
+              >
+                Undo confirm
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="btn secondary"
+                disabled={busy}
+                title="Mark as looks right"
+                onClick={() => applyRowFeedback(row, "confirmed")}
+              >
+                Looks right
+              </button>
+            )}
+          </>
+        )}
+        {fbStatus === "false_positive" ? (
+          <span className="footnote">Ignored for this firm</span>
+        ) : fbStatus === "confirmed" ? (
+          <span className="footnote">Confirmed</span>
+        ) : null}
+      </div>
+    );
+  }
 
   function renderRowDetail(row) {
     const { item, kind, tainted } = row;
@@ -4494,6 +4634,7 @@ function CaseGotchaBoard({
                 </button>
               );
             })}
+            {renderFeedbackActions(row)}
           </div>
         </>
       );
@@ -4544,6 +4685,7 @@ function CaseGotchaBoard({
               </button>
             );
           })}
+          {renderFeedbackActions(row)}
         </div>
       </>
     );
@@ -4555,6 +4697,15 @@ function CaseGotchaBoard({
         <span className="case-impact-pill material">{materialCount} material</span>
         {fraudCount > 0 && (
           <span className="case-impact-pill fraud">{fraudCount} altered</span>
+        )}
+        {ignoredBoardCount > 0 && (
+          <button
+            type="button"
+            className={`case-impact-pill noise${showIgnored ? " active" : ""}`}
+            onClick={() => setShowIgnored((v) => !v)}
+          >
+            {showIgnored ? "Hide ignored" : `Show ignored (${ignoredBoardCount})`}
+          </button>
         )}
         {noiseCount > 0 && (
           <button
@@ -4583,13 +4734,24 @@ function CaseGotchaBoard({
           overlap, he-said-she-said, or no case-impact bucket).
         </p>
       )}
+      {showIgnored && ignoredBoardCount > 0 && (
+        <p className="footnote case-impact-noise-note">
+          Showing firm-ignored findings. Evidence is kept; they stay out of material
+          interrupts until you undo.
+        </p>
+      )}
+      {rows.length === 0 ? (
+        <p className="footnote case-impact-noise-note">
+          All material interrupts are ignored. Use Show ignored to review or undo.
+        </p>
+      ) : null}
       <ul className="gotcha-list">
         {visibleRows.map((row) => {
           const open = openKey === row.key;
           return (
             <li
               key={row.key}
-              className={`gotcha-row${row.tainted ? " gotcha-fraud" : ""}${open ? " open" : ""}`}
+              className={`gotcha-row${row.tainted ? " gotcha-fraud" : ""}${row.ignored ? " gotcha-ignored" : ""}${open ? " open" : ""}`}
             >
               <button
                 type="button"
@@ -4599,6 +4761,8 @@ function CaseGotchaBoard({
               >
                 <span className="gotcha-row-title">{row.title}</span>
                 <span className="gotcha-row-meta">
+                  {row.ignored ? "Ignored · " : ""}
+                  {row.confirmed && !row.ignored ? "Confirmed · " : ""}
                   {row.tainted ? "Altered · " : ""}
                   {row.meta}
                 </span>
@@ -7308,7 +7472,13 @@ function ReportViewer({
                     : <p>No material findings.</p>
                 )}
                 {topScanFindings.map((item) => (
-                  <FindingCard key={item.id} item={item} docKind={docKind} siblings={visibleFindings} />
+                  <FindingCard
+                    key={item.id}
+                    item={item}
+                    docKind={docKind}
+                    siblings={visibleFindings}
+                    caseId={caseId}
+                  />
                 ))}
               </div>
               {recommendedActions.length > 0 ? (
@@ -7332,15 +7502,12 @@ function ReportViewer({
 
           {tab === "findings" && (
             <div>
-              <p className="footnote">{material.length} material finding(s), {visibleFindings.length} total including notes.</p>
-              {visibleFindings.map((item) => (
-                <FindingCard key={item.id} item={item} docKind={docKind} siblings={visibleFindings} />
-              ))}
-              {visibleFindings.length === 0 && (
-                reviewDidNotComplete(report)
-                  ? <p>Visual review did not complete. This file was not cleared.</p>
-                  : <p>The automated modules did not flag this file.</p>
-              )}
+              <ReportFindingsList
+                caseId={caseId}
+                docKind={docKind}
+                findings={visibleFindings}
+                reviewIncomplete={reviewDidNotComplete(report)}
+              />
             </div>
           )}
 
@@ -7599,7 +7766,74 @@ function resolveTaintedCopy(item, siblings = []) {
   };
 }
 
-function FindingCard({ item, docKind, siblings = [] }) {
+function ReportFindingsList({ caseId, docKind, findings, reviewIncomplete = false }) {
+  const [showIgnored, setShowIgnored] = useState(false);
+  const [rows, setRows] = useState(findings || []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (caseId) {
+        const next = await applyLocalFindingFeedbackToList(caseId, findings || []);
+        if (!cancelled) setRows(next);
+      } else {
+        setRows(findings || []);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [caseId, findings]);
+
+  const ignored = rows.filter((f) => isFindingIgnored(f));
+  const visible = rows.filter((f) => showIgnored || !isFindingIgnored(f));
+  const materialVisible = visible.filter((f) => f.severity !== "info");
+
+  return (
+    <div>
+      <p className="footnote">
+        {materialVisible.length} material finding(s), {visible.length} total including notes
+        {ignored.length > 0 ? (
+          <>
+            {" · "}
+            <button
+              type="button"
+              className="linkish"
+              onClick={() => setShowIgnored((v) => !v)}
+            >
+              {showIgnored ? "Hide ignored" : `Show ignored (${ignored.length})`}
+            </button>
+          </>
+        ) : null}
+      </p>
+      {visible.map((item) => (
+        <FindingCard
+          key={item.id}
+          item={item}
+          docKind={docKind}
+          siblings={rows}
+          caseId={caseId}
+          onFeedbackChange={(nextItem) => {
+            setRows((prev) =>
+              prev.map((f) => (f.id === nextItem.id ? { ...f, ...nextItem } : f)),
+            );
+          }}
+        />
+      ))}
+      {visible.length === 0 && (
+        ignored.length > 0 ? (
+          <p>All findings are ignored. Use Show ignored to review or undo.</p>
+        ) : reviewIncomplete ? (
+          <p>Visual review did not complete. This file was not cleared.</p>
+        ) : (
+          <p>The automated modules did not flag this file.</p>
+        )
+      )}
+    </div>
+  );
+}
+
+function FindingCard({ item, docKind, siblings = [], caseId = null, onFeedbackChange = null }) {
   // Hosted analysis deletes vault artifacts; only show inline/data heatmaps.
   const rawHeat = item.evidence?.heatmap;
   const heat = (() => {
@@ -7611,12 +7845,21 @@ function FindingCard({ item, docKind, siblings = [] }) {
   const aiLead = Boolean(item.evidence?.ai_generated);
   const caseHit = Boolean(item.evidence?.case_consistency);
   const gotcha = Boolean(item.evidence?.gotcha) || item.category === "gotcha";
-  const [feedback, setFeedback] = useState(null);
+  const [telemetryFb, setTelemetryFb] = useState(null);
+  const [userFb, setUserFb] = useState(item.user_feedback || null);
+  const [fbBusy, setFbBusy] = useState(false);
   const [linkNote, setLinkNote] = useState("");
   const tainted = gotcha && item.evidence?.tainted_support;
   const taintedCopy = tainted ? resolveTaintedCopy(item, siblings) : null;
   const refs = item.evidence?.refs || [];
   const pageNum = item.page != null ? Math.max(1, Number(item.page) || 1) : null;
+  const ignored = userFb?.status === "false_positive";
+  const confirmed = userFb?.status === "confirmed";
+  const showJudgment = Boolean(caseId) && (gotcha || caseHit || item.severity !== "info");
+
+  useEffect(() => {
+    setUserFb(item.user_feedback || null);
+  }, [item.id, item.user_feedback?.status, item.user_feedback?.fingerprint]);
 
   async function openRef(ref, pageOverride) {
     setLinkNote("");
@@ -7647,11 +7890,52 @@ function FindingCard({ item, docKind, siblings = [] }) {
     await openRef({ ...ref, sha256: ref.sha256 || item.evidence?.sha256 }, page);
   }
 
+  async function applyUserFeedback(status) {
+    if (!caseId || !item.id) return;
+    setFbBusy(true);
+    try {
+      const result = await setMatterFindingFeedback(caseId, item.id, status, {
+        item,
+        fingerprint: item.feedback_fingerprint,
+      });
+      const next = result?.user_feedback || null;
+      setUserFb(next);
+      onFeedbackChange?.({
+        ...item,
+        feedback_fingerprint: result?.fingerprint || item.feedback_fingerprint,
+        user_feedback: next,
+      });
+      // Keep anonymized telemetry for case-consistency usefulness (separate from firm judgment).
+      if (caseHit && status === "false_positive") {
+        await sendFindingFeedback({
+          finding_id: item.id,
+          useful: false,
+          category: item.category,
+          field: item.evidence?.field,
+          doc_kind: docKind,
+        });
+      } else if (caseHit && status === "confirmed") {
+        await sendFindingFeedback({
+          finding_id: item.id,
+          useful: true,
+          category: item.category,
+          field: item.evidence?.field,
+          doc_kind: docKind,
+        });
+      }
+    } catch {
+      /* keep prior */
+    } finally {
+      setFbBusy(false);
+    }
+  }
+
   return (
-    <article className={`finding${gotcha ? " gotcha-card" : ""}`}>
+    <article className={`finding${gotcha ? " gotcha-card" : ""}${ignored ? " finding-ignored" : ""}`}>
       <header>
         <h3>{item.title}</h3>
         <span className={`sev ${item.severity}`}>
+          {ignored ? "Ignored · " : confirmed ? "Confirmed · " : ""}
           {gotcha && item.evidence?.gotcha_level ? `${item.evidence.gotcha_level} · ` : ""}
           {item.severity} · {Math.round(item.confidence)}%
         </span>
@@ -7727,13 +8011,63 @@ function FindingCard({ item, docKind, siblings = [] }) {
         </p>
       )}
       {item.recommended_action && <p><strong>Suggested next step:</strong> {item.recommended_action}</p>}
-      {caseHit && (
+      {showJudgment && (
+        <div className="actions finding-feedback-actions" style={{ marginTop: 8 }}>
+          {ignored ? (
+            <button
+              className="btn secondary"
+              type="button"
+              disabled={fbBusy}
+              onClick={() => applyUserFeedback("clear")}
+            >
+              Undo ignore
+            </button>
+          ) : (
+            <>
+              <button
+                className="btn secondary"
+                type="button"
+                disabled={fbBusy}
+                title="Hide as false positive for this firm"
+                onClick={() => applyUserFeedback("false_positive")}
+              >
+                Ignore (false positive)
+              </button>
+              {confirmed ? (
+                <button
+                  className="btn secondary"
+                  type="button"
+                  disabled={fbBusy}
+                  onClick={() => applyUserFeedback("clear")}
+                >
+                  Undo confirm
+                </button>
+              ) : (
+                <button
+                  className="btn secondary"
+                  type="button"
+                  disabled={fbBusy}
+                  onClick={() => applyUserFeedback("confirmed")}
+                >
+                  Looks right
+                </button>
+              )}
+            </>
+          )}
+          {ignored ? (
+            <span className="footnote">Ignored for this firm — evidence kept</span>
+          ) : confirmed ? (
+            <span className="footnote">Confirmed</span>
+          ) : null}
+        </div>
+      )}
+      {caseHit && !showJudgment && (
         <div className="actions" style={{ marginTop: 8 }}>
           <span className="footnote">Was this case alert useful?</span>
           <button
             className="btn secondary"
             type="button"
-            disabled={feedback !== null}
+            disabled={telemetryFb !== null}
             onClick={async () => {
               await sendFindingFeedback({
                 finding_id: item.id,
@@ -7742,7 +8076,7 @@ function FindingCard({ item, docKind, siblings = [] }) {
                 field: item.evidence?.field,
                 doc_kind: docKind,
               });
-              setFeedback(true);
+              setTelemetryFb(true);
             }}
           >
             Yes
@@ -7750,7 +8084,7 @@ function FindingCard({ item, docKind, siblings = [] }) {
           <button
             className="btn secondary"
             type="button"
-            disabled={feedback !== null}
+            disabled={telemetryFb !== null}
             onClick={async () => {
               await sendFindingFeedback({
                 finding_id: item.id,
@@ -7759,12 +8093,12 @@ function FindingCard({ item, docKind, siblings = [] }) {
                 field: item.evidence?.field,
                 doc_kind: docKind,
               });
-              setFeedback(false);
+              setTelemetryFb(false);
             }}
           >
             No
           </button>
-          {feedback !== null && <span className="footnote">Thanks — recorded.</span>}
+          {telemetryFb !== null && <span className="footnote">Thanks — recorded.</span>}
         </div>
       )}
       <div className="conf"><span style={{ width: `${item.confidence}%` }} /></div>

@@ -140,6 +140,57 @@ def firm_admin_settings(body: FirmSettingsPatch, auth: dict = Depends(_require_a
     return {"firm": firm}
 
 
+class FirmMemberRolePatch(BaseModel):
+    role: str = Field(min_length=1, max_length=32)
+
+
+@matters_router.patch("/admin/members/{user_id}")
+def firm_admin_set_member_role(
+    user_id: str,
+    body: FirmMemberRolePatch,
+    auth: dict = Depends(_require_analysis_auth),
+):
+    """Sync analysis-side firm role (owner/admin/member)."""
+    ctx = _ctx(auth)
+    actor_role = _require_firm_admin(ctx)
+    role = (body.role or "").strip().lower()
+    if role not in {"owner", "admin", "member"}:
+        raise HTTPException(400, "Role must be owner, admin, or member.")
+    if role in {"owner", "admin"} and actor_role != "owner":
+        raise HTTPException(403, "Only the firm owner can grant owner or admin.")
+    store = get_store()
+    try:
+        out = store.set_member_role(ctx["firm_id"], user_id, role)
+    except KeyError:
+        raise HTTPException(404, "Member not found.") from None
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    store.audit(ctx["firm_id"], ctx.get("user_id"), "admin.role_change", f"{user_id}:{role}")
+    return out
+
+
+@matters_router.delete("/admin/members/{user_id}")
+def firm_admin_remove_member(user_id: str, auth: dict = Depends(_require_analysis_auth)):
+    """Detach a member onto a new empty firm (loses access to this firm's matters)."""
+    ctx = _ctx(auth)
+    actor_role = _require_firm_admin(ctx)
+    if user_id == ctx.get("user_id"):
+        raise HTTPException(400, "You cannot remove yourself.")
+    store = get_store()
+    target_role = store.member_role(ctx["firm_id"], user_id)
+    if not target_role:
+        raise HTTPException(404, "Member not found.")
+    if target_role in {"owner", "admin"} and actor_role != "owner":
+        raise HTTPException(403, "Only the firm owner can remove an owner or admin.")
+    try:
+        out = store.detach_member(ctx["firm_id"], user_id, actor_id=ctx.get("user_id"))
+    except KeyError:
+        raise HTTPException(404, "Member not found.") from None
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    return {"ok": True, **out}
+
+
 @matters_router.post("")
 def create_matter(body: MatterCreate, auth: dict = Depends(_require_analysis_auth)):
     ctx = _ctx(auth)
@@ -429,6 +480,29 @@ def get_recompute_matter_facts(
     return row
 
 
+def _attach_user_feedback(
+    items: list[dict[str, Any]], feedback_map: dict[str, dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Annotate findings with firm soft-suppress judgment; never drop evidence rows."""
+    from app.case_consistency import finding_feedback_fingerprint
+
+    out: list[dict[str, Any]] = []
+    for item in items:
+        fp = finding_feedback_fingerprint(item)
+        fb = feedback_map.get(fp) or feedback_map.get(f"id:{item.get('id')}")
+        row = {**item, "feedback_fingerprint": fp}
+        if fb:
+            row["user_feedback"] = {
+                "status": fb.get("status"),
+                "fingerprint": fb.get("fingerprint") or fp,
+                "updated_at": fb.get("updated_at"),
+            }
+        else:
+            row["user_feedback"] = None
+        out.append(row)
+    return out
+
+
 def _case_impact_board(store, firm_id: str, matter_id: str) -> dict[str, Any]:
     """Gotchas + fact conflicts for Case Impact / partner export (same filter as UI)."""
     from app.case_conflict_toggle import case_fact_conflicts_enabled, filter_findings
@@ -511,10 +585,21 @@ def _case_impact_board(store, firm_id: str, matter_id: str) -> dict[str, Any]:
             }
         )
 
+    feedback_map = store.list_finding_feedback(firm_id, matter_id)
+    findings = _attach_user_feedback(findings, feedback_map)
+    gotchas = _attach_user_feedback(gotchas, feedback_map)
+    fact_conflicts = _attach_user_feedback(fact_conflicts, feedback_map)
+    ignored_count = sum(
+        1
+        for item in (*gotchas, *fact_conflicts)
+        if (item.get("user_feedback") or {}).get("status") == "false_positive"
+    )
+
     return {
         "findings": findings,
         "gotchas": gotchas,
         "fact_conflicts": fact_conflicts,
+        "ignored_count": ignored_count,
     }
 
 
@@ -526,6 +611,61 @@ def list_findings(matter_id: str, auth: dict = Depends(_require_analysis_auth)):
         raise HTTPException(404, "Matter not found.")
     store.audit(ctx["firm_id"], ctx.get("user_id"), "findings.view", matter_id)
     return _case_impact_board(store, ctx["firm_id"], matter_id)
+
+
+class FindingUserFeedbackBody(BaseModel):
+    status: str = Field(min_length=1, max_length=32)
+    # Optional when finding_id is not a store row (fact-conflict cards / report ids).
+    fingerprint: str | None = Field(default=None, max_length=128)
+
+
+@matters_router.post("/{matter_id}/findings/{finding_id}/feedback")
+def set_finding_user_feedback(
+    matter_id: str,
+    finding_id: str,
+    body: FindingUserFeedbackBody,
+    auth: dict = Depends(_require_analysis_auth),
+):
+    """Firm soft-suppress / confirm. Does not delete underlying evidence."""
+    from app.case_consistency import finding_feedback_fingerprint
+
+    ctx = _ctx(auth)
+    store = get_store()
+    if not store.get_matter(ctx["firm_id"], matter_id):
+        raise HTTPException(404, "Matter not found.")
+
+    status = (body.status or "").strip().lower()
+    if status not in {"false_positive", "confirmed", "clear"}:
+        raise HTTPException(
+            400, "status must be false_positive, confirmed, or clear"
+        )
+
+    finding = store.get_finding(ctx["firm_id"], matter_id, finding_id)
+    if finding:
+        fingerprint = finding_feedback_fingerprint(finding)
+    elif body.fingerprint:
+        fingerprint = body.fingerprint.strip()[:128]
+    else:
+        # Fact-conflict / report cards: treat path id as the feedback key.
+        fingerprint = finding_id.strip()[:128]
+    if not fingerprint:
+        raise HTTPException(400, "fingerprint required")
+
+    try:
+        result = store.set_finding_feedback(
+            ctx["firm_id"],
+            matter_id,
+            fingerprint=fingerprint,
+            status=status,
+            finding_id=finding_id,
+            user_id=ctx.get("user_id"),
+        )
+    except KeyError as exc:
+        raise HTTPException(404, "Matter not found.") from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+
+    return {"user_feedback": result, "finding_id": finding_id}
 
 
 @matters_router.get("/{matter_id}/export")

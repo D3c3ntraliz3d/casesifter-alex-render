@@ -213,9 +213,17 @@ def _seed_remote(base_url: str, accounts: list[dict[str, str]]) -> list[tuple[st
             headers={"X-Admin-Token": admin},
         )
         if trial_status != 200:
-            raise SystemExit(
-                f"Trial grant failed for {email}: HTTP {trial_status} {trial_payload!r}"
-            )
+            # Domain already claimed (common when seeding multiple @casesifter.dev
+            # demos) — login success above is enough; entitlement may already be trialing.
+            detail = ""
+            if isinstance(trial_payload, dict):
+                detail = str(trial_payload.get("detail") or "")
+            if trial_status == 403 and "already started" in detail.lower():
+                action = f"{action}+trial-claim-exists"
+            else:
+                raise SystemExit(
+                    f"Trial grant failed for {email}: HTTP {trial_status} {trial_payload!r}"
+                )
         results.append((email, password, name, action))
     return results
 

@@ -517,14 +517,44 @@ async def create_ephemeral_job(
             from app.fact_memory.store import get_store
 
             store = get_store()
-            row = store.get_matter(firm_ctx["firm_id"], resolved_matter)
+            ctx = firm_ctx
+            row = store.get_matter(ctx["firm_id"], resolved_matter)
             if not row:
-                return None, []
-            if not persist:
-                return row, []
-            return row, store.list_prior_snapshots(firm_ctx["firm_id"], resolved_matter)
+                # Email-first resolve already ran; try reclaim when the SPA still
+                # has a matter id from a firm this account previously owned.
+                email = (ctx.get("email") or _auth.get("email") or "").strip().lower()
+                recovered = None
+                if email:
+                    recovered = store.reclaim_access_to_matter(
+                        resolved_matter,
+                        email=email,
+                        auth_user_id=_auth.get("user_id") or ctx.get("user_id"),
+                    )
+                if recovered:
+                    ctx = recovered
+                    row = store.get_matter(ctx["firm_id"], resolved_matter)
+                    logger.info(
+                        "matter reclaim ok matter=%s firm=%s email=%s",
+                        resolved_matter[:8],
+                        (ctx.get("firm_id") or "")[:8],
+                        email,
+                    )
+                else:
+                    logger.info(
+                        "matter miss firm=%s matter=%s email=%s auth=%s",
+                        (ctx.get("firm_id") or "")[:8],
+                        resolved_matter[:8],
+                        email or "-",
+                        (_auth.get("auth") or "-"),
+                    )
+            if not row:
+                return None, [], ctx
+            if not _should_persist(_auth, ctx):
+                return row, [], ctx
+            return row, store.list_prior_snapshots(ctx["firm_id"], resolved_matter), ctx
 
-        matter, priors = await asyncio.to_thread(_load_matter_priors)
+        matter, priors, firm_ctx = await asyncio.to_thread(_load_matter_priors)
+        persist = _should_persist(_auth, firm_ctx)
         if not matter:
             raise HTTPException(404, "Matter not found for this account.")
         # Prefer matter priors over client peer_snapshots when both present.

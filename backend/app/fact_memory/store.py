@@ -26,6 +26,7 @@ from app.fact_memory.models import (
     Document,
     Entity,
     Fact,
+    FindingFeedbackRow,
     FindingRow,
     Firm,
     Matter,
@@ -75,27 +76,50 @@ class FactMemoryStore:
         join_owner_email: str | None = None,
         account_role: str | None = None,
     ) -> dict[str, Any]:
-        """Firm per account, or join owner's firm when join_owner_email is set (seat invite)."""
+        """Firm per account, or join owner's firm when join_owner_email is set (seat invite).
+
+        Email is the stable tenant key. Prefer the email-owned user row over an
+        auth_user_id row when both exist — otherwise a control-plane id can land
+        on an empty firm while matters remain on the email firm ("Matter not
+        found for this account" on bulk upload).
+        """
         email_n = (email or "").strip().lower()
         if not email_n:
             raise ValueError("email required")
         auth_id = (auth_user_id or "").strip() or None
         owner_email = (join_owner_email or "").strip().lower() or None
-        role = (account_role or "owner").strip().lower()
+        explicit_role = (account_role or "").strip().lower() or None
+        role = explicit_role or "owner"
         if role not in {"owner", "admin", "member"}:
             role = "owner"
         with self.session() as s:
+            by_email = s.execute(select(User).where(User.email == email_n)).scalar_one_or_none()
+            by_auth = s.get(User, auth_id) if auth_id else None
             user = None
-            if auth_id:
-                user = s.get(User, auth_id)
-            if user is None:
-                user = s.execute(select(User).where(User.email == email_n)).scalar_one_or_none()
+            if by_email is not None:
+                user = by_email
+                if by_auth is not None and by_auth.id != by_email.id:
+                    logger.info(
+                        "firm identity prefer email user=%s firm=%s over auth_id user=%s firm=%s",
+                        by_email.id[:8],
+                        (by_email.firm_id or "")[:8],
+                        by_auth.id[:8],
+                        (by_auth.firm_id or "")[:8],
+                    )
+            elif by_auth is not None:
+                user = by_auth
             if user:
                 # Re-bind email if the verified auth account changed email casing/domain later.
                 if user.email != email_n:
-                    user.email = email_n
-                    s.add(user)
-                if role and user.role != role and role != "owner":
+                    conflict = s.execute(
+                        select(User).where(User.email == email_n, User.id != user.id)
+                    ).scalar_one_or_none()
+                    if conflict is None:
+                        user.email = email_n
+                        s.add(user)
+                # Only sync role when control-plane sent an explicit account_role
+                # (avoid defaulting every probe to owner and demoting admins).
+                if explicit_role and user.role != role:
                     user.role = role
                     s.add(user)
                 s.commit()
@@ -165,6 +189,120 @@ class FactMemoryStore:
                 "role": "owner",
             }
 
+    def reclaim_access_to_matter(
+        self,
+        matter_id: str,
+        *,
+        email: str,
+        auth_user_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Rebind this email to the matter's firm when they created it or used to belong there.
+
+        Covers the detach / empty-firm drift case that surfaces as
+        "Matter not found for this account" while the SPA still has the matter open.
+        """
+        email_n = (email or "").strip().lower()
+        mid = (matter_id or "").strip()
+        if not email_n or not mid:
+            return None
+        auth_id = (auth_user_id or "").strip() or None
+        with self.session() as s:
+            matter = s.get(Matter, mid)
+            if not matter:
+                return None
+            target_firm_id = matter.firm_id
+            member = s.execute(
+                select(User).where(User.firm_id == target_firm_id, User.email == email_n)
+            ).scalar_one_or_none()
+            if member is not None:
+                firm = s.get(Firm, target_firm_id)
+                assert firm is not None
+                return {
+                    "firm_id": firm.id,
+                    "user_id": member.id,
+                    "email": member.email,
+                    "persist_facts": bool(firm.persist_facts),
+                    "store_snippets": bool(firm.store_snippets),
+                    "name": firm.name,
+                    "role": (member.role or "owner"),
+                }
+
+            candidate_ids = {auth_id} if auth_id else set()
+            by_email = s.execute(select(User).where(User.email == email_n)).scalar_one_or_none()
+            if by_email is not None:
+                candidate_ids.add(by_email.id)
+            candidate_ids.discard(None)
+            if not candidate_ids:
+                return None
+
+            created = s.execute(
+                select(AuditLog)
+                .where(
+                    AuditLog.action == "matter.create",
+                    AuditLog.target == mid,
+                    AuditLog.user_id.in_(list(candidate_ids)),
+                )
+                .limit(1)
+            ).scalar_one_or_none()
+            removed = s.execute(
+                select(AuditLog)
+                .where(
+                    AuditLog.action == "firm.member_remove",
+                    AuditLog.firm_id == target_firm_id,
+                    AuditLog.target.in_(list(candidate_ids)),
+                )
+                .limit(1)
+            ).scalar_one_or_none()
+            if created is None and removed is None:
+                return None
+
+            user = by_email
+            if user is None and auth_id:
+                user = s.get(User, auth_id)
+            if user is None:
+                return None
+            old_firm = user.firm_id
+            if old_firm == target_firm_id:
+                firm = s.get(Firm, target_firm_id)
+                assert firm is not None
+                return {
+                    "firm_id": firm.id,
+                    "user_id": user.id,
+                    "email": user.email,
+                    "persist_facts": bool(firm.persist_facts),
+                    "store_snippets": bool(firm.store_snippets),
+                    "name": firm.name,
+                    "role": (user.role or "owner"),
+                }
+            user.firm_id = target_firm_id
+            s.add(user)
+            self._audit(
+                s,
+                target_firm_id,
+                user.id,
+                "firm.member_reclaim",
+                mid,
+            )
+            s.commit()
+            logger.info(
+                "reclaimed matter access email=%s matter=%s from_firm=%s to_firm=%s",
+                email_n,
+                mid[:8],
+                (old_firm or "")[:8],
+                target_firm_id[:8],
+            )
+            firm = s.get(Firm, target_firm_id)
+            assert firm is not None
+            return {
+                "firm_id": firm.id,
+                "user_id": user.id,
+                "email": user.email,
+                "persist_facts": bool(firm.persist_facts),
+                "store_snippets": bool(firm.store_snippets),
+                "name": firm.name,
+                "role": (user.role or "owner"),
+            }
+
     def set_member_role(self, firm_id: str, user_id: str, role: str) -> dict[str, Any]:
         role_n = (role or "").strip().lower()
         if role_n not in {"owner", "admin", "member"}:
@@ -181,6 +319,37 @@ class FactMemoryStore:
                 "email": user.email,
                 "role": user.role,
             }
+
+    def detach_member(self, firm_id: str, user_id: str, *, actor_id: str | None = None) -> dict[str, Any]:
+        """Move a member onto a new empty firm so they lose access to this firm's matters."""
+        with self.session() as s:
+            user = s.get(User, user_id)
+            if not user or user.firm_id != firm_id:
+                raise KeyError("member not found")
+            if (user.role or "").strip().lower() == "owner":
+                owners = [
+                    u
+                    for u in s.execute(select(User).where(User.firm_id == firm_id)).scalars()
+                    if (u.role or "").strip().lower() == "owner"
+                ]
+                if len(owners) <= 1:
+                    raise ValueError("cannot detach the last firm owner")
+            email_n = user.email
+            firm_key = enc.generate_firm_key()
+            new_firm = Firm(
+                id=_new_id(),
+                name=f"Firm ({email_n})",
+                wrapped_data_key=enc.wrap_firm_key(firm_key),
+                persist_facts=True,
+                store_snippets=True,
+            )
+            s.add(new_firm)
+            user.firm_id = new_firm.id
+            user.role = "owner"
+            s.add(user)
+            self._audit(s, firm_id, actor_id, "firm.member_remove", user_id)
+            s.commit()
+            return {"user_id": user_id, "email": email_n, "new_firm_id": new_firm.id}
 
     def update_matter(
         self,
@@ -1606,6 +1775,116 @@ class FactMemoryStore:
                     }
                 )
             return out
+
+    def get_finding(
+        self, firm_id: str, matter_id: str, finding_id: str
+    ) -> dict[str, Any] | None:
+        """Firm-scoped finding lookup (excludes other firms even if id collides)."""
+        rows = self.list_findings(firm_id, matter_id, include_stale=True)
+        for row in rows:
+            if row.get("id") == finding_id:
+                return row
+        return None
+
+    def list_finding_feedback(
+        self, firm_id: str, matter_id: str
+    ) -> dict[str, dict[str, Any]]:
+        """Map fingerprint → user_feedback dict for a matter (firm-scoped)."""
+        with self.session() as s:
+            if not s.execute(
+                select(Matter).where(Matter.id == matter_id, Matter.firm_id == firm_id)
+            ).scalar_one_or_none():
+                return {}
+            rows = (
+                s.execute(
+                    select(FindingFeedbackRow).where(
+                        FindingFeedbackRow.firm_id == firm_id,
+                        FindingFeedbackRow.matter_id == matter_id,
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            out: dict[str, dict[str, Any]] = {}
+            for row in rows:
+                payload = {
+                    "status": row.status,
+                    "fingerprint": row.fingerprint,
+                    "finding_id": row.finding_id,
+                    "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+                }
+                out[row.fingerprint] = payload
+                if row.finding_id:
+                    out[f"id:{row.finding_id}"] = payload
+            return out
+
+    def set_finding_feedback(
+        self,
+        firm_id: str,
+        matter_id: str,
+        *,
+        fingerprint: str,
+        status: str,
+        finding_id: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Upsert or clear firm judgment. Does not mutate/delete FindingRow evidence."""
+        fp = (fingerprint or "").strip()[:128]
+        if not fp:
+            raise ValueError("fingerprint required")
+        status_norm = (status or "").strip().lower()
+        with self.session() as s:
+            matter = s.execute(
+                select(Matter).where(Matter.id == matter_id, Matter.firm_id == firm_id)
+            ).scalar_one_or_none()
+            if not matter:
+                raise KeyError("matter not found")
+            existing = s.execute(
+                select(FindingFeedbackRow).where(
+                    FindingFeedbackRow.firm_id == firm_id,
+                    FindingFeedbackRow.matter_id == matter_id,
+                    FindingFeedbackRow.fingerprint == fp,
+                )
+            ).scalar_one_or_none()
+            if status_norm == "clear":
+                if existing:
+                    s.delete(existing)
+                    self._audit(
+                        s, firm_id, user_id, "finding.feedback_clear", finding_id or fp
+                    )
+                    s.commit()
+                return {"status": None, "fingerprint": fp, "finding_id": finding_id}
+            if status_norm not in {"false_positive", "confirmed"}:
+                raise ValueError("status must be false_positive, confirmed, or clear")
+            now = _utcnow()
+            if existing:
+                existing.status = status_norm
+                existing.finding_id = (finding_id or existing.finding_id or "")[:64] or None
+                existing.user_id = user_id
+                existing.updated_at = now
+                row = existing
+            else:
+                row = FindingFeedbackRow(
+                    id=_new_id(),
+                    firm_id=firm_id,
+                    matter_id=matter_id,
+                    fingerprint=fp,
+                    finding_id=(finding_id or "")[:64] or None,
+                    status=status_norm,
+                    user_id=user_id,
+                    updated_at=now,
+                )
+                s.add(row)
+            self._audit(
+                s, firm_id, user_id, f"finding.feedback_{status_norm}", finding_id or fp
+            )
+            s.commit()
+            return {
+                "status": row.status,
+                "fingerprint": row.fingerprint,
+                "finding_id": row.finding_id,
+                "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+            }
 
     def export_matter(
         self,
