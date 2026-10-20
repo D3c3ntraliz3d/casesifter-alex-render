@@ -194,6 +194,31 @@ class FindingRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
+class FindingFeedbackRow(Base):
+    """Firm+matter user judgment on a finding — soft-suppress only; never deletes evidence."""
+
+    __tablename__ = "finding_feedback"
+    __table_args__ = (
+        UniqueConstraint("firm_id", "matter_id", "fingerprint", name="uq_finding_feedback_fp"),
+        Index("ix_finding_feedback_matter", "matter_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=_uuid)
+    firm_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("firms.id", ondelete="CASCADE"), nullable=False
+    )
+    matter_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("matters.id", ondelete="CASCADE"), nullable=False
+    )
+    # Stable key hash (survives rescan re-ids) or finding_id fallback.
+    fingerprint: Mapped[str] = mapped_column(String(128), nullable=False)
+    finding_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # false_positive | confirmed  (clear deletes the row)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    user_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
 class AuditLog(Base):
     __tablename__ = "audit_log"
     __table_args__ = (Index("ix_audit_firm", "firm_id"),)
@@ -203,6 +228,7 @@ class AuditLog(Base):
     user_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     action: Mapped[str] = mapped_column(String(64), nullable=False)
     target: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    request_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
@@ -234,6 +260,10 @@ class AnalysisJob(Base):
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     # Times this matter+sha was status=running when the instance restarted (OOM/health).
     restart_interruptions: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Labels for provisional Documents rows before fact persist creates a Document.
+    original_filename: Mapped[str | None] = mapped_column(Text, nullable=True)
+    display_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    doc_kind: Mapped[str | None] = mapped_column(String(64), nullable=True)
     message: Mapped[str | None] = mapped_column(Text, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     ai_review: Mapped[str | None] = mapped_column(String(32), nullable=True)
@@ -246,7 +276,21 @@ _engine = None
 _SessionLocal = None
 
 
-def database_url_from_env() -> str:
+def fact_memory_backend_label(url: str | None = None) -> str:
+    """postgres | sqlite — for health/ops; never log the full URL."""
+    import os
+
+    raw = (url or os.environ.get("DATABASE_URL") or "").strip().lower()
+    if raw.startswith("postgres"):
+        return "postgres"
+    if raw.startswith("sqlite"):
+        return "sqlite"
+    if not raw:
+        return "sqlite"
+    return "unknown"
+
+
+def database_url_from_env(*, allow_sqlite_fallback: bool | None = None) -> str:
     import os
     from pathlib import Path
 
@@ -258,6 +302,21 @@ def database_url_from_env() -> str:
         elif url.startswith("postgresql://") and "+psycopg" not in url:
             url = "postgresql+psycopg://" + url[len("postgresql://") :]
         return url
+
+    app_env = (os.environ.get("APP_ENV") or os.environ.get("ENV") or "").strip().lower()
+    app_mode = (os.environ.get("APP_MODE") or "").strip().lower()
+    # Hosted analysis must never silently fall back to container-local SQLite —
+    # redeploys wipe the file and cases "disappear" after refresh.
+    if allow_sqlite_fallback is None:
+        allow_sqlite_fallback = not (
+            app_env == "production" and app_mode == "analysis"
+        )
+    if not allow_sqlite_fallback:
+        raise RuntimeError(
+            "DATABASE_URL is required when APP_MODE=analysis and APP_ENV=production. "
+            "Refusing ephemeral SQLite so matters survive restart."
+        )
+
     # SQLite fallback for local/CI — same schema via SQLAlchemy.
     data = Path(os.environ.get("FACT_MEMORY_SQLITE_PATH") or "")
     if not data.parts:
@@ -307,6 +366,7 @@ def init_db(url: str | None = None) -> None:
     Base.metadata.create_all(engine)
     ensure_source_columns(engine)
     ensure_analysis_job_columns(engine)
+    ensure_audit_columns(engine)
     clear_source_enc_once(engine)
 
 
@@ -398,11 +458,31 @@ def ensure_analysis_job_columns(engine) -> None:
         )
     if "user_id" not in have:
         alters.append("ALTER TABLE analysis_jobs ADD COLUMN user_id VARCHAR(36)")
+    if "original_filename" not in have:
+        alters.append("ALTER TABLE analysis_jobs ADD COLUMN original_filename TEXT")
+    if "display_name" not in have:
+        alters.append("ALTER TABLE analysis_jobs ADD COLUMN display_name TEXT")
+    if "doc_kind" not in have:
+        alters.append("ALTER TABLE analysis_jobs ADD COLUMN doc_kind VARCHAR(64)")
     if not alters:
         return
     with engine.begin() as conn:
         for sql in alters:
             conn.execute(text(sql))
+
+
+def ensure_audit_columns(engine) -> None:
+    """create_all does not add columns to an existing audit_log table."""
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+    if "audit_log" not in insp.get_table_names():
+        return
+    have = {col["name"] for col in insp.get_columns("audit_log")}
+    if "request_id" in have:
+        return
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE audit_log ADD COLUMN request_id VARCHAR(64)"))
 
 
 def reset_engine() -> None:

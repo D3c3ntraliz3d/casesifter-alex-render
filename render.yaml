@@ -303,13 +303,27 @@ services:
         value: "false"
       - key: CASESIFTER_INVITE_CODES
         sync: false
-      # Contact form → sales@casesifter.com (Resend). Set key in Dashboard.
+      - key: CASESIFTER_MARKETING_URL
+        value: https://casesifter.com
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: casesifter-queue
+          property: connectionString
       - key: RESEND_API_KEY
         sync: false
-      - key: CONTACT_TO_EMAIL
-        value: sales@casesifter.com
-      - key: CONTACT_FROM_EMAIL
-        value: CaseSifter <noreply@casesifter.com>
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USERNAME
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: SMTP_FROM
+        sync: false
+      - key: SMTP_USE_TLS
+        value: "true"
 
   - type: web
     name: casesifter-app
@@ -337,6 +351,33 @@ services:
       - path: /assets/*
         name: Cache-Control
         value: public, max-age=31536000, immutable
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+      - path: /*
+        name: X-Frame-Options
+        value: DENY
+      - path: /*
+        name: Referrer-Policy
+        value: strict-origin-when-cross-origin
+      - path: /*
+        name: Permissions-Policy
+        value: "camera=(), microphone=(), geolocation=()"
+      - path: /*
+        name: Strict-Transport-Security
+        value: max-age=63072000; includeSubDomains; preload
+      - path: /*
+        name: Cross-Origin-Opener-Policy
+        value: same-origin
+      - path: /*
+        name: Cross-Origin-Resource-Policy
+        value: same-site
+      - path: /*
+        name: X-Permitted-Cross-Domain-Policies
+        value: none
+      - path: /*
+        name: Content-Security-Policy
+        value: "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob:; connect-src 'self' https://casesifter-control.onrender.com https://casesifter-analysis.onrender.com https://app.casesifter.com https://www.casesifter.com https://casesifter.com https://*.ingest.sentry.io https://*.sentry.io; form-action 'self' https://checkout.stripe.com https://billing.stripe.com; upgrade-insecure-requests"
     # Custom domain app.casesifter.com — attach in Render Dashboard → casesifter-app → Custom Domains
     # (Blueprint cannot always bind domains without dashboard/API access.)
     # Vite inlines these at build time. After changing them: Clear build cache → Manual Deploy.
@@ -359,22 +400,16 @@ services:
         - marketing/**
         - render.yaml
     routes:
-      # Desktop funnel + retired marketing pages → contact (firm access).
+      # Desktop funnel retired — keep these even if CDN still has old binaries.
       - type: redirect
         source: /download.html
-        destination: /contact.html
+        destination: /signup.html
       - type: redirect
         source: /downloads/*
-        destination: /contact.html
+        destination: /signup.html
       - type: redirect
         source: /assets/downloads.json
-        destination: /contact.html
-      - type: redirect
-        source: /signup.html
-        destination: /contact.html
-      - type: redirect
-        source: /pricing.html
-        destination: /contact.html
+        destination: /signup.html
     headers:
       - path: /*.html
         name: Cache-Control
@@ -382,3 +417,30 @@ services:
       - path: /
         name: Cache-Control
         value: public, max-age=0, must-revalidate
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+      - path: /*
+        name: X-Frame-Options
+        value: DENY
+      - path: /*
+        name: Referrer-Policy
+        value: strict-origin-when-cross-origin
+      - path: /*
+        name: Permissions-Policy
+        value: "camera=(), microphone=(), geolocation=()"
+      - path: /*
+        name: Strict-Transport-Security
+        value: max-age=63072000; includeSubDomains; preload
+      - path: /*
+        name: Cross-Origin-Opener-Policy
+        value: same-origin
+      - path: /*
+        name: Cross-Origin-Resource-Policy
+        value: same-site
+      - path: /*
+        name: X-Permitted-Cross-Domain-Policies
+        value: none
+      - path: /*
+        name: Content-Security-Policy
+        value: "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob:; connect-src 'self' https://casesifter-control.onrender.com https://casesifter-analysis.onrender.com https://app.casesifter.com https://www.casesifter.com https://casesifter.com https://*.ingest.sentry.io https://*.sentry.io; form-action 'self'; upgrade-insecure-requests"

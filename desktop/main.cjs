@@ -268,6 +268,35 @@ ipcMain.handle("cs:get-case", (_e, id) => store.getCase(root, id));
 ipcMain.handle("cs:archive-case", (_e, id) => store.archiveCase(root, id, true));
 ipcMain.handle("cs:unarchive-case", (_e, id) => store.archiveCase(root, id, false));
 ipcMain.handle("cs:delete-case", (_e, id) => store.deleteCase(root, id));
+ipcMain.handle("cs:patch-doc", (_e, caseId, documentId, payload) => {
+  const body = payload && typeof payload === "object" ? payload : {};
+  const patch = {};
+  if (Object.prototype.hasOwnProperty.call(body, "display_name") && body.display_name) {
+    patch.display_name = String(body.display_name);
+  }
+  if (Object.prototype.hasOwnProperty.call(body, "doc_kind")) {
+    patch.doc_kind = body.doc_kind || null;
+  }
+  if (
+    Object.prototype.hasOwnProperty.call(body, "filed_date") ||
+    Object.prototype.hasOwnProperty.call(body, "filedDate")
+  ) {
+    const raw = body.filed_date ?? body.filedDate ?? null;
+    if (raw == null || raw === "") {
+      patch.filed_date = null;
+    } else {
+      const text = String(raw).slice(0, 10);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+        throw new Error("filed_date must be YYYY-MM-DD.");
+      }
+      patch.filed_date = text;
+    }
+  }
+  const doc = store.updateDocument(root, caseId, documentId, patch);
+  if (!doc) throw new Error("Unknown document.");
+  return doc;
+});
+
 ipcMain.handle("cs:delete-doc", (_e, caseId, documentId) => {
   if (!store.deleteDocument(root, caseId, documentId)) {
     throw new Error("Unknown document.");
@@ -295,6 +324,8 @@ function markAnalyzeFailed(caseId, documentId, message, extra = {}) {
   store.updateDocument(root, caseId, documentId, {
     status: "failed",
     last_error: text,
+    risk_level: null,
+    scan_failed_open: true,
     ...extra,
   });
   return text;
@@ -380,7 +411,12 @@ ipcMain.handle("cs:analyze", async (_e, caseId, documentId) => {
       file_mb_bucket: telemetry.fileMbBucket(sizeBytes),
       document_id: documentId.slice(0, 16),
     });
-    store.updateDocument(root, caseId, documentId, { status: "queued", last_error: null });
+    store.updateDocument(root, caseId, documentId, {
+      status: "queued",
+      last_error: null,
+      risk_level: null,
+      scan_failed_open: false,
+    });
     const headers = authHeaders(cfg);
     delete headers.Accept;
     let created;
@@ -400,6 +436,8 @@ ipcMain.handle("cs:analyze", async (_e, caseId, documentId) => {
       status: "scanning",
       scan_job_id: created.job_id,
       last_error: null,
+      risk_level: null,
+      scan_failed_open: false,
     });
 
     // Poll until complete, then cache report locally and ask server to purge.
@@ -412,6 +450,21 @@ ipcMain.handle("cs:analyze", async (_e, caseId, documentId) => {
         `${cfg.analysisApiUrl.replace(/\/$/, "")}/api/v1/jobs/${jobId}`,
         { headers: authHeaders(cfg) }
       );
+      if (progress.status !== "complete" && progress.status !== "failed") {
+        const liveStatus =
+          progress.status === "local_done"
+            ? "local_done"
+            : progress.status === "queued"
+              ? "queued"
+              : "scanning";
+        store.updateDocument(root, caseId, documentId, {
+          status: liveStatus,
+          stage: progress.stage || null,
+          scan_job_id: jobId,
+          risk_level: null,
+          scan_failed_open: false,
+        });
+      }
       if (progress.status === "complete") {
         const report = progress.report
           || (await remoteJson(
@@ -423,6 +476,8 @@ ipcMain.handle("cs:analyze", async (_e, caseId, documentId) => {
           status: "complete",
           risk_level: report.risk_level || null,
           scan_job_id: jobId,
+          stage: "complete",
+          scan_failed_open: false,
           last_error: null,
           last_scanned_at: (report.audit && report.audit.scanned_at) || new Date().toISOString(),
         });
@@ -593,7 +648,11 @@ ipcMain.handle("cs:login", async (_e, email, password) => {
   const cfg = loadConfig();
   const data = await remoteJson(`${cfg.controlPlaneUrl.replace(/\/$/, "")}/v1/login`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      "X-CaseSifter-Client": "desktop",
+    },
     body: JSON.stringify({ email, password }),
   });
   cfg.sessionToken = data.token;

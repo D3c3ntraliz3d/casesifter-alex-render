@@ -69,22 +69,28 @@ def strip_report(report: Any) -> Any:
     out["top_findings"] = kept_top
     try:
         from app.models import Finding
-        from app.report.scoring import (
-            executive_summary,
-            pick_top_findings,
-            recommended_actions,
-            score_risk,
-        )
+        from app.report.scoring import apply_review_presentation, pick_top_findings
 
         models = [Finding.model_validate(f) for f in kept if isinstance(f, dict)]
-        level, score = score_risk(models)
-        out["risk_level"] = level
-        out["risk_score"] = score
-        out["top_findings"] = [f.model_dump(mode="json") for f in pick_top_findings(models)]
+        comparison = out.get("comparison") if isinstance(out.get("comparison"), dict) else {}
         audit = out.get("audit") if isinstance(out.get("audit"), dict) else {}
-        name = str(audit.get("filename") or "this document")
-        out["executive_summary"] = executive_summary(level, name, models)
-        out["recommended_actions"] = recommended_actions(level, models)
+        ai_review = out.get("ai_review") or comparison.get("ai_review")
+        review_mode = comparison.get("review_mode")
+        presented = apply_review_presentation(
+            models,
+            str(audit.get("filename") or "this document"),
+            ai_review=ai_review if isinstance(ai_review, str) else None,
+            review_mode=review_mode if isinstance(review_mode, str) else None,
+        )
+        out["risk_level"] = presented["risk_level"]
+        out["risk_score"] = presented["risk_score"]
+        out["top_findings"] = [f.model_dump(mode="json") for f in pick_top_findings(models)]
+        out["executive_summary"] = presented["executive_summary"]
+        out["recommended_actions"] = presented["recommended_actions"]
+        if comparison:
+            copied = dict(comparison)
+            copied["score_drivers"] = presented["score_drivers"]
+            out["comparison"] = copied
     except Exception:
         # Never fail a read over re-scoring; fall back to the filtered lists only.
         logger.warning("case-conflict re-score failed; serving filtered findings only")

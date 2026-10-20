@@ -114,6 +114,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
   user_id TEXT,
   action TEXT NOT NULL,
   target TEXT,
+  request_id TEXT,
   at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS ix_audit_firm ON audit_log(firm_id);

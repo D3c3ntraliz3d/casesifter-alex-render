@@ -13,10 +13,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
-SINGLE_EMAIL = "admin@libertygroupfunding.com"
-SINGLE_PASSWORD = "Casesifter1"
-
-
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("CONTROL_DATA_DIR", str(tmp_path))
@@ -26,8 +22,6 @@ def client(tmp_path, monkeypatch):
     monkeypatch.delenv("RESEND_API_KEY", raising=False)
     monkeypatch.setenv("SESSION_SECRET", "unit-test-session-secret")
     monkeypatch.setenv("CASESIFTER_INVITE_REQUIRED", "false")
-    monkeypatch.setenv("CASESIFTER_SINGLE_USER_EMAIL", SINGLE_EMAIL)
-    monkeypatch.setenv("CASESIFTER_SINGLE_USER_PASSWORD", SINGLE_PASSWORD)
     monkeypatch.setenv("STRIPE_SECRET_KEY", "")
     monkeypatch.setenv("STRIPE_PRICE_ID", "")
 
@@ -43,18 +37,25 @@ def client(tmp_path, monkeypatch):
     mod.STRIPE_PRICE_ID = ""
     mod.STORE = tmp_path / "accounts.json"
     mod.DATA = tmp_path
-    mod._ensure_single_user()
     yield TestClient(mod.app), mod
     auth_store.reset_auth_store_for_tests()
 
 
-def _verified_token(client) -> str:
-    res = client.post(
-        "/v1/login",
-        json={"email": SINGLE_EMAIL, "password": SINGLE_PASSWORD},
+def _verified_token(client, email: str, password: str = "correct-horse") -> str:
+    su = client.post(
+        "/v1/signup",
+        json={"email": email, "password": password, "accepted_terms": True},
     )
-    assert res.status_code == 200, res.text
-    return res.json()["token"]
+    assert su.status_code == 200, su.text
+    token = su.json().get("dev_verify_token")
+    if token:
+        v = client.post("/v1/verify-email", json={"token": token})
+        assert v.status_code == 200, v.text
+        return v.json()["token"]
+    assert su.json().get("email_verified") is True
+    logged = client.post("/v1/login", json={"email": email, "password": password})
+    assert logged.status_code == 200, logged.text
+    return logged.json()["token"]
 
 
 def test_checkout_rejects_bad_session(client):
@@ -92,7 +93,7 @@ def test_entitlement_payload_share_always_on(client):
 
 def test_valid_session_checkout_dev_without_stripe(client):
     c, _mod = client
-    tok = _verified_token(c)
+    tok = _verified_token(c, "trial@example.com")
     res = c.post(
         "/v1/checkout",
         headers={"Authorization": f"Bearer {tok}"},
@@ -108,7 +109,7 @@ def test_valid_session_checkout_dev_without_stripe(client):
 def test_signed_session_requires_active_server_row(client):
     """cs2 tokens are revoked when the server session row is deleted."""
     c, _mod = client
-    tok = _verified_token(c)
+    tok = _verified_token(c, "signed@example.com")
     assert tok.startswith("cs2.")
     assert c.get("/v1/entitlement", headers={"Authorization": f"Bearer {tok}"}).status_code == 200
     assert c.post("/v1/logout", headers={"Authorization": f"Bearer {tok}"}).status_code == 200
@@ -143,7 +144,7 @@ def test_checkout_disables_managed_payments(client, monkeypatch):
     c, mod = client
     monkeypatch.setattr(mod, "STRIPE_SECRET", "sk_test_dummy")
     monkeypatch.setattr(mod, "STRIPE_PRICE_ID", "price_test_dummy")
-    tok = _verified_token(c)
+    tok = _verified_token(c, "pay@example.com")
 
     captured: dict = {}
 

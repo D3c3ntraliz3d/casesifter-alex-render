@@ -146,6 +146,7 @@ def update_job(
     message: str | None = None,
     error: str | None = None,
     report: Report | None = None,
+    scan_modules: list[dict[str, str]] | None = None,
     allow_rerun: bool = False,
 ) -> JobProgress:
     """Update job progress. Terminal statuses are sticky — refuse overwrite."""
@@ -208,6 +209,23 @@ def update_job(
             progress.report = report
             report_path = job_dir(job_id) / "report.json"
             _atomic_write_text(report_path, _encrypt_report_text(report.model_dump_json()))
+            # Keep compact light signals on progress.json after the full report
+            # is stripped (status polls must stay small; disk report may go away).
+            try:
+                from app.scan_signals import scan_signals
+
+                signals = scan_signals(report.model_dump(mode="json"))
+                progress.scan_modules = list(signals.get("scan_modules") or []) or None
+                progress.visual_review_required = signals.get("visual_review_required")
+                progress.review_mode = signals.get("review_mode")
+                progress.gemini_calls = signals.get("gemini_calls")
+                progress.visual_file_sent = signals.get("visual_file_sent")
+                progress.document_analysis = signals.get("document_analysis")
+            except Exception:
+                logger.debug("scan_signals on progress failed job=%s", job_id[:12], exc_info=True)
+        elif scan_modules is not None:
+            # Local stage finished — publish Image/Meta/… before Gemini returns.
+            progress.scan_modules = list(scan_modules) or None
         progress.updated_at = utcnow()
         slim = progress.model_copy(update={"report": None})
         _atomic_write_text(path, slim.model_dump_json(indent=2))

@@ -2,13 +2,27 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from typing import TypedDict
 
 from app.finding_policy import forgery_risk_band, is_material_finding
 from app.gotcha import TYPE_SCORE_WEIGHT
-from app.models import Finding, Report, RiskLevel
+from app.models import Finding, RiskLevel
 
 CRITICAL_RISK_LABEL = "Critical risk — strong indicators of alteration"
-RISK_LABEL = {"green": "Low risk", "yellow": "Moderate risk", "red": "High risk"}
+VISUAL_REVIEW_INCOMPLETE_LABEL = "Visual model pass did not finish — not cleared"
+RISK_LABEL = {
+    "green": "Low risk",
+    "yellow": "Moderate risk",
+    "red": "High risk",
+    "incomplete": VISUAL_REVIEW_INCOMPLETE_LABEL,
+}
+
+# Clean-copy phrases a finished visual review may use. An incomplete required
+# review must not use them.
+_CLEAN_REVIEW_ACTION = (
+    "No high-confidence manipulation indicators were found. This does not prove authenticity; "
+    "it means the automated checks did not raise a material alarm."
+)
 
 
 SEVERITY_WEIGHT = {
@@ -111,7 +125,12 @@ def score_risk_details(
 
 
 def risk_banner(level: str, findings: list[Finding]) -> str:
-    """Attorney-facing label. Forged exhibits read as critical risk."""
+    """Attorney-facing label. Forged exhibits read as critical risk.
+
+    An incomplete required visual review is not low risk and is not a forgery finding.
+    """
+    if level == "incomplete":
+        return VISUAL_REVIEW_INCOMPLETE_LABEL
     band, _floor, _critical = forgery_risk_band(findings)
     if band == "critical":
         return CRITICAL_RISK_LABEL
@@ -127,6 +146,7 @@ def pick_top_findings(findings: list[Finding], limit: int = 3) -> list[Finding]:
         "template_fabrication",
         "logo_chrome_mismatch",
         "date_inconsistency",
+        "line_self_contradiction",
     }
     ranked = sorted(
         pool,
@@ -143,14 +163,26 @@ def pick_top_findings(findings: list[Finding], limit: int = 3) -> list[Finding]:
     return ranked[:limit]
 
 
-def recommended_actions(risk: RiskLevel, findings: list[Finding]) -> list[str]:
+def recommended_actions(
+    risk: RiskLevel,
+    findings: list[Finding],
+    *,
+    visual_review_incomplete: bool = False,
+) -> list[str]:
     actions: list[str] = []
     seen: set[str] = set()
-    for item in pick_top_findings(findings, 8):
-        if item.recommended_action and item.recommended_action not in seen:
-            seen.add(item.recommended_action)
-            actions.append(item.recommended_action)
-    if risk == "red":
+    uncleared = risk == "incomplete" or (visual_review_incomplete and risk == "green")
+    if not uncleared:
+        for item in pick_top_findings(findings, 8):
+            if item.recommended_action and item.recommended_action not in seen:
+                seen.add(item.recommended_action)
+                actions.append(item.recommended_action)
+    if uncleared:
+        actions.append(
+            "Visual model pass did not finish — not a fraud finding. "
+            "Do not treat this exhibit as cleared. Re-run AI when the file is cached."
+        )
+    elif risk == "red":
         actions.append(
             "Do not treat this exhibit as verified. Flag it for the assigned attorney or clerk and keep this report with the case file."
         )
@@ -159,9 +191,9 @@ def recommended_actions(risk: RiskLevel, findings: list[Finding]) -> list[str]:
             "Review the highlighted findings before relying on this exhibit. Request a native original if the file appears exported or rebuilt."
         )
     else:
-        actions.append(
-            "No high-confidence manipulation indicators were found. This does not prove authenticity; it means the automated checks did not raise a material alarm."
-        )
+        actions.append(_CLEAN_REVIEW_ACTION)
+    if visual_review_incomplete and risk in ("yellow", "red"):
+        actions.append("Visual review did not complete, so this result does not clear the file.")
     # Deduplicate while preserving order
     unique: list[str] = []
     for item in actions:
@@ -179,10 +211,42 @@ def _critical_clause(item: Finding) -> str:
     return f"{page} — {item.title}. Evidence: {evidence}"
 
 
-def executive_summary(risk: RiskLevel, filename: str, findings: list[Finding]) -> str:
+def _incomplete_visual_summary(filename: str) -> str:
+    return (
+        f"Visual model pass for “{filename}” did not finish, so this file was not cleared. "
+        "This is not a low-risk result and not a fraud finding. Re-run AI when the file is cached."
+    )
+
+
+def _local_only_green_summary(filename: str) -> str:
+    return (
+        f"Local-only review of “{filename}” found no material alarm in the checks that ran on this computer. "
+        "The visual model pass was not run. This is a local-only result, not a completed visual review."
+    )
+
+
+def executive_summary(
+    risk: RiskLevel,
+    filename: str,
+    findings: list[Finding],
+    *,
+    visual_review_incomplete: bool = False,
+    review_mode: str | None = None,
+) -> str:
+    if risk == "incomplete" or (visual_review_incomplete and risk == "green"):
+        return _incomplete_visual_summary(filename)
     counts = Counter(f.severity for f in findings if is_material_finding(f))
     top = pick_top_findings(findings)
     band, _floor, critical = forgery_risk_band(findings)
+    def _with_review_note(text: str) -> str:
+        if review_mode == "local_only":
+            text += " This is a local-only review; the visual model pass was not run."
+        if visual_review_incomplete:
+            text += " Visual review did not complete, so this result does not clear the file."
+        return text
+
+    if review_mode == "local_only" and risk == "green" and not critical:
+        return _local_only_green_summary(filename)
     if risk == "green" and not critical:
         return (
             f"Automated review of “{filename}” did not find strong signs of digital alteration. "
@@ -193,7 +257,7 @@ def executive_summary(risk: RiskLevel, filename: str, findings: list[Finding]) -
         listed = " ".join(
             f"({index}) {_critical_clause(item)}" for index, item in enumerate(critical, start=1)
         )
-        return (
+        return _with_review_note(
             f"{CRITICAL_RISK_LABEL}. “{filename}” {listed} "
             "Review each cited page against the scan. These are indicators for counsel to check."
         )
@@ -202,12 +266,69 @@ def executive_summary(risk: RiskLevel, filename: str, findings: list[Finding]) -
         extra = ""
         if critical:
             extra = " " + " ".join(_critical_clause(item) for item in critical)
-        return (
+        return _with_review_note(
             f"“{filename}” is assessed as high risk. The leading concern is: {lead}.{extra} "
             f"The scan recorded {counts.get('critical', 0)} critical, {counts.get('high', 0)} high, "
             f"and {counts.get('medium', 0)} medium finding(s). Treat the exhibit as unverified until reviewed."
         )
-    return (
+    text = (
         f"“{filename}” is assessed as moderate risk. The leading concern is: {lead}. "
         "One or more checks found inconsistencies that deserve human review before the exhibit is relied on."
     )
+    return _with_review_note(text)
+
+
+class ReviewPresentation(TypedDict):
+    risk_level: RiskLevel
+    risk_score: int
+    score_drivers: list[dict[str, object]]
+    executive_summary: str
+    recommended_actions: list[str]
+
+
+def apply_review_presentation(
+    findings: list[Finding],
+    filename: str,
+    *,
+    ai_review: str | None,
+    review_mode: str | None = None,
+) -> ReviewPresentation:
+    """Score findings, then refuse a low-risk clearance when visual review did not succeed.
+
+    Real yellow/red findings stay. A green result becomes ``incomplete`` and
+    does not use the routine-file summary. Court-filing and local-only reviews
+    pass ``ai_review`` other than ``incomplete`` and keep their own copy.
+    """
+    level, score, drivers = score_risk_details(findings)
+    incomplete = ai_review == "incomplete"
+    if incomplete and level == "green":
+        level = "incomplete"
+        drivers = [
+            *drivers,
+            {
+                "type": "visual_review_incomplete",
+                "score": score,
+                "level": "incomplete",
+                "explanation": (
+                    "Required visual review did not return a successful response. "
+                    "The file is not cleared as low risk."
+                ),
+            },
+        ]
+    return {
+        "risk_level": level,
+        "risk_score": score,
+        "score_drivers": drivers,
+        "executive_summary": executive_summary(
+            level,
+            filename,
+            findings,
+            visual_review_incomplete=incomplete,
+            review_mode=review_mode,
+        ),
+        "recommended_actions": recommended_actions(
+            level,
+            findings,
+            visual_review_incomplete=incomplete,
+        ),
+    }

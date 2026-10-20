@@ -133,6 +133,35 @@ def _score(findings: list[Finding], text: str = ""):
     return triaged, level, score, summary
 
 
+def test_s41_garbled_due_by_year_still_conflicts_with_coupon():
+    """The real S-41 text layer keeps 'due by … 2011' and 'APR. 29, 2007'."""
+    garbled = """
+New charges due by oncemas a 2011 sas.20
+Amount Due $362.42
+New Charges Due: APR. 29, 2007
+Amount Due $362.42
+"""
+    hits = find_statement_date_conflicts(garbled, scan_profile="forensic", source="Exhibit S-41")
+    assert hits, "2011 due-by year and an April 2007 coupon date must be flagged"
+    blob = " ".join(f"{item.explanation} {item.evidence.get('quoted_evidence')}" for item in hits)
+    assert "2011" in blob
+    assert "APR. 29, 2007" in blob
+
+
+def test_readable_due_by_december_2011_conflicts_with_april_2007():
+    text = """
+Verizon
+Statement date 04/04/07
+Total New Charges due by December 29, 2011
+Amount Due $362.42
+"""
+    hits = find_statement_date_conflicts(text, scan_profile="forensic", source="Exhibit S-41")
+    assert hits
+    blob = " ".join(f"{item.explanation} {item.evidence.get('quoted_evidence')}" for item in hits)
+    assert "04/04/07" in blob
+    assert "December 29, 2011" in blob
+
+
 def test_s41_due_date_survives_nyscef_header_and_past_due_language():
     hits = find_statement_date_conflicts(S41_PAGE, scan_profile="forensic", source="Exhibit S-41")
     assert hits, "April 2007 statement with a December 2011 due date must be flagged"

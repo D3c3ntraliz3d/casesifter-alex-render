@@ -10,6 +10,10 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "postgres: requires TEST_DATABASE_URL / DATABASE_URL pointing at Postgres",
     )
+    config.addinivalue_line(
+        "markers",
+        "integration: optional live Gemini / network fixtures (skip cleanly without keys)",
+    )
 
 
 @pytest.fixture(autouse=True)

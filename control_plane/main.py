@@ -5,21 +5,24 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
-import html
 import json
 import math
 import os
 import secrets
 import time
 import uuid
-import urllib.error
-import urllib.request
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import Cookie, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, EmailStr, Field
+
+import mailer
+import rate_limit
+from edge_security import docs_kwargs, install_api_headers
+from session_cookie import COOKIE_NAME, clear_session_cookie, set_session_cookie
 
 _DATA_ENV = (os.environ.get("CONTROL_DATA_DIR") or "").strip()
 DATA = Path(_DATA_ENV) if _DATA_ENV else (Path(__file__).resolve().parent / "data")
@@ -40,27 +43,22 @@ INVITE_CODES = {
 SESSION_TTL_S = int(float(os.environ.get("SESSION_TTL_DAYS", "30") or 30) * 86400)
 _SESSION_SECRET_PATH = DATA / "session_secret"
 
-# Soft-launch: public signup off; only this firm account may sign in.
-SINGLE_USER_EMAIL = (
-    os.environ.get("CASESIFTER_SINGLE_USER_EMAIL") or "admin@libertygroupfunding.com"
-).strip().lower()
-SINGLE_USER_PASSWORD = os.environ.get("CASESIFTER_SINGLE_USER_PASSWORD") or "Casesifter1"
-SINGLE_USER_NAME = (os.environ.get("CASESIFTER_SINGLE_USER_NAME") or "Liberty Group Funding").strip()
-
-CONTACT_TO_EMAIL = (os.environ.get("CONTACT_TO_EMAIL") or "sales@casesifter.com").strip().lower()
-CONTACT_FROM_EMAIL = (
-    os.environ.get("CONTACT_FROM_EMAIL") or "CaseSifter <noreply@casesifter.com>"
-).strip()
-# Prefer RESEND_*; accept common RESEMD_* typo so a misnamed Dashboard key still works.
-RESEND_API_KEY = (
-    os.environ.get("RESEND_API_KEY")
-    or os.environ.get("RESEMD_API_KEY")
-    or ""
-).strip()
-
 
 def _is_production() -> bool:
     return (os.environ.get("APP_ENV") or "").strip().lower() == "production"
+
+
+def _require_email_verify() -> bool:
+    """When false (default), signup marks verified and login skips the verify gate.
+
+    Set CASESIFTER_REQUIRE_EMAIL_VERIFY=true to enforce verify-before-login.
+    /v1/verify-email stays available either way.
+    """
+    return (os.environ.get("CASESIFTER_REQUIRE_EMAIL_VERIFY") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
 
 
 def _resolve_session_secret() -> str:
@@ -152,7 +150,7 @@ EMAIL_TRIAL_CONFLICT = (
 
 class LoginBody(BaseModel):
     email: EmailStr
-    password: str = Field(min_length=6, max_length=200)
+    password: str = Field(min_length=8, max_length=200)
 
 
 class SignupBody(BaseModel):
@@ -161,11 +159,12 @@ class SignupBody(BaseModel):
     name: str | None = None
     accepted_terms: bool = False
     invite_code: str | None = None
+    # Seat invite token from Admin → Invite member (joins org as member/admin).
+    seat_invite_token: str | None = None
 
 
 class TrialBody(BaseModel):
     email: EmailStr
-    admin_token: str
     cohort: str | None = "beta"
 
 
@@ -184,63 +183,11 @@ class CheckoutBody(BaseModel):
     quantity: int = Field(default=1, ge=1, le=50)
 
 
-class ContactBody(BaseModel):
-    name: str = Field(min_length=1, max_length=200)
-    firm: str = Field(min_length=1, max_length=200)
-    email: EmailStr
-    phone: str | None = Field(default=None, max_length=40)
-    reason: str = Field(min_length=1, max_length=80)
-    message: str | None = Field(default=None, max_length=5000)
-
-
 def _ensure_auth_db() -> None:
     import auth_store as auth
 
     auth.init_auth_store()
     auth.migrate_accounts_json(STORE)
-
-
-def _ensure_single_user() -> None:
-    """Create or refresh the sole allowlisted account (verified + scans unlocked)."""
-    import auth_store as auth
-    from sqlalchemy import select
-
-    if not SINGLE_USER_EMAIL or not SINGLE_USER_PASSWORD:
-        return
-    _ensure_auth_db()
-    with auth.session_scope() as s:
-        row = s.execute(
-            select(auth.CpUser).where(auth.CpUser.email == SINGLE_USER_EMAIL)
-        ).scalar_one_or_none()
-        sub = json.dumps({"status": "active", "plan": "enterprise"})
-        if row is None:
-            row = auth.CpUser(
-                id=uuid.uuid4().hex,
-                email=SINGLE_USER_EMAIL,
-                name=SINGLE_USER_NAME,
-                password_hash=auth.hash_password(SINGLE_USER_PASSWORD),
-                password_algo="argon2id",
-                email_verified=True,
-                created_at=time.time(),
-                accepted_terms_at=time.time(),
-                trial_until=0,
-                subscription_json=sub,
-                cohort="enterprise",
-                support_code=_support_code(),
-            )
-            s.add(row)
-            return
-        # Keep password + entitlement in sync with the allowlist config.
-        if not auth.verify_password(row, SINGLE_USER_PASSWORD):
-            row.password_hash = auth.hash_password(SINGLE_USER_PASSWORD)
-            row.password_algo = "argon2id"
-            row.legacy_salt = None
-        row.email_verified = True
-        row.name = row.name or SINGLE_USER_NAME
-        row.subscription_json = sub
-        if not row.support_code:
-            row.support_code = _support_code()
-        s.add(row)
 
 
 def _load() -> dict[str, Any]:
@@ -295,6 +242,19 @@ def _b64url_decode(text: str) -> bytes:
     return base64.urlsafe_b64decode(text + pad)
 
 
+def _signature_ok(payload: bytes, sig: bytes) -> bool:
+    """Accept the current secret and, during rotation, SESSION_SECRET_PREVIOUS."""
+    secrets: list[str] = []
+    for secret in (SESSION_SECRET, (os.environ.get("SESSION_SECRET_PREVIOUS") or "").strip()):
+        if secret and secret not in secrets:
+            secrets.append(secret)
+    for secret in secrets:
+        expect = hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).digest()
+        if hmac.compare_digest(sig, expect):
+            return True
+    return False
+
+
 def _issue_session_token(email: str, data: dict[str, Any]) -> str:
     """HMAC-signed token when SESSION_SECRET is set; else opaque store-backed token."""
     email_l = email.lower().strip()
@@ -320,8 +280,7 @@ def _verify_signed_session(token: str, data: dict[str, Any]) -> dict[str, Any] |
         sig = _b64url_decode(parts[2])
     except Exception:
         return None
-    expect = hmac.new(SESSION_SECRET.encode("utf-8"), payload, hashlib.sha256).digest()
-    if not hmac.compare_digest(sig, expect):
+    if not _signature_ok(payload, sig):
         return None
     try:
         email, issued_s, _nonce = payload.decode("utf-8").split("|", 2)
@@ -481,8 +440,7 @@ def _parse_session_token(token: str) -> dict[str, Any] | None:
             sig = _b64url_decode(parts[2])
         except Exception:
             return None
-        expect = hmac.new(SESSION_SECRET.encode("utf-8"), payload, hashlib.sha256).digest()
-        if not hmac.compare_digest(sig, expect):
+        if not _signature_ok(payload, sig):
             return None
         try:
             user_id, email, sid, issued_s = payload.decode("utf-8").split("|", 3)
@@ -501,8 +459,7 @@ def _parse_session_token(token: str) -> dict[str, Any] | None:
             sig = _b64url_decode(parts[2])
         except Exception:
             return None
-        expect = hmac.new(SESSION_SECRET.encode("utf-8"), payload, hashlib.sha256).digest()
-        if not hmac.compare_digest(sig, expect):
+        if not _signature_ok(payload, sig):
             return None
         try:
             email, issued_s, _nonce = payload.decode("utf-8").split("|", 2)
@@ -551,22 +508,38 @@ def _ensure_user_identity(user: dict[str, Any], *, cohort: str | None = None) ->
 
 def _entitlement_payload(user: dict[str, Any]) -> dict[str, Any]:
     _ensure_user_identity(user)
-    sub = user.get("subscription") or {}
+    # Billing fields may already be merged from org owner in _session_user.
+    billing = user.get("_billing") or user
+    sub = billing.get("subscription") or user.get("subscription") or {}
     seats = sub.get("seats")
     try:
         seats_n = int(seats) if seats is not None else None
     except (TypeError, ValueError):
         seats_n = None
+    import oidc_auth
+
+    plan_user = {**user, "subscription": sub, "trial_until": billing.get("trial_until", user.get("trial_until"))}
     return {
-        **_user_plan(user),
+        **_user_plan(plan_user),
         "email": user["email"],
         "support_code": user.get("support_code"),
         "user_id": user.get("user_id"),
+        "org_id": user.get("org_id") or user.get("user_id"),
+        "org_owner_email": user.get("org_owner_email"),
         "cohort": user.get("cohort"),
         "seats": seats_n,
-        "has_billing_portal": bool(user.get("stripe_customer_id")),
+        "seats_used": user.get("seats_used"),
+        "has_billing_portal": bool(
+            billing.get("stripe_customer_id") or user.get("stripe_customer_id")
+        ),
         # Soft-launch: anonymized finding outcomes are always on (no opt-out UI).
         "share_anonymized_outcomes": True,
+        "totp_enabled": bool(user.get("totp_enabled")),
+        "oidc_linked": bool(user.get("oidc_linked")),
+        "account_role": user.get("account_role") or "owner",
+        "is_account_admin": (user.get("account_role") or "owner") in {"owner", "admin"},
+        "sso_available": oidc_auth.oidc_configured(),
+        "sso_preferred": bool(user.get("sso_preferred")),
     }
 
 
@@ -771,7 +744,7 @@ _CORS_ORIGINS = [
     "http://localhost:5173",
 ]
 
-app = FastAPI(title="CaseSifter Control Plane", version="1.0.0")
+app = FastAPI(title="CaseSifter Control Plane", version="1.0.0", **docs_kwargs(os.environ.get("APP_ENV")))
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_CORS_ORIGINS,
@@ -779,20 +752,75 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+install_api_headers(app)
 
-# In-memory rate limits: key -> [timestamps]
-_RATE: dict[str, list[float]] = {}
-_RATE_LOCK = __import__("threading").Lock()
+_ORIGIN_ALLOW = {origin.rstrip("/") for origin in _CORS_ORIGINS}
+
+
+@app.middleware("http")
+async def _cookie_csrf(request: Request, call_next):
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.cookies.get(COOKIE_NAME):
+        authorization = request.headers.get("authorization") or ""
+        if not authorization.lower().startswith("bearer "):
+            origin = (request.headers.get("origin") or "").rstrip("/")
+            if _is_production():
+                allowed = origin in _ORIGIN_ALLOW
+            else:
+                allowed = not origin or origin in _ORIGIN_ALLOW
+            if not allowed:
+                return JSONResponse({"detail": "Cross-site request blocked."}, status_code=403)
+    return await call_next(request)
 
 
 def _rate_limit(key: str, *, limit: int = 10, window_s: float = 600.0) -> None:
-    now = time.time()
-    with _RATE_LOCK:
-        bucket = [t for t in _RATE.get(key, []) if now - t < window_s]
-        if len(bucket) >= limit:
-            raise HTTPException(429, "Too many attempts. Try again later.")
-        bucket.append(now)
-        _RATE[key] = bucket
+    rate_limit.enforce(key, limit=limit, window_s=window_s)
+
+
+def _request_id(request: Request) -> str:
+    incoming = (request.headers.get("x-request-id") or "").strip()
+    return incoming[:64] if incoming else uuid.uuid4().hex
+
+
+def _client_is_desktop(request: Request) -> bool:
+    return (request.headers.get("x-casesifter-client") or "").strip().lower() == "desktop"
+
+
+def _accept_bearer_in_body(request: Request) -> bool:
+    """Embedded browsers that block cross-site cookies may request the opaque session token in JSON."""
+    flag = (request.headers.get("x-casesifter-accept-bearer") or "").strip().lower()
+    return flag in {"1", "true", "yes"}
+
+
+def _include_session_token(request: Request) -> bool:
+    """Desktop, local tests, and cookie-blocked browsers (Accept-Bearer) receive the token."""
+    if _client_is_desktop(request):
+        return True
+    if _accept_bearer_in_body(request):
+        return True
+    return not _is_production()
+
+
+def _internal_exchange(request: Request) -> bool:
+    """Analysis API proves it holds SESSION_SECRET. Browsers cannot."""
+    presented = (request.headers.get("x-internal-session") or "").strip()
+    secret = (SESSION_SECRET or "").strip()
+    if not presented or not secret:
+        return False
+    return hmac.compare_digest(
+        hashlib.sha256(presented.encode("utf-8")).digest(),
+        hashlib.sha256(secret.encode("utf-8")).digest(),
+    )
+
+
+def _admin_token_ok(presented: str | None) -> bool:
+    expected = (os.environ.get("CONTROL_ADMIN_TOKEN") or "").strip()
+    got = (presented or "").strip()
+    if not expected or not got:
+        return False
+    return hmac.compare_digest(
+        hashlib.sha256(got.encode("utf-8")).digest(),
+        hashlib.sha256(expected.encode("utf-8")).digest(),
+    )
 
 
 @app.on_event("startup")
@@ -805,7 +833,6 @@ def _auth_startup() -> None:
             "(fromDatabase casesifter-fact-memory). Refusing to boot."
         )
     _ensure_auth_db()
-    _ensure_single_user()
 
 
 @app.get("/health")
@@ -816,7 +843,7 @@ def health():
     payload = {
         "status": "ok",
         "stripe": bool(STRIPE_SECRET and STRIPE_PRICE_ID),
-        "contact_email": bool(RESEND_API_KEY and CONTACT_TO_EMAIL),
+        "email": mailer.mailer_configured(),
         "git_commit_source": "RENDER_GIT_COMMIT",
         "git_commit": git_commit,
         "git_commit_short": git_commit[:12] if git_commit else None,
@@ -824,105 +851,157 @@ def health():
     return payload
 
 
-def _send_resend_email(
-    *,
-    to: str,
-    subject: str,
-    text: str,
-    html_body: str,
-    reply_to: str | None = None,
-) -> None:
-    if not RESEND_API_KEY:
-        raise HTTPException(503, "Contact email is not configured. Email sales@casesifter.com directly.")
-    payload: dict[str, Any] = {
-        "from": CONTACT_FROM_EMAIL,
-        "to": [to],
-        "subject": subject,
-        "text": text,
-        "html": html_body,
+def _marketing_base() -> str:
+    return (
+        os.environ.get("CASESIFTER_MARKETING_URL") or "https://casesifter.com"
+    ).rstrip("/")
+
+
+def _record_auth(actor: str, action: str, request: Request, target: str | None = None) -> None:
+    import auth_store as auth
+
+    _ensure_auth_db()
+    with auth.session_scope() as s:
+        auth.record_auth_audit(
+            s,
+            actor=actor,
+            action=action,
+            target=target,
+            request_id=_request_id(request),
+        )
+
+
+def _analysis_code_for(sid: str, email: str) -> str | None:
+    if not sid:
+        return None
+    import auth_store as auth
+
+    _ensure_auth_db()
+    with auth.session_scope() as s:
+        return auth.create_exchange_code(s, sid, email)
+
+
+def _session_response(email: str, user_dict: dict[str, Any], request: Request) -> JSONResponse:
+    import auth_store as auth
+
+    token, sid = _issue_session_for_user(email)
+    body: dict[str, Any] = {
+        "entitlement": _entitlement_payload(user_dict),
+        "analysis_code": _analysis_code_for(sid, email),
     }
-    if reply_to:
-        payload["reply_to"] = reply_to
-    req = urllib.request.Request(
-        "https://api.resend.com/emails",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {RESEND_API_KEY}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "User-Agent": "casesifter-control/1.0",
-        },
-        method="POST",
-    )
+    # One-time code for browsers that block cross-site Set-Cookie on the login
+    # response (embedded/automated browsers). Frontend may retry via ?cs_code=.
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            if resp.status >= 300:
-                raise HTTPException(502, "Could not send your message. Try again or email sales@casesifter.com.")
-    except urllib.error.HTTPError as err:
-        try:
-            err.read()
-        except Exception:
-            pass
-        raise HTTPException(
-            502,
-            "Could not send your message. Try again or email sales@casesifter.com.",
-        ) from err
-    except urllib.error.URLError as err:
-        raise HTTPException(
-            502,
-            "Could not send your message. Try again or email sales@casesifter.com.",
-        ) from err
-
-
-@app.post("/v1/contact")
-def contact(body: ContactBody, request: Request):
-    """Marketing contact form → email to sales@casesifter.com."""
-    client = (request.client.host if request.client else "unknown") or "unknown"
-    _rate_limit(f"contact:{client}", limit=8, window_s=3600)
-    name = body.name.strip()
-    firm = body.firm.strip()
-    email = str(body.email).strip().lower()
-    phone = (body.phone or "").strip()
-    reason = body.reason.strip()
-    message = (body.message or "").strip()
-    if not name or not firm:
-        raise HTTPException(422, "Name and firm are required.")
-
-    subject = f"CaseSifter contact — {reason} — {firm}"
-    text = (
-        f"Name: {name}\n"
-        f"Firm: {firm}\n"
-        f"Email: {email}\n"
-        f"Phone: {phone or '(none)'}\n"
-        f"Reason: {reason}\n\n"
-        f"Message:\n{message or '(none)'}\n"
-    )
-    html_body = (
-        "<h2>New CaseSifter contact form</h2>"
-        f"<p><strong>Name:</strong> {html.escape(name)}<br>"
-        f"<strong>Firm:</strong> {html.escape(firm)}<br>"
-        f"<strong>Email:</strong> {html.escape(email)}<br>"
-        f"<strong>Phone:</strong> {html.escape(phone or '(none)')}<br>"
-        f"<strong>Reason:</strong> {html.escape(reason)}</p>"
-        f"<p><strong>Message</strong></p>"
-        f"<p>{html.escape(message or '(none)').replace(chr(10), '<br>')}</p>"
-    )
-    _send_resend_email(
-        to=CONTACT_TO_EMAIL,
-        subject=subject,
-        text=text,
-        html_body=html_body,
-        reply_to=email,
-    )
-    return {"ok": True, "message": "Thanks — we'll be in touch within one business day."}
+        _ensure_auth_db()
+        with auth.session_scope() as s:
+            body["handoff_code"] = auth.create_exchange_code(s, sid, email)
+    except Exception:
+        pass
+    if _include_session_token(request) or _internal_exchange(request):
+        body["token"] = token
+    response = JSONResponse(body)
+    set_session_cookie(response, token, max_age=SESSION_TTL_S)
+    return response
 
 
 @app.post("/v1/signup")
 def signup(body: SignupBody, request: Request):
-    raise HTTPException(
-        403,
-        "Public signup is closed. Contact Sales@casesifter.com for firm access.",
-    )
+    if not body.accepted_terms:
+        raise HTTPException(422, "You must agree to the Terms of Service and Privacy Policy to continue.")
+    # Seat invite bypasses the beta gate (org owner already entitled).
+    seat_token = (body.seat_invite_token or "").strip() or None
+    if not seat_token and not _invite_ok(body.invite_code):
+        raise HTTPException(403, "A valid invite code is required for beta signup.")
+    import auth_store as auth
+    from sqlalchemy import select
+
+    email = body.email.lower().strip()
+    client = (request.client.host if request.client else "unknown") or "unknown"
+    _rate_limit(f"signup:{client}:{email}", limit=5, window_s=3600)
+    require_verify = _require_email_verify()
+    if (
+        require_verify
+        and _is_production()
+        and not mailer.mailer_configured()
+        and not _allow_dev_auth_tokens()
+    ):
+        raise HTTPException(503, "Email delivery is not configured.")
+    _ensure_auth_db()
+    with auth.session_scope() as s:
+        existing = s.execute(select(auth.CpUser).where(auth.CpUser.email == email)).scalar_one_or_none()
+        if existing:
+            raise HTTPException(409, "Account already exists.")
+        seat_invite = None
+        account_role = "owner"
+        org_id = None
+        if seat_token:
+            seat_invite = auth.find_seat_invite_by_token(s, seat_token)
+            if seat_invite is None:
+                raise HTTPException(400, "Seat invite is invalid or expired.")
+            if seat_invite.email != email:
+                raise HTTPException(400, "Sign up with the invited email address.")
+            account_role = (seat_invite.role or "member").strip().lower()
+            if account_role not in {"admin", "member"}:
+                account_role = "member"
+            org_id = seat_invite.org_id
+        cohort = "beta" if (body.invite_code or INVITE_REQUIRED or seat_invite) else "general"
+        uid = uuid.uuid4().hex
+        verified_now = not require_verify
+        user = auth.CpUser(
+            id=uid,
+            email=email,
+            name=body.name or "",
+            password_hash=auth.hash_password(body.password),
+            password_algo="argon2id",
+            email_verified=verified_now,
+            created_at=time.time(),
+            accepted_terms_at=time.time(),
+            trial_until=0,
+            subscription_json="{}",
+            cohort=cohort,
+            support_code=_support_code(),
+            account_role=account_role,
+            org_id=org_id or uid,
+        )
+        s.add(user)
+        if seat_invite is not None:
+            seat_invite.accepted_at = time.time()
+            s.add(seat_invite)
+        verify_raw = auth.create_email_token(s, user, purpose="verify", ttl_s=86400)
+        link = f"{_marketing_base()}/verify.html?verify_token={verify_raw}"
+        mailed = False
+        if mailer.mailer_configured() and require_verify:
+            mailed = mailer.send_auth_email(
+                email,
+                "Verify your CaseSifter account",
+                (
+                    "Confirm your email to sign in to CaseSifter.\n\n"
+                    f"{link}\n\n"
+                    "This link expires in 24 hours. If you did not sign up, ignore this message."
+                ),
+            )
+        if (
+            require_verify
+            and not mailed
+            and _is_production()
+            and not _allow_dev_auth_tokens()
+        ):
+            # Roll back the new account so a failed send does not leave an unverified user.
+            raise HTTPException(503, "We could not send the verification email. Try again shortly.")
+    payload = {
+        "ok": True,
+        "email": email,
+        "email_verified": verified_now,
+        "message": (
+            "Account created. You can sign in now."
+            if verified_now
+            else "Check your email to verify your account before signing in."
+        ),
+    }
+    # A sent mail must not also echo the token. Dev tokens only when mail was not sent.
+    if require_verify and not mailed and _allow_dev_auth_tokens():
+        payload["dev_verify_token"] = verify_raw
+    return payload
 
 
 @app.post("/v1/login")
@@ -933,36 +1012,99 @@ def login(body: LoginBody, request: Request):
     email = body.email.lower().strip()
     client = (request.client.host if request.client else "unknown") or "unknown"
     _rate_limit(f"login:{client}:{email}", limit=20, window_s=600)
-    if email != SINGLE_USER_EMAIL:
-        raise HTTPException(401, "Invalid email or password.")
-    _ensure_single_user()
+    _ensure_auth_db()
     with auth.session_scope() as s:
         row = s.execute(select(auth.CpUser).where(auth.CpUser.email == email)).scalar_one_or_none()
         if row is None or not auth.verify_password(row, body.password):
+            _record_auth(email, "login.failure", request)
             raise HTTPException(401, "Invalid email or password.")
-        if not row.email_verified:
+        if _require_email_verify() and not row.email_verified:
             raise HTTPException(403, "Verify your email before signing in.")
         auth.upgrade_password_if_needed(s, row, body.password)
+        if bool(getattr(row, "totp_enabled", False)):
+            mfa_token = auth.create_mfa_challenge(s, row, ttl_s=300)
+            _record_auth(email, "login.mfa_required", request)
+            return {
+                "mfa_required": True,
+                "mfa_token": mfa_token,
+                "email": email,
+                "message": "Enter the code from your authenticator app (or a recovery code).",
+            }
         user_dict = auth.user_to_dict(row)
-    token, _sid = _issue_session_for_user(email)
-    return {"token": token, "entitlement": _entitlement_payload(user_dict)}
+    _record_auth(email, "login.success", request)
+    return _session_response(email, user_dict, request)
+
+
+class MfaLoginBody(BaseModel):
+    mfa_token: str = Field(min_length=8, max_length=200)
+    code: str = Field(min_length=6, max_length=32)
+
+
+@app.post("/v1/login/mfa")
+def login_mfa(body: MfaLoginBody, request: Request):
+    """Complete password login after TOTP or recovery code. No admin bypass."""
+    import auth_store as auth
+    import totp_auth
+
+    client = (request.client.host if request.client else "unknown") or "unknown"
+    _rate_limit(f"login-mfa:{client}", limit=30, window_s=600)
+    _ensure_auth_db()
+    with auth.session_scope() as s:
+        user = auth.consume_mfa_challenge(s, body.mfa_token)
+        if user is None:
+            raise HTTPException(401, "Invalid or expired MFA challenge.")
+        email = user.email
+        code = (body.code or "").strip()
+        ok = False
+        used_recovery = False
+        if getattr(user, "totp_secret_enc", None):
+            try:
+                secret = totp_auth.decrypt_secret(user.totp_secret_enc)
+                ok = totp_auth.verify_code(secret, code)
+            except Exception:
+                ok = False
+        if not ok:
+            hashes = totp_auth.load_recovery_hashes(getattr(user, "recovery_codes_json", None))
+            remaining = totp_auth.consume_recovery_code(hashes, code)
+            if remaining is not None:
+                ok = True
+                used_recovery = True
+                user.recovery_codes_json = totp_auth.serialize_recovery_hashes(remaining)
+                s.add(user)
+        if not ok:
+            _record_auth(email, "login.mfa_failure", request)
+            raise HTTPException(401, "Invalid authenticator or recovery code.")
+        user_dict = auth.user_to_dict(user)
+    if used_recovery:
+        _record_auth(email, "2fa.recovery_used", request)
+    _record_auth(email, "login.success", request, target="mfa")
+    return _session_response(email, user_dict, request)
 
 
 @app.post("/v1/logout")
-def logout(authorization: str | None = Header(default=None)):
+def logout(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    cs_session: str | None = Cookie(default=None),
+):
     import auth_store as auth
 
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(401, "Bearer token required.")
-    token = authorization[7:].strip()
+    token = ""
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+    elif cs_session:
+        token = cs_session.strip()
+    response = JSONResponse({"ok": True})
+    clear_session_cookie(response)
+    if not token:
+        return response
     parsed = _parse_session_token(token)
     if not parsed or not parsed.get("sid"):
-        # Still clear client-side; treat unknown as logged out.
-        return {"ok": True}
+        return response
     _ensure_auth_db()
     with auth.session_scope() as s:
         auth.revoke_session(s, parsed["sid"])
-    return {"ok": True}
+    return response
 
 
 class VerifyEmailBody(BaseModel):
@@ -970,7 +1112,7 @@ class VerifyEmailBody(BaseModel):
 
 
 @app.post("/v1/verify-email")
-def verify_email(body: VerifyEmailBody):
+def verify_email(body: VerifyEmailBody, request: Request):
     import auth_store as auth
 
     _ensure_auth_db()
@@ -982,8 +1124,8 @@ def verify_email(body: VerifyEmailBody):
         s.add(user)
         email = user.email
         user_dict = auth.user_to_dict(user)
-    token, _sid = _issue_session_for_user(email)
-    return {"token": token, "entitlement": _entitlement_payload(user_dict)}
+    _record_auth(email, "login.success", request, target="verify")
+    return _session_response(email, user_dict, request)
 
 
 class ResetRequestBody(BaseModel):
@@ -1009,13 +1151,25 @@ def password_reset_request(body: ResetRequestBody, request: Request):
         row = s.execute(select(auth.CpUser).where(auth.CpUser.email == email)).scalar_one_or_none()
         if row is not None:
             raw = auth.create_email_token(s, row, purpose="reset", ttl_s=3600)
-            if _allow_dev_auth_tokens():
+            link = f"{_marketing_base()}/reset.html?reset_token={raw}"
+            mailed = False
+            if mailer.mailer_configured():
+                mailed = mailer.send_auth_email(
+                    email,
+                    "Reset your CaseSifter password",
+                    (
+                        "Use this link to choose a new CaseSifter password.\n\n"
+                        f"{link}\n\n"
+                        "This link expires in one hour. If you did not ask for a reset, ignore this message."
+                    ),
+                )
+            if not mailed and _allow_dev_auth_tokens():
                 out["dev_reset_token"] = raw
     return out
 
 
 @app.post("/v1/password-reset/confirm")
-def password_reset_confirm(body: ResetConfirmBody):
+def password_reset_confirm(body: ResetConfirmBody, request: Request):
     import auth_store as auth
 
     _ensure_auth_db()
@@ -1027,6 +1181,9 @@ def password_reset_confirm(body: ResetConfirmBody):
         user.password_algo = "argon2id"
         user.legacy_salt = None
         s.add(user)
+        email = user.email
+        totp_on = bool(getattr(user, "totp_enabled", False))
+        user_dict = auth.user_to_dict(user)
         # Revoke all sessions for this user.
         from sqlalchemy import select
 
@@ -1034,7 +1191,19 @@ def password_reset_confirm(body: ResetConfirmBody):
             if sess.revoked_at is None:
                 sess.revoked_at = time.time()
                 s.add(sess)
-    return {"ok": True}
+        # 2FA must not be bypassed by reset: when TOTP is on, require a normal MFA login.
+        if totp_on:
+            mfa_token = auth.create_mfa_challenge(s, user, ttl_s=300)
+            _record_auth(email, "login.mfa_required", request, target="password-reset")
+            return {
+                "ok": True,
+                "mfa_required": True,
+                "mfa_token": mfa_token,
+                "email": email,
+                "message": "Password updated. Enter your authenticator or recovery code to sign in.",
+            }
+    _record_auth(email, "login.success", request, target="password-reset")
+    return _session_response(email, user_dict, request)
 
 
 class ExchangeBody(BaseModel):
@@ -1042,8 +1211,8 @@ class ExchangeBody(BaseModel):
 
 
 @app.post("/v1/session/exchange")
-def exchange_session_code(body: ExchangeBody):
-    """One-time 60s code → session token (replaces ?cs_token= URL handoff)."""
+def exchange_session_code(body: ExchangeBody, request: Request):
+    """One-time 60s code → session cookie. Token JSON is for the analysis server only."""
     import auth_store as auth
 
     _ensure_auth_db()
@@ -1065,15 +1234,27 @@ def exchange_session_code(body: ExchangeBody):
         token = f"cs2.{_b64url_encode(payload)}.{_b64url_encode(sig)}"
     else:
         token = sid
-    return {"token": token, "entitlement": _entitlement_payload(user_dict)}
+    fresh_code = _analysis_code_for(sid, email)
+    body_out: dict[str, Any] = {
+        "entitlement": _entitlement_payload(user_dict),
+        "analysis_code": fresh_code,
+    }
+    if _include_session_token(request) or _internal_exchange(request):
+        body_out["token"] = token
+    response = JSONResponse(body_out)
+    set_session_cookie(response, token, max_age=SESSION_TTL_S)
+    return response
 
 
 @app.post("/v1/session/handoff-code")
-def create_handoff_code(authorization: str | None = Header(default=None)):
+def create_handoff_code(
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
     """Mint a one-time exchange code for the current session (marketing→app)."""
     import auth_store as auth
 
-    user, token, _data = _session_user(authorization)
+    user, token, _data = _session_user(authorization, request)
     parsed = _parse_session_token(token)
     sid = (parsed or {}).get("sid")
     if not sid:
@@ -1084,13 +1265,20 @@ def create_handoff_code(authorization: str | None = Header(default=None)):
     return {"code": code, "expires_in": 60}
 
 
-def _session_user(authorization: str | None) -> tuple[dict[str, Any], str, dict[str, Any]]:
+def _session_user(
+    authorization: str | None = None,
+    request: Request | None = None,
+) -> tuple[dict[str, Any], str, dict[str, Any]]:
     import auth_store as auth
     from sqlalchemy import select
 
-    if not authorization or not authorization.lower().startswith("bearer "):
+    token = ""
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+    elif request is not None:
+        token = (request.cookies.get(COOKIE_NAME) or "").strip()
+    if not token:
         raise HTTPException(401, "Bearer token required.")
-    token = authorization[7:].strip()
     parsed = _parse_session_token(token)
     if not parsed:
         raise HTTPException(401, "Invalid session.")
@@ -1112,13 +1300,40 @@ def _session_user(authorization: str | None) -> tuple[dict[str, Any], str, dict[
             row = None
         if row is None:
             raise HTTPException(401, "Unknown user.")
+        auth.ensure_org_id(s, row)
         user = auth.user_to_dict(row)
+        owner = auth.billing_owner(s, row)
+        if owner.id != row.id:
+            owner_dict = auth.user_to_dict(owner)
+            user["_billing"] = owner_dict
+            user["subscription"] = owner_dict.get("subscription") or {}
+            user["trial_until"] = owner_dict.get("trial_until")
+            user["stripe_customer_id"] = owner_dict.get("stripe_customer_id")
+            user["org_owner_email"] = owner_dict.get("email")
+        else:
+            user["org_owner_email"] = user.get("email")
+        try:
+            user["seats_used"] = auth.count_org_seats_used(s, auth.org_id_of(row))
+        except Exception:
+            user["seats_used"] = None
     return user, token, data
 
 
+@app.get("/v1/audit")
+def list_sign_in_audit(request: Request):
+    """This account's sign-in events. Other firms and admin grants are not included."""
+    user, _token, _data = _session_user(request=request)
+    import auth_store as auth
+
+    _ensure_auth_db()
+    with auth.session_scope() as s:
+        events = auth.list_sign_in_events(s, user.get("email") or "", limit=50)
+    return {"events": events}
+
+
 @app.get("/v1/entitlement")
-def entitlement(authorization: str | None = Header(default=None)):
-    user, _, data = _session_user(authorization)
+def entitlement(request: Request, authorization: str | None = Header(default=None)):
+    user, _, data = _session_user(authorization, request)
     if not user.get("support_code"):
         _ensure_user_identity(user)
         data["users"][user["email"]] = user
@@ -1127,13 +1342,17 @@ def entitlement(authorization: str | None = Header(default=None)):
 
 
 @app.post("/v1/trial")
-def grant_trial(body: TrialBody):
+def grant_trial(
+    body: TrialBody,
+    request: Request,
+    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+):
     """Sales/admin: mint or extend a trial. Requires CONTROL_ADMIN_TOKEN."""
     import auth_store as auth
     from sqlalchemy import select
 
-    admin = os.environ.get("CONTROL_ADMIN_TOKEN", "")
-    if not admin or body.admin_token != admin:
+    _rate_limit("trial:admin", limit=10, window_s=600)
+    if not _admin_token_ok(x_admin_token):
         raise HTTPException(403, "Admin token required.")
     email = body.email.lower().strip()
     _ensure_auth_db()
@@ -1166,6 +1385,7 @@ def grant_trial(body: TrialBody):
     data["users"][email] = user
     _record_trial_claim(data, user)
     _save(data)
+    _record_auth("admin", "trial.grant", request, target=email)
     return {
         "email": email,
         "trial_until": user["trial_until"],
@@ -1174,8 +1394,12 @@ def grant_trial(body: TrialBody):
 
 
 @app.post("/v1/checkout")
-def checkout(body: CheckoutBody = CheckoutBody(), authorization: str | None = Header(default=None)):
-    user, _, data = _session_user(authorization)
+def checkout(
+    request: Request,
+    body: CheckoutBody = CheckoutBody(),
+    authorization: str | None = Header(default=None),
+):
+    user, _, data = _session_user(authorization, request)
     quantity = int(body.quantity)
     if body.trial:
         _ensure_user_identity(user)
@@ -1243,8 +1467,8 @@ def checkout(body: CheckoutBody = CheckoutBody(), authorization: str | None = He
 
 
 @app.post("/v1/billing-portal")
-def billing_portal(authorization: str | None = Header(default=None)):
-    user, _, _ = _session_user(authorization)
+def billing_portal(request: Request, authorization: str | None = Header(default=None)):
+    user, _, _ = _session_user(authorization, request)
     customer_id = user.get("stripe_customer_id")
     if not customer_id:
         raise HTTPException(
@@ -1459,7 +1683,7 @@ async def ingest_telemetry(request: Request, authorization: str | None = Header(
     cohort = None
     if authorization:
         try:
-            user, _, _ = _session_user(authorization)
+            user, _, _ = _session_user(authorization, request)
             _ensure_user_identity(user)
             user_id = user.get("user_id")
             support_code = user.get("support_code")
@@ -1501,6 +1725,7 @@ async def ingest_telemetry(request: Request, authorization: str | None = Header(
 @app.post("/v1/diagnostics")
 async def ingest_diagnostics(
     body: DiagnosticsBody,
+    request: Request,
     authorization: str | None = Header(default=None),
 ):
     """Privacy-safe support bundle — no PDFs or document text."""
@@ -1509,7 +1734,7 @@ async def ingest_diagnostics(
     cohort = None
     email = None
     if authorization:
-        user, _, _ = _session_user(authorization)
+        user, _, _ = _session_user(authorization, request)
         _ensure_user_identity(user)
         user_id = user.get("user_id")
         support_code = user.get("support_code")
@@ -1534,3 +1759,706 @@ async def ingest_diagnostics(
     with log.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record) + "\n")
     return {"accepted": True, "support_code": support_code}
+
+
+# ── Auth status / SSO discovery ──────────────────────────────────────────────
+
+
+@app.get("/v1/auth/status")
+def auth_status():
+    """Public: whether SSO is configured (no secrets)."""
+    import oidc_auth
+    import totp_auth
+
+    return {
+        "sso_available": oidc_auth.oidc_configured(),
+        "totp_available": totp_auth.totp_available(),
+        "oidc_trusts_idp_mfa": oidc_auth.trusts_idp_mfa(),
+    }
+
+
+# ── TOTP enrollment (password users) ─────────────────────────────────────────
+
+
+class TotpConfirmBody(BaseModel):
+    code: str = Field(min_length=6, max_length=12)
+
+
+class TotpDisableBody(BaseModel):
+    password: str = Field(min_length=8, max_length=200)
+    code: str = Field(min_length=6, max_length=32)
+
+
+@app.post("/v1/2fa/totp/start")
+def totp_start(request: Request, authorization: str | None = Header(default=None)):
+    import auth_store as auth
+    import totp_auth
+    from sqlalchemy import select
+
+    if not totp_auth.totp_available():
+        raise HTTPException(503, "Authenticator setup is unavailable on this server.")
+    user, _, _ = _session_user(authorization, request)
+    email = user["email"]
+    _rate_limit(f"2fa-start:{email}", limit=10, window_s=600)
+    _ensure_auth_db()
+    with auth.session_scope() as s:
+        row = s.execute(select(auth.CpUser).where(auth.CpUser.email == email)).scalar_one_or_none()
+        if row is None:
+            raise HTTPException(401, "Unknown user.")
+        if row.totp_enabled:
+            raise HTTPException(409, "Two-factor authentication is already enabled.")
+        secret = totp_auth.generate_secret()
+        row.totp_secret_enc = totp_auth.encrypt_secret(secret)
+        row.totp_enabled = False
+        row.totp_confirmed_at = None
+        s.add(row)
+    _record_auth(email, "2fa.enroll_start", request)
+    return {
+        "secret": secret,
+        "otpauth_url": totp_auth.provisioning_uri(secret, email),
+        "issuer": totp_auth.ISSUER,
+        "message": "Scan the otpauth URL with your authenticator app, then confirm with a 6-digit code.",
+    }
+
+
+@app.post("/v1/2fa/totp/confirm")
+def totp_confirm(
+    body: TotpConfirmBody,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    import auth_store as auth
+    import totp_auth
+    from sqlalchemy import select
+
+    user, _, _ = _session_user(authorization, request)
+    email = user["email"]
+    _rate_limit(f"2fa-confirm:{email}", limit=20, window_s=600)
+    _ensure_auth_db()
+    recovery_plain: list[str] = []
+    with auth.session_scope() as s:
+        row = s.execute(select(auth.CpUser).where(auth.CpUser.email == email)).scalar_one_or_none()
+        if row is None or not row.totp_secret_enc:
+            raise HTTPException(400, "Start authenticator enrollment first.")
+        try:
+            secret = totp_auth.decrypt_secret(row.totp_secret_enc)
+        except Exception as exc:
+            raise HTTPException(500, "Could not read authenticator secret.") from exc
+        if not totp_auth.verify_code(secret, body.code):
+            raise HTTPException(401, "Invalid authenticator code.")
+        recovery_plain = totp_auth.mint_recovery_codes()
+        row.recovery_codes_json = totp_auth.serialize_recovery_hashes(
+            totp_auth.hash_recovery_codes(recovery_plain)
+        )
+        row.totp_enabled = True
+        row.totp_confirmed_at = time.time()
+        s.add(row)
+    _record_auth(email, "2fa.enroll_confirm", request)
+    return {
+        "ok": True,
+        "totp_enabled": True,
+        "recovery_codes": recovery_plain,
+        "message": "Store these recovery codes offline. Each can be used once.",
+    }
+
+
+@app.post("/v1/2fa/totp/disable")
+def totp_disable(
+    body: TotpDisableBody,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """Disable 2FA. Requires password + current TOTP/recovery. Admins cannot skip this."""
+    import auth_store as auth
+    import totp_auth
+    from sqlalchemy import select
+
+    user, _, _ = _session_user(authorization, request)
+    email = user["email"]
+    _rate_limit(f"2fa-disable:{email}", limit=10, window_s=600)
+    _ensure_auth_db()
+    with auth.session_scope() as s:
+        row = s.execute(select(auth.CpUser).where(auth.CpUser.email == email)).scalar_one_or_none()
+        if row is None:
+            raise HTTPException(401, "Unknown user.")
+        if not auth.verify_password(row, body.password):
+            raise HTTPException(401, "Invalid password.")
+        ok = False
+        if row.totp_secret_enc:
+            try:
+                ok = totp_auth.verify_code(totp_auth.decrypt_secret(row.totp_secret_enc), body.code)
+            except Exception:
+                ok = False
+        if not ok:
+            remaining = totp_auth.consume_recovery_code(
+                totp_auth.load_recovery_hashes(row.recovery_codes_json), body.code
+            )
+            ok = remaining is not None
+        if not ok:
+            raise HTTPException(401, "Invalid authenticator or recovery code.")
+        row.totp_secret_enc = None
+        row.totp_enabled = False
+        row.totp_confirmed_at = None
+        row.recovery_codes_json = "[]"
+        s.add(row)
+    _record_auth(email, "2fa.disable", request)
+    return {"ok": True, "totp_enabled": False}
+
+
+# ── OIDC SSO ─────────────────────────────────────────────────────────────────
+
+
+@app.get("/v1/sso/oidc/start")
+def sso_oidc_start(request: Request):
+    import auth_store as auth
+    import oidc_auth
+
+    if not oidc_auth.oidc_configured():
+        raise HTTPException(503, "SSO is not configured.")
+    client = (request.client.host if request.client else "unknown") or "unknown"
+    _rate_limit(f"sso-start:{client}", limit=30, window_s=600)
+    nonce = secrets.token_urlsafe(16)
+    verifier = secrets.token_urlsafe(48)
+    _ensure_auth_db()
+    with auth.session_scope() as s:
+        state = auth.create_oidc_state(s, nonce=nonce, code_verifier=verifier, ttl_s=600)
+    try:
+        url, _ = oidc_auth.build_authorize_redirect(
+            state=state, nonce=nonce, code_verifier=verifier
+        )
+    except Exception as exc:
+        raise HTTPException(503, f"SSO discovery failed: {exc}") from exc
+    return RedirectResponse(url, status_code=302)
+
+
+@app.get("/v1/sso/oidc/callback")
+def sso_oidc_callback(
+    request: Request,
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+):
+    import auth_store as auth
+    import oidc_auth
+    from sqlalchemy import select
+
+    if error:
+        _record_auth("sso", "login.sso_failure", request, target=error[:120])
+        raise HTTPException(400, f"SSO provider error: {error}")
+    if not code or not state:
+        raise HTTPException(400, "Missing OIDC code or state.")
+    client = (request.client.host if request.client else "unknown") or "unknown"
+    _rate_limit(f"sso-callback:{client}", limit=40, window_s=600)
+    if not oidc_auth.oidc_configured():
+        raise HTTPException(503, "SSO is not configured.")
+    _ensure_auth_db()
+    with auth.session_scope() as s:
+        st = auth.consume_oidc_state(s, state)
+        if st is None:
+            _record_auth("sso", "login.sso_failure", request, target="bad_state")
+            raise HTTPException(400, "Invalid or expired SSO state.")
+        nonce = st.nonce
+        verifier = st.code_verifier
+    try:
+        tokens = oidc_auth.exchange_code(code=code, code_verifier=verifier)
+        claims = oidc_auth.parse_id_token(tokens.get("id_token") or "", expected_nonce=nonce)
+    except Exception as exc:
+        _record_auth("sso", "login.sso_failure", request, target=str(exc)[:120])
+        raise HTTPException(400, f"SSO login failed: {exc}") from exc
+
+    email = claims["email"]
+    issuer = claims["iss"]
+    subject = claims["sub"]
+    name = claims.get("name") or ""
+
+    with auth.session_scope() as s:
+        row = auth.find_user_by_oidc(s, issuer=issuer, subject=subject)
+        if row is None:
+            row = s.execute(select(auth.CpUser).where(auth.CpUser.email == email)).scalar_one_or_none()
+        if row is None:
+            # JIT provision — SSO accounts get a random unusable password placeholder.
+            uid = uuid.uuid4().hex
+            row = auth.CpUser(
+                id=uid,
+                email=email,
+                name=name,
+                password_hash=auth.hash_password(secrets.token_urlsafe(32)),
+                password_algo="argon2id",
+                email_verified=True,
+                created_at=time.time(),
+                accepted_terms_at=time.time(),
+                trial_until=0,
+                subscription_json="{}",
+                cohort="sso",
+                support_code=_support_code(),
+                account_role="owner",
+                org_id=uid,
+            )
+            s.add(row)
+        if not getattr(row, "org_id", None):
+            row.org_id = row.id
+        row.oidc_issuer = issuer
+        row.oidc_subject = subject
+        row.email_verified = True
+        if name and not row.name:
+            row.name = name
+        s.add(row)
+        user_dict = auth.user_to_dict(row)
+        email_l = row.email
+
+    _record_auth(email_l, "login.sso_success", request)
+    # SSO users skip local TOTP when the IdP is trusted to enforce MFA.
+    token, sid = _issue_session_for_user(email_l)
+    # Prefer cookie + handoff code for browser; redirect to app.
+    exchange = _analysis_code_for(sid, email_l)
+    dest = oidc_auth.app_post_login_url(token_query=exchange if exchange else None)
+    response = RedirectResponse(dest, status_code=302)
+    set_session_cookie(response, token, max_age=SESSION_TTL_S)
+    return response
+
+
+# ── Admin panel (account owner/admin) ────────────────────────────────────────
+
+
+def _require_account_admin(authorization: str | None, request: Request) -> dict[str, Any]:
+    import auth_store as auth
+
+    user, token, data = _session_user(authorization, request)
+    if not auth.is_account_admin(user):
+        raise HTTPException(403, "Account admin access is required.")
+    return user
+
+
+@app.get("/v1/admin/overview")
+def admin_overview(request: Request, authorization: str | None = Header(default=None)):
+    """Firm/account admin: seats, security posture, sessions, recent auth audit."""
+    import auth_store as auth
+    import oidc_auth
+    from sqlalchemy import select
+
+    user = _require_account_admin(authorization, request)
+    email = user["email"]
+    _record_auth(email, "admin.settings_view", request)
+    _ensure_auth_db()
+    with auth.session_scope() as s:
+        row = s.execute(select(auth.CpUser).where(auth.CpUser.email == email)).scalar_one_or_none()
+        if row is None:
+            raise HTTPException(401, "Unknown user.")
+        oid = auth.ensure_org_id(s, row)
+        sessions = auth.list_sessions_for_user(s, row.id)
+        audit = auth.list_account_audit_events(s, email, limit=50)
+        user_dict = auth.user_to_dict(row)
+        owner = auth.billing_owner(s, row)
+        owner_dict = auth.user_to_dict(owner)
+        user_dict["_billing"] = owner_dict
+        user_dict["subscription"] = owner_dict.get("subscription") or {}
+        user_dict["trial_until"] = owner_dict.get("trial_until")
+        user_dict["stripe_customer_id"] = owner_dict.get("stripe_customer_id")
+        members = auth.list_org_members(s, oid)
+        pending = auth.list_pending_invites(s, oid)
+        seats_used = auth.count_org_seats_used(s, oid)
+        users_out = [
+            {
+                "user_id": m.id,
+                "email": m.email,
+                "role": (m.account_role or "owner"),
+                "totp_enabled": bool(getattr(m, "totp_enabled", False)),
+                "oidc_linked": bool(getattr(m, "oidc_subject", None)),
+            }
+            for m in members
+        ]
+        invites_out = [
+            {
+                "id": inv.id,
+                "email": inv.email,
+                "role": inv.role,
+                "expires_at": time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(inv.expires_at or 0))
+                ),
+            }
+            for inv in pending
+        ]
+    ent = _entitlement_payload(user_dict)
+    seats_n = ent.get("seats")
+    return {
+        "account": {
+            "email": email,
+            "name": user_dict.get("name") or "",
+            "role": user_dict.get("account_role") or "owner",
+            "support_code": user_dict.get("support_code"),
+            "seats": seats_n,
+            "seats_used": seats_used,
+            "billing_state": ent.get("billing_state"),
+            "plan": ent.get("plan"),
+        },
+        "security": {
+            "totp_enabled": bool(user_dict.get("totp_enabled")),
+            "oidc_linked": bool(user_dict.get("oidc_linked")),
+            "sso_available": oidc_auth.oidc_configured(),
+            "oidc_trusts_idp_mfa": oidc_auth.trusts_idp_mfa(),
+            "sso_preferred": bool(user_dict.get("sso_preferred")),
+        },
+        "sessions": sessions,
+        "audit": audit,
+        "users": users_out,
+        "invites": invites_out,
+        "message": (
+            f"Seats: {seats_used} used"
+            + (f" of {seats_n}" if seats_n is not None else " (set quantity in Stripe billing)")
+            + ". Invite members below; roles control Admin access."
+        ),
+    }
+
+
+class SeatInviteBody(BaseModel):
+    email: EmailStr
+    role: str = "member"
+
+
+class MemberRoleBody(BaseModel):
+    role: str
+
+
+@app.post("/v1/admin/invites")
+def admin_create_invite(
+    body: SeatInviteBody,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """Owner/admin: invite a seat. Returns invite_url + token (email when mailer configured)."""
+    import auth_store as auth
+    from sqlalchemy import select
+
+    user = _require_account_admin(authorization, request)
+    email = user["email"]
+    invite_email = body.email.lower().strip()
+    role = (body.role or "member").strip().lower()
+    if role not in {"admin", "member"}:
+        raise HTTPException(400, "Role must be admin or member.")
+    if invite_email == email:
+        raise HTTPException(400, "You cannot invite yourself.")
+    _ensure_auth_db()
+    with auth.session_scope() as s:
+        row = s.execute(select(auth.CpUser).where(auth.CpUser.email == email)).scalar_one_or_none()
+        if row is None:
+            raise HTTPException(401, "Unknown user.")
+        actor_role = (row.account_role or "owner").strip().lower()
+        if role == "admin" and actor_role != "owner":
+            raise HTTPException(403, "Only the account owner can invite admins.")
+        oid = auth.ensure_org_id(s, row)
+        owner = auth.billing_owner(s, row)
+        owner_dict = auth.user_to_dict(owner)
+        sub = owner_dict.get("subscription") or {}
+        try:
+            seats_n = int(sub.get("seats")) if sub.get("seats") is not None else None
+        except (TypeError, ValueError):
+            seats_n = None
+        used = auth.count_org_seats_used(s, oid)
+        if seats_n is not None and used >= seats_n:
+            raise HTTPException(
+                403,
+                f"All {seats_n} seat(s) are in use. Increase quantity in Stripe billing.",
+            )
+        existing = s.execute(
+            select(auth.CpUser).where(auth.CpUser.email == invite_email)
+        ).scalar_one_or_none()
+        if existing:
+            raise HTTPException(409, "That email already has an account.")
+        for pending in auth.list_pending_invites(s, oid):
+            if pending.email == invite_email:
+                raise HTTPException(409, "An invite is already pending for that email.")
+        invite, raw = auth.create_seat_invite(
+            s, org_id=oid, email=invite_email, role=role, invited_by=row.id
+        )
+        invite_id = invite.id
+        app_base = (os.environ.get("CASESIFTER_PUBLIC_URL") or "http://127.0.0.1:5173").rstrip("/")
+        invite_url = f"{app_base}/?seat_invite={raw}"
+        mailed = False
+        if mailer.mailer_configured():
+            mailed = mailer.send_auth_email(
+                invite_email,
+                "You are invited to CaseSifter",
+                (
+                    f"{email} invited you to join their CaseSifter firm as {role}.\n\n"
+                    f"Open this link to create your account:\n{invite_url}\n\n"
+                    "This invite expires in 7 days."
+                ),
+            )
+    _record_auth(email, "admin.invite", request, target=invite_email)
+    out: dict[str, Any] = {
+        "ok": True,
+        "email": invite_email,
+        "role": role,
+        "invite_id": invite_id,
+        "invite_url": invite_url,
+        "mailed": mailed,
+    }
+    if not mailed:
+        out["invite_token"] = raw
+    return out
+
+
+@app.delete("/v1/admin/invites/{invite_id}")
+def admin_revoke_invite(
+    invite_id: str,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    import auth_store as auth
+    from sqlalchemy import select
+
+    user = _require_account_admin(authorization, request)
+    _ensure_auth_db()
+    with auth.session_scope() as s:
+        row = s.execute(select(auth.CpUser).where(auth.CpUser.email == user["email"])).scalar_one_or_none()
+        if row is None:
+            raise HTTPException(401, "Unknown user.")
+        oid = auth.ensure_org_id(s, row)
+        inv = s.get(auth.CpSeatInvite, invite_id)
+        if inv is None or inv.org_id != oid:
+            raise HTTPException(404, "Invite not found.")
+        inv.revoked_at = time.time()
+        s.add(inv)
+    _record_auth(user["email"], "admin.invite_revoke", request, target=invite_id)
+    return {"ok": True}
+
+
+@app.patch("/v1/admin/users/{user_id}")
+def admin_set_member_role(
+    user_id: str,
+    body: MemberRoleBody,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """Assign owner/admin/member. Owner-only for admin/owner grants; cannot demote last owner."""
+    import auth_store as auth
+    from sqlalchemy import select
+
+    actor = _require_account_admin(authorization, request)
+    role = (body.role or "").strip().lower()
+    if role not in {"owner", "admin", "member"}:
+        raise HTTPException(400, "Role must be owner, admin, or member.")
+    _ensure_auth_db()
+    with auth.session_scope() as s:
+        actor_row = s.execute(
+            select(auth.CpUser).where(auth.CpUser.email == actor["email"])
+        ).scalar_one_or_none()
+        if actor_row is None:
+            raise HTTPException(401, "Unknown user.")
+        oid = auth.ensure_org_id(s, actor_row)
+        target = s.get(auth.CpUser, user_id)
+        if target is None or auth.org_id_of(target) != oid:
+            raise HTTPException(404, "Member not found.")
+        actor_role = (actor_row.account_role or "owner").lower()
+        target_role = (target.account_role or "owner").lower()
+        if role in {"owner", "admin"} and actor_role != "owner":
+            raise HTTPException(403, "Only the account owner can grant owner or admin.")
+        if target_role in {"owner", "admin"} and actor_role != "owner":
+            raise HTTPException(403, "Only the account owner can change owner or admin roles.")
+        if target_role == "owner" and role != "owner":
+            if auth.count_org_owners(s, oid) <= 1:
+                raise HTTPException(400, "Cannot demote the last owner.")
+        if target.id == actor_row.id and role == "member" and actor_role == "owner":
+            raise HTTPException(400, "Transfer ownership to another user before leaving owner.")
+        if role == "owner":
+            members = list(auth.list_org_members(s, oid))
+            for m in members:
+                if m.id != target.id and (m.account_role or "").lower() == "owner":
+                    m.account_role = "admin"
+                    s.add(m)
+            for m in members:
+                if m.id != target.id:
+                    m.org_id = target.id
+                    s.add(m)
+            target.org_id = target.id
+        target.account_role = role
+        s.add(target)
+    _record_auth(actor["email"], "admin.role_change", request, target=f"{user_id}:{role}")
+    return {"ok": True, "user_id": user_id, "role": role}
+
+
+@app.delete("/v1/admin/users/{user_id}")
+def admin_remove_member(
+    user_id: str,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """Detach a seat from the org (solo account) and revoke their sessions."""
+    import auth_store as auth
+    from sqlalchemy import select
+
+    actor = _require_account_admin(authorization, request)
+    _ensure_auth_db()
+    with auth.session_scope() as s:
+        actor_row = s.execute(
+            select(auth.CpUser).where(auth.CpUser.email == actor["email"])
+        ).scalar_one_or_none()
+        if actor_row is None:
+            raise HTTPException(401, "Unknown user.")
+        oid = auth.ensure_org_id(s, actor_row)
+        target = s.get(auth.CpUser, user_id)
+        if target is None or auth.org_id_of(target) != oid:
+            raise HTTPException(404, "Member not found.")
+        if target.id == actor_row.id:
+            raise HTTPException(400, "You cannot remove yourself. Transfer ownership first.")
+        actor_role = (actor_row.account_role or "owner").lower()
+        target_role = (target.account_role or "owner").lower()
+        if target_role in {"owner", "admin"} and actor_role != "owner":
+            raise HTTPException(403, "Only the account owner can remove an owner or admin.")
+        if target_role == "owner" and auth.count_org_owners(s, oid) <= 1:
+            raise HTTPException(400, "Cannot remove the last owner.")
+        email_t = target.email
+        auth.detach_org_member(s, target)
+    _record_auth(actor["email"], "admin.member_remove", request, target=email_t)
+    return {"ok": True, "user_id": user_id}
+
+
+@app.post("/v1/admin/users/{user_id}/sessions/revoke")
+def admin_revoke_member_sessions(
+    user_id: str,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """Revoke all sessions for another org member (or self)."""
+    import auth_store as auth
+    from sqlalchemy import select
+
+    actor = _require_account_admin(authorization, request)
+    _ensure_auth_db()
+    with auth.session_scope() as s:
+        actor_row = s.execute(
+            select(auth.CpUser).where(auth.CpUser.email == actor["email"])
+        ).scalar_one_or_none()
+        if actor_row is None:
+            raise HTTPException(401, "Unknown user.")
+        oid = auth.ensure_org_id(s, actor_row)
+        target = s.get(auth.CpUser, user_id)
+        if target is None or auth.org_id_of(target) != oid:
+            raise HTTPException(404, "Member not found.")
+        except_sid = None
+        if target.id == actor_row.id:
+            user, token, _ = _session_user(authorization, request)
+            parsed = _parse_session_token(token)
+            except_sid = (parsed or {}).get("sid")
+        count = auth.revoke_all_sessions_for_user(s, target.id, except_sid=except_sid)
+    _record_auth(actor["email"], "session.revoke_member", request, target=f"{user_id}:{count}")
+    return {"ok": True, "revoked": count}
+
+
+class AdminSettingsBody(BaseModel):
+    sso_preferred: bool | None = None
+
+
+@app.patch("/v1/admin/settings")
+def admin_settings(
+    body: AdminSettingsBody,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    import auth_store as auth
+    from sqlalchemy import select
+
+    user = _require_account_admin(authorization, request)
+    email = user["email"]
+    _ensure_auth_db()
+    with auth.session_scope() as s:
+        row = s.execute(select(auth.CpUser).where(auth.CpUser.email == email)).scalar_one_or_none()
+        if row is None:
+            raise HTTPException(401, "Unknown user.")
+        if body.sso_preferred is not None:
+            row.sso_preferred = bool(body.sso_preferred)
+        s.add(row)
+        out = auth.user_to_dict(row)
+    _record_auth(email, "admin.settings_update", request, target="sso_preferred")
+    return {"ok": True, "sso_preferred": out.get("sso_preferred")}
+
+
+@app.get("/v1/admin/audit")
+def admin_audit(request: Request, authorization: str | None = Header(default=None)):
+    import auth_store as auth
+
+    user = _require_account_admin(authorization, request)
+    _ensure_auth_db()
+    with auth.session_scope() as s:
+        events = auth.list_account_audit_events(s, user.get("email") or "", limit=100)
+    return {"events": events}
+
+
+@app.post("/v1/admin/sessions/{session_id}/revoke")
+def admin_revoke_session(
+    session_id: str,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    import auth_store as auth
+    from sqlalchemy import select
+
+    user = _require_account_admin(authorization, request)
+    email = user["email"]
+    _ensure_auth_db()
+    with auth.session_scope() as s:
+        row = s.execute(select(auth.CpUser).where(auth.CpUser.email == email)).scalar_one_or_none()
+        if row is None:
+            raise HTTPException(401, "Unknown user.")
+        sess = s.get(auth.CpSession, session_id)
+        if sess is None or sess.user_id != row.id:
+            raise HTTPException(404, "Session not found.")
+        auth.revoke_session(s, session_id)
+    _record_auth(email, "session.revoke", request, target=session_id[:16])
+    return {"ok": True}
+
+
+@app.post("/v1/admin/sessions/revoke-others")
+def admin_revoke_other_sessions(
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    import auth_store as auth
+    from sqlalchemy import select
+
+    user, token, _ = _session_user(authorization, request)
+    if not auth.is_account_admin(user):
+        raise HTTPException(403, "Account admin access is required.")
+    email = user["email"]
+    parsed = _parse_session_token(token)
+    current_sid = (parsed or {}).get("sid")
+    _ensure_auth_db()
+    with auth.session_scope() as s:
+        row = s.execute(select(auth.CpUser).where(auth.CpUser.email == email)).scalar_one_or_none()
+        if row is None:
+            raise HTTPException(401, "Unknown user.")
+        count = auth.revoke_all_sessions_for_user(s, row.id, except_sid=current_sid)
+    _record_auth(email, "session.revoke_all", request, target=str(count))
+    return {"ok": True, "revoked": count}
+
+
+@app.post("/v1/admin/sessions/revoke-firm")
+def admin_revoke_firm_sessions(
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """Owner-only: revoke all sessions for every org member except the current session."""
+    import auth_store as auth
+    from sqlalchemy import select
+
+    user, token, _ = _session_user(authorization, request)
+    if not auth.is_account_admin(user):
+        raise HTTPException(403, "Account admin access is required.")
+    email = user["email"]
+    parsed = _parse_session_token(token)
+    current_sid = (parsed or {}).get("sid")
+    _ensure_auth_db()
+    with auth.session_scope() as s:
+        row = s.execute(select(auth.CpUser).where(auth.CpUser.email == email)).scalar_one_or_none()
+        if row is None:
+            raise HTTPException(401, "Unknown user.")
+        if (row.account_role or "owner").strip().lower() != "owner":
+            raise HTTPException(403, "Only the account owner can revoke firm-wide sessions.")
+        oid = auth.ensure_org_id(s, row)
+        count = 0
+        for member in auth.list_org_members(s, oid):
+            except_sid = current_sid if member.id == row.id else None
+            count += auth.revoke_all_sessions_for_user(s, member.id, except_sid=except_sid)
+    _record_auth(email, "session.revoke_firm", request, target=str(count))
+    return {"ok": True, "revoked": count}
+

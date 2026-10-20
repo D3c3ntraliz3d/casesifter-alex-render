@@ -46,10 +46,26 @@ ARREARS_OK_RE = re.compile(
     r"installment\s+payment\s+is\s+still|missed\s+payment|past[\s-]due)"
 )
 
-RECORDED_KINDS = frozenset({"mortgage", "deed", "assignment", "satisfaction", "indenture"})
+RECORDED_KINDS = frozenset(
+    {"mortgage", "deed", "assignment", "satisfaction", "indenture", "discharge"}
+)
 RECORDED_PLEADING_NAME = re.compile(r"(?i)\b(notice|foreclosure|complaint|summons|motion)\b")
+# Consumer "mortgage statement" / billing packets are exhibit-fraud targets, not ACRIS instruments.
+RECORDED_STATEMENT_EXCLUDE = re.compile(
+    r"(?i)\b("
+    r"mortgage\s+statement|billing\s+statement|account\s+statement|"
+    r"bank\s+statement|loan\s+statement|payment\s+statement|"
+    r"monthly\s+statement"
+    r")\b"
+)
 RECORDED_NAME = re.compile(
-    r"(?i)\b(mortgage|deed|indenture|assignment\s+of\s+mortgage|satisfaction\s+of\s+mortgage)\b"
+    r"(?i)\b("
+    r"mortgage|deed|indenture|"
+    r"assignment\s+of\s+mortgage|"
+    r"satisfaction\s+of\s+mortgage|"
+    r"discharge\s+of\s+mortgage|"
+    r"bargain\s+and\s+sale\s+deed"
+    r")\b"
 )
 RECORDED_BODY = re.compile(
     r"(?i)("
@@ -62,6 +78,29 @@ RECORDED_BODY = re.compile(
     r"county\s+clerk'?s?\s+office|"
     r"to\s+be\s+recorded\s+in"
     r")"
+)
+
+# Execution / assignment vs recording lag on public instruments is ordinary.
+RECORDING_LAG_DATE_RE = re.compile(
+    r"(?i)("
+    r"\brecord(?:ed|ing)\b.{0,120}\b(?:date|dated|executed|execution|signed|made|assignment)\b|"
+    r"\b(?:date|dated|executed|execution|signed|made|assignment)\b.{0,120}\brecord(?:ed|ing)\b|"
+    r"(?:does\s+not\s+match|do\s+not\s+match|mismatch|discrepanc\w*|inconsist\w*|conflict).{0,100}"
+    r"(?:record|execution|assignment|mortgage\s+date|deed\s+date)|"
+    r"(?:record|execution|assignment|mortgage\s+date|deed\s+date).{0,100}"
+    r"(?:does\s+not\s+match|do\s+not\s+match|mismatch|discrepanc\w*|inconsist\w*|conflict)|"
+    r"lag\s+between|"
+    r"recorded\s+(?:months?|years?|weeks?)\s+(?:later|after)|"
+    r"(?:months?|years?|weeks?)\s+(?:before|after|later).{0,60}record"
+    r")"
+)
+_DATEISH_ANALYSES = frozenset(
+    {
+        "date_inconsistency",
+        "historical_impossibility",
+        "fact_conflict",
+        "chronology_inconsistency",
+    }
 )
 
 MAJOR_AI_TYPES = frozenset(
@@ -147,6 +186,9 @@ def looks_like_recorded_instrument(
     if (doc_kind or "").strip().lower() in RECORDED_KINDS:
         return True
     name = str(source or "")
+    blob = f"{name} {(text or '')[:4000]}"
+    if RECORDED_STATEMENT_EXCLUDE.search(blob):
+        return False
     if RECORDED_NAME.search(name) and not RECORDED_PLEADING_NAME.search(name):
         return True
     return bool(RECORDED_BODY.search(text or ""))
@@ -171,6 +213,41 @@ def is_recorded_instrument_math_noise(
         return False
     blob = finding_blob(item)
     return looks_like_recorded_instrument(text, name, doc_kind) or bool(RECORDED_BODY.search(blob))
+
+
+def is_recorded_instrument_date_noise(
+    item: Finding | dict,
+    *,
+    text: str = "",
+    source: str = "",
+    doc_kind: str | None = None,
+) -> bool:
+    """Execution/assignment vs recording lag on deeds/mortgages is not an interrupt.
+
+    Recorded public instruments are not bank statements. Ordinary clerk lag between
+    the instrument date and the recording date must not yellow the file. Alteration
+    signals (overlay, splicing) and consumer mortgage-*statement* chronology stay.
+    """
+    analysis = _analysis_type(item)
+    if analysis not in _DATEISH_ANALYSES and analysis != "":
+        return False
+    if isinstance(item, Finding):
+        name = source or str(item.title or "")
+    else:
+        name = source or str(item.get("title") or "")
+    blob = _search_blob(item)
+    if RECORDED_STATEMENT_EXCLUDE.search(blob) or RECORDED_STATEMENT_EXCLUDE.search(
+        f"{name} {text or ''}"
+    ):
+        return False
+    lag = bool(RECORDING_LAG_DATE_RE.search(blob))
+    if not lag:
+        return False
+    recorded = looks_like_recorded_instrument(text, name, doc_kind) or bool(
+        RECORDED_BODY.search(blob)
+    )
+    # Lag language plus mortgage/deed/assignment context (body, filename, or finding text).
+    return recorded or bool(RECORDED_NAME.search(blob))
 
 
 # Legitimate filing redactions, not concealment. 22 NYCRR §202.5(e) is the
@@ -341,11 +418,13 @@ def is_critical_forgery(item: Finding | dict, *, page_text: str = "") -> bool:
         return True
     if is_temporal_impossibility(item):
         return True
-    if _analysis_type(item) == "historical_impossibility":
+    if _analysis_type(item) == "historical_impossibility" and _ai_historical_is_grounded(item):
         return True
     if is_critical_math_error(item):
         return True
     if is_field_scoped_font_mismatch(item):
+        return True
+    if _analysis_type(item) == "line_self_contradiction":
         return True
     return False
 
@@ -480,8 +559,83 @@ def _deterministic_due_date_impossibility(item: Finding | dict) -> bool:
     return "due date" in (item.title or "").lower()
 
 
+def is_localized_row_chrome(item: Finding | dict) -> bool:
+    """Type size or color change inside statement rows, with a quote from the page.
+
+    Whole-page scan texture is not this. Generic font mismatch without a row quote
+    is not this.
+    """
+    blob = _search_blob(item)
+    if re.search(r"(?i)whole[- ]page|entire\s+page|scan\s+texture|flatbed", blob) and not re.search(
+        r"(?i)transaction|activity|bank\s+detail|description|line\s+item", blob
+    ):
+        return False
+    if not re.search(
+        r"(?i)(fonts?|typeface|type\s*sizes?|point\s*sizes?|\bcolou?rs?\b|\bsizes?\b)",
+        blob,
+    ):
+        return False
+    if not re.search(r"(?i)(transaction|activity|bank\s+detail|description|line\s+item|statement\s+row)", blob):
+        return False
+    if isinstance(item, Finding):
+        quoted = str((item.evidence or {}).get("quoted_evidence") or "")
+    else:
+        quoted = str(item.get("quoted_evidence") or (item.get("evidence") or {}).get("quoted_evidence") or "")
+    return len(quoted.strip()) >= 12
+
+
+def _statement_body_survives_header(item: Finding | dict) -> bool:
+    """A real exhibit-body signal stays even if the model also mentions the filing stamp."""
+    analysis = _analysis_type(item)
+    if analysis == "line_self_contradiction":
+        return True
+    if isinstance(item, Finding) and "payment date cannot belong" in (item.title or "").lower():
+        return True
+    if analysis != "historical_impossibility":
+        return False
+    blob = finding_blob(item)
+    # Curated issuer brands + NYC market cues (lazy import avoids cycle with statement_body).
+    from app.engines.statement_body import curated_issuer_blob_match
+
+    if curated_issuer_blob_match(blob):
+        return True
+    return bool(
+        re.search(
+            r"(?i)\(718\)|\b718[-.\s]\d{3}|\bbrooklyn\b|\b(?:516|631)[-.\s]\d{3}|"
+            r"\blong\s*island\b|\bnassau\b|\bsuffolk\b",
+            blob,
+        )
+    )
+
+
+def _ai_historical_is_grounded(item: Finding | dict) -> bool:
+    """AI historical_impossibility needs a date quote and a curated issuer brand.
+
+    Open-ended model "era" claims without a table-backed issuer stay non-material.
+    Deterministic table hits set evidence.deterministic and skip this gate.
+    """
+    if isinstance(item, Finding):
+        evidence = item.evidence or {}
+        quoted = str(evidence.get("quoted_evidence") or "")
+        blob = finding_blob(item)
+    else:
+        nested = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
+        evidence = nested or item
+        quoted = str(item.get("quoted_evidence") or evidence.get("quoted_evidence") or "")
+        blob = finding_blob(item)
+    if evidence.get("deterministic"):
+        return True
+    if not re.search(r"\d{4}|\d{1,2}[/-]\d{1,2}", quoted):
+        return False
+    from app.engines.statement_body import curated_issuer_blob_match
+
+    return curated_issuer_blob_match(quoted + " " + blob)
+
+
 def is_header_or_arrears_noise(item: Finding | dict) -> bool:
     if _deterministic_due_date_impossibility(item):
+        return False
+    if is_localized_row_chrome(item) or _statement_body_survives_header(item):
         return False
     blob = finding_blob(item)
     if HEADER_NOISE_RE.search(blob):
@@ -501,6 +655,8 @@ def is_header_or_arrears_noise(item: Finding | dict) -> bool:
     ):
         return True
     if is_recorded_instrument_math_noise(item):
+        return True
+    if is_recorded_instrument_date_noise(item):
         return True
     return False
 
@@ -526,6 +682,8 @@ def is_material_finding(item: Finding) -> bool:
     if evidence.get("case_impact") == "noise":
         return False
     if is_header_or_arrears_noise(item):
+        return False
+    if is_recorded_instrument_date_noise(item):
         return False
     if item.id in PACKAGING_IDS or any(item.id.startswith(prefix) for prefix in PACKAGING_IDS):
         return False
@@ -556,21 +714,23 @@ def is_material_finding(item: Finding) -> bool:
         return True
     if is_field_scoped_font_mismatch(item) and item.severity in {"medium", "high", "critical"}:
         return True
+    if is_localized_row_chrome(item) and item.severity in {"medium", "high", "critical"}:
+        return True
+    if analysis == "line_self_contradiction" and item.severity in {"medium", "high", "critical"}:
+        return True
     if analysis == "math_error":
         # Require an arithmetic quote (digits) so clean synthetics without broken math stay quiet.
         quoted = str(evidence.get("quoted_evidence") or item.explanation or "")
         if not re.search(r"\d", quoted):
             return False
         return item.severity in {"medium", "high", "critical"}
+    if analysis == "historical_impossibility":
+        if not _ai_historical_is_grounded(item):
+            return False
+        return item.severity in {"medium", "high", "critical"}
     if evidence.get("ai_generated"):
         return analysis in MAJOR_AI_TYPES
     if analysis == "template_fabrication" and item.severity in {"medium", "high", "critical"}:
-        return True
-    if analysis in {"historical_impossibility", "template_fabrication"} and item.severity in {
-        "medium",
-        "high",
-        "critical",
-    }:
         return True
     if item.category == "gotcha":
         if evidence.get("evidence_tier") == 2:

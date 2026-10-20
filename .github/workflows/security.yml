@@ -1,0 +1,50 @@
+name: security
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  controls:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install control plane
+        run: pip install -r control_plane/requirements.txt
+      - name: Control-plane tests
+        working-directory: control_plane
+        run: pytest -q
+      - name: Install analysis dependencies
+        run: pip install -r backend/requirements.txt
+      - name: Analysis security tests
+        working-directory: backend
+        run: pytest -q evals/test_source_retention.py evals/test_access_audit.py evals/test_production_docs.py evals/test_key_rewrap.py evals/test_no_debug_routes.py evals/test_fail_closed_secrets.py evals/test_session_secret_fail_closed.py evals/test_security_headers.py evals/test_export_smoke.py
+      - name: Forgery / suppress pack
+        working-directory: backend
+        run: pytest -q evals/test_forgery_risk_floor.py evals/test_logo_chrome_must_suppress.py evals/test_visual_review_fail_closed.py
+      - name: Fraud calibration summary
+        working-directory: backend
+        run: python -m evals.fraud_calibration_summary
+        continue-on-error: true
+      - name: OIDC JWKS + seat invite smoke
+        working-directory: control_plane
+        run: pytest -q test_oidc_jwks.py test_seat_invites.py
+      - name: Stripe URL allowlist
+        working-directory: frontend
+        run: node scripts/test-stripe-url.mjs
+      - name: Secret scan
+        run: python scripts/secret_scan.py
+      - name: Frontend dependency audit
+        working-directory: frontend
+        run: npm audit --audit-level=high
+      - name: Python dependency audit
+        run: |
+          pip install pip-audit
+          pip-audit -r control_plane/requirements.txt
+          pip-audit -r backend/requirements.txt

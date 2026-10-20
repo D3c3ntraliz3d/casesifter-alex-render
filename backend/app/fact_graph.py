@@ -2699,9 +2699,13 @@ def entity_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:
             return False
         return True
     if {left.get("key"), right.get("key")} == {"occupancy_start", "mortgage_origination"}:
+        occ = left if left.get("key") == "occupancy_start" else right
         mort = left if left.get("key") == "mortgage_origination" else right
-        # Assignment-chain dates are not mortgage origination for occupancy gates.
-        if str(mort.get("instrument_event") or "mortgage") == "assignment":
+        # Billing periods, service dates, and filing stamps are not occupancy.
+        if not _occupancy_fact_grounded(occ):
+            return False
+        # Filed/recorded/commencement/assignment dates are not origination.
+        if not _mortgage_origination_fact_grounded(mort):
             return False
         return True
     if left.get("key") == "claimed_arrears" and right.get("key") == "claimed_arrears":
@@ -2920,7 +2924,13 @@ def _presence_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:
 
 
 def _service_attempt_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:
-    """False when AOS personal service collides with same-day log / substitute / other place."""
+    """False when AOS personal service collides with same-day log / substitute / other place.
+
+    Same-package “impossible simultaneous service” (personal + substitute / nail-mail)
+    requires same-server, same-minute clock times, and quotes on both sides. Hours-apart
+    personal-then-substitute on one AOS is ordinary sequence — suppress as advocacy.
+    Cross-document AOS vs server daily log still interrupts without the same-minute gate.
+    """
     ma = str(left.get("service_method") or "")
     mb = str(right.get("service_method") or "")
     pa = _norm_address(str(left.get("service_place") or ""))
@@ -2928,10 +2938,23 @@ def _service_attempt_compatible(left: dict[str, Any], right: dict[str, Any]) -> 
     ta = str(left.get("service_time") or "")
     tb = str(right.get("service_time") or "")
     methods = {ma, mb}
-    # Personal vs nail-mail or substitute on same date is AGAINST
-    if methods == {"personal", "nail_mail"} or methods == {"personal", "substitute"}:
-        return False
-    if "personal" in methods and "substitute" in methods:
+    doc_a = str(left.get("document_id") or "")
+    doc_b = str(right.get("document_id") or "")
+    same_package = (not doc_a and not doc_b) or (bool(doc_a) and doc_a == doc_b)
+    mixed_methods = methods == {"personal", "nail_mail"} or methods == {
+        "personal",
+        "substitute",
+    } or ("personal" in methods and "substitute" in methods)
+    if mixed_methods:
+        if same_package:
+            mins = _minutes_apart(ta, tb)
+            qa = str(left.get("quote") or "").strip()
+            qb = str(right.get("quote") or "").strip()
+            # Simultaneous only: same minute + quotes (server identity gated upstream).
+            if mins is None or mins > 1 or not qa or not qb:
+                return True
+            return False
+        # AOS vs separate daily log / other filing — keep AGAINST.
         return False
     # Same place, different clock times far apart for claimed personal service vs log
     if pa and pb and pa == pb and ma == mb == "personal":
@@ -3112,6 +3135,69 @@ def _principal_compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:
     return True
 
 
+# Billing / filing / service chrome mislabeled as occupancy (live 11467 flood).
+_OCCUPANCY_QUOTE_NOISE_RE = re.compile(
+    r"(?i)\b(?:"
+    r"billing\s+period|service\s+period|statement\s+(?:date|period)|"
+    r"amount\s+due|account\s+number|"
+    r"deponent\s+served|summons\s+and|affidavit\s+of\s+service|"
+    r"recorded(?:/|\s+|)\s*filed|filed\s+\d|recorded\s+\d|"
+    r"nyscef|index\s*(?:no|#|number)"
+    r")\b"
+)
+_OCCUPANCY_QUOTE_HOOK_RE = re.compile(
+    r"(?i)\b(?:occup(?:y|ied|ancy)|resid(?:e|ed|ent)|lived|primary\s+residence|"
+    r"owner[- ]occupant|entered\s+into\s+occupancy)\b"
+)
+# Only true mortgage/note execution dates gate occupancy-before-mortgage.
+_MORTGAGE_ORIG_EVENTS = frozenset({"mortgage", "note", "origination"})
+_MORTGAGE_ORIG_BLOCKED = frozenset(
+    {
+        "assignment",
+        "assignment_execution",
+        "assignment_effective",
+        "recording",
+        "filed",
+        "commencement",
+        "notarization",
+        "allonge",
+        "effective",
+        "effective_as_of",
+    }
+)
+_MORTGAGE_QUOTE_HOOK_RE = re.compile(
+    r"(?i)\b(?:mortgage|note|deed\s+of\s+trust|origination|originated|executed)\b"
+)
+
+
+def _occupancy_fact_grounded(fact: dict[str, Any]) -> bool:
+    """Occupancy start must quote occupancy language, not bills/service/filing stamps."""
+    quote = str(fact.get("quote") or fact.get("display") or "")
+    if not quote or _OCCUPANCY_QUOTE_NOISE_RE.search(quote):
+        return False
+    return bool(_OCCUPANCY_QUOTE_HOOK_RE.search(quote))
+
+
+def _mortgage_origination_fact_grounded(fact: dict[str, Any]) -> bool:
+    """Occupancy gates only against mortgage/note origination — not filed/recorded/RJI dates."""
+    event = str(
+        fact.get("date_role") or fact.get("instrument_event") or ""
+    ).strip().lower()
+    if event in _MORTGAGE_ORIG_BLOCKED or any(
+        event.startswith(f"{b}_") for b in ("assignment", "recording")
+    ):
+        return False
+    if event in _MORTGAGE_ORIG_EVENTS or any(
+        token in event for token in ("mortgage", "origination", "note")
+    ):
+        return True
+    quote = str(fact.get("quote") or fact.get("display") or "")
+    if _OCCUPANCY_QUOTE_NOISE_RE.search(quote):
+        return False
+    # Unknown role: require mortgage/note language in the quote itself.
+    return bool(_MORTGAGE_QUOTE_HOOK_RE.search(quote))
+
+
 def _fact_is_low_confidence(fact: dict[str, Any]) -> bool:
     """Reject placeholder/OCR-garbage values before they enter conflict clusters."""
     if fact.get("low_confidence") or fact.get("confidence") == "low":
@@ -3134,6 +3220,9 @@ def _fact_is_low_confidence(fact: dict[str, Any]) -> bool:
     if fact.get("kind") == "date" and not re.fullmatch(
         r"\d{4}(?:-\d{2}(?:-\d{2})?)?", value[:10]
     ):
+        return True
+    key = str(fact.get("key") or "")
+    if key == "occupancy_start" and not _occupancy_fact_grounded(fact):
         return True
     return False
 

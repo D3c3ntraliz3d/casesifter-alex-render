@@ -12,6 +12,11 @@ export default defineConfig({
         timeout: 600_000,
         proxyTimeout: 600_000,
       },
+      // Same-origin control in local SPA when VITE_CONTROL_SAME_ORIGIN=1
+      "/v1": {
+        target: process.env.VITE_CONTROL_PROXY_TARGET || "http://127.0.0.1:8001",
+        changeOrigin: true,
+      },
     },
   },
 });

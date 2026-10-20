@@ -44,7 +44,15 @@ COURT_EFILING_HEADER_RE = re.compile(
 
 
 def analyze_metadata(path: Path) -> ModuleResult:
-    return timed_module("metadata", lambda: _run(path))
+    """Extract timestamps / authorship.
+
+    Retries once on module error. A remaining Meta failure is soft-fail for
+    row clearance (warn chip, not Incomplete) — packaging/timestamps only.
+    """
+    result = timed_module("metadata", lambda: _run(path))
+    if result.status == "error":
+        result = timed_module("metadata", lambda: _run(path))
+    return result
 
 
 def _run(path: Path) -> tuple[list[Finding], dict[str, Any]]:
@@ -124,7 +132,9 @@ def _pdf_date(value: Any) -> str | None:
         if value.tzinfo is None:
             value = value.replace(tzinfo=timezone.utc)
         return value.isoformat()
-    text = str(value)
+    # E-filed PDFs sometimes append a stray quote (D:...Z') that breaks pypdf's
+    # typed date properties; strip junk and parse the D:YYYYMMDD… core.
+    text = str(value).strip().strip("'\"")
     match = re.search(r"D:(\d{4})(\d{2})(\d{2})(\d{2})?(\d{2})?(\d{2})?", text)
     if not match:
         try:
@@ -141,6 +151,39 @@ def _pdf_date(value: Any) -> str | None:
         return text
 
 
+def _pdf_info_raw_text(info: Any, key: str) -> str | None:
+    """Read an Info dictionary string without pypdf's strict date conversion."""
+    if not info:
+        return None
+    getter = getattr(info, "_get_text", None)
+    if callable(getter):
+        try:
+            text = getter(key)
+            if isinstance(text, str) and text.strip():
+                return text.strip()
+        except Exception:
+            pass
+    try:
+        raw = info.get(key) if hasattr(info, "get") else None
+    except Exception:
+        raw = None
+    if raw is None:
+        return None
+    raw = _deref(raw)
+    text = str(raw).strip()
+    return text or None
+
+
+def _pdf_info_date(info: Any, key: str) -> str | None:
+    """Parse CreationDate/ModDate from raw Info text.
+
+    Do not use DocumentInformation.creation_date / modification_date — those
+    raise ValueError on common e-file date junk (trailing quote), which used to
+    mark the whole Meta module as error (and wrongly drove Incomplete clearance).
+    """
+    return _pdf_date(_pdf_info_raw_text(info, key))
+
+
 def _deref(value: Any) -> Any:
     if isinstance(value, IndirectObject):
         try:
@@ -151,6 +194,8 @@ def _deref(value: Any) -> Any:
 
 
 def _pdf_metadata(path: Path) -> tuple[dict[str, Any], list[Finding], list[TimelineEvent]]:
+    from pypdf.constants import DocumentInformationAttributes as DIA
+
     findings: list[Finding] = []
     events: list[TimelineEvent] = []
     reader = open_pdf_reader(path)
@@ -161,8 +206,8 @@ def _pdf_metadata(path: Path) -> tuple[dict[str, Any], list[Finding], list[Timel
         "creator": str(info.creator) if info and info.creator else None,
         "producer": str(info.producer) if info and info.producer else None,
         "subject": str(info.subject) if info and info.subject else None,
-        "created": _pdf_date(info.creation_date) if info else None,
-        "modified": _pdf_date(info.modification_date) if info else None,
+        "created": _pdf_info_date(info, DIA.CREATION_DATE) if info else None,
+        "modified": _pdf_info_date(info, DIA.MOD_DATE) if info else None,
         "page_count": len(reader.pages),
         "pdf_version": getattr(reader, "pdf_header", None),
         "is_encrypted": bool(reader.is_encrypted),

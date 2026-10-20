@@ -39,6 +39,28 @@ def session_secret() -> str:
     return (os.environ.get("SESSION_SECRET") or "").strip()
 
 
+def session_secrets() -> list[str]:
+    """Current secret, then SESSION_SECRET_PREVIOUS for one rotation overlap.
+
+    New tokens are signed with the current secret only.
+    """
+    current = session_secret()
+    previous = (os.environ.get("SESSION_SECRET_PREVIOUS") or "").strip()
+    out: list[str] = []
+    for secret in (current, previous):
+        if secret and secret not in out:
+            out.append(secret)
+    return out
+
+
+def _signature_ok(secrets: list[str], payload: bytes, sig: bytes) -> bool:
+    for secret in secrets:
+        expect = hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).digest()
+        if hmac.compare_digest(sig, expect):
+            return True
+    return False
+
+
 def require_session_secret_configured() -> str:
     """Fail closed: missing/empty SESSION_SECRET is a hard error (no default)."""
     secret = session_secret()
@@ -72,9 +94,9 @@ def _cs1_still_accepted(issued: int) -> bool:
 
 
 def parse_session_token(token: str) -> dict[str, Any] | None:
-    secret = session_secret()
+    secrets = session_secrets()
     # Fail closed: no secret → no local session acceptance (never use a default).
-    if not token or not secret:
+    if not token or not secrets:
         return None
     if token.startswith("cs2."):
         parts = token.split(".")
@@ -85,8 +107,7 @@ def parse_session_token(token: str) -> dict[str, Any] | None:
             sig = _b64url_decode(parts[2])
         except Exception:
             return None
-        expect = hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).digest()
-        if not hmac.compare_digest(sig, expect):
+        if not _signature_ok(secrets, payload, sig):
             return None
         try:
             user_id, email, sid, issued_s = payload.decode("utf-8").split("|", 3)
@@ -110,8 +131,7 @@ def parse_session_token(token: str) -> dict[str, Any] | None:
             sig = _b64url_decode(parts[2])
         except Exception:
             return None
-        expect = hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).digest()
-        if not hmac.compare_digest(sig, expect):
+        if not _signature_ok(secrets, payload, sig):
             return None
         try:
             email, issued_s, _nonce = payload.decode("utf-8").split("|", 2)

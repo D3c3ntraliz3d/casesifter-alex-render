@@ -19,32 +19,15 @@ from pathlib import Path
 from typing import Any
 
 from app.auto_title import looks_like_exhibit_filename
+from app.doc_kinds import COURT_FILING_KINDS, EXHIBIT_KINDS, REFERENCE_KINDS
 
-# Pleadings and procedural filings — extract facts, compare across the case.
-COURT_FILING_KINDS = frozenset(
-    {
-        "complaint",
-        "answer",
-        "motion",
-        "order",
-        "affidavit",
-        "affirmation",
-        "letter",
-        "stipulation",
-        "transcript",
-        "summons",
-        "notice",
-        "brief",
-        "memorandum",
-        "reply",
-        "opposition",
-        "filing",
-        "judgment",
-        "rji",
-        "proof_of_service",
-        "notice_of_pendency",
-        "calendar",
-    }
+# Re-export for callers that import kinds from scan_profile.
+__all__ = (
+    "COURT_FILING_KINDS",
+    "EXHIBIT_KINDS",
+    "REFERENCE_KINDS",
+    "PROFILE_FORENSIC",
+    "PROFILE_COURT_FILING",
 )
 
 PLEADING_CAPTION_RE = re.compile(
@@ -113,21 +96,6 @@ BOILERPLATE_NAME_RE = re.compile(
     r"affirmation\s+of\s+service|"
     r"cover\s+sheet"
     r")"
-)
-
-# Evidence packets — full fraudulent-document forensics.
-EXHIBIT_KINDS = frozenset(
-    {
-        "exhibit",
-        "bill",
-        "statement",
-        "invoice",
-        "check",
-        "receipt",
-        "photo",
-        "image",
-        "evidence",
-    }
 )
 
 IMAGE_SUFFIXES = frozenset(

@@ -11,6 +11,8 @@ contextBridge.exposeInMainWorld("casesifter", {
   unarchiveCase: (id) => ipcRenderer.invoke("cs:unarchive-case", id),
   deleteCase: (id) => ipcRenderer.invoke("cs:delete-case", id),
   deleteDocument: (caseId, documentId) => ipcRenderer.invoke("cs:delete-doc", caseId, documentId),
+  patchDocument: (caseId, documentId, payload) =>
+    ipcRenderer.invoke("cs:patch-doc", caseId, documentId, payload),
   pickAndAddDocuments: (caseId) => ipcRenderer.invoke("cs:pick-docs", caseId),
   analyzeDocument: (caseId, documentId) => ipcRenderer.invoke("cs:analyze", caseId, documentId),
   getLocalReport: (caseId, documentId) => ipcRenderer.invoke("cs:get-report", caseId, documentId),

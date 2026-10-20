@@ -50,6 +50,8 @@ from app.engines import finding, timed_module
 from app.finding_policy import (
     is_field_scoped_font_mismatch,
     is_header_or_arrears_noise,
+    is_localized_row_chrome,
+    is_recorded_instrument_date_noise,
     is_recorded_instrument_math_noise,
 )
 from app.models import Finding, ModuleResult
@@ -284,6 +286,10 @@ Examine:
    (a signature predating the agreement, a service period outside the billing period, a
    monthly bill whose due date is years after the statement date, a payment month that
    cannot fall in the billing cycle, a sequence that cannot have happened in that order).
+   A "payment received" line that prints a month and day but no year is a date_inconsistency
+   when that month and day fall after the statement date's month and day. Quote both strings
+   exactly as printed. Do not add a year the page does not print. A payment line that prints
+   an earlier year is an ordinary prior payment — do not flag it.
    Do NOT treat a demand / default / right-to-cure / acceleration notice as inconsistent
    merely because it recites an older missed installment or default date (for example a
    2023 letter saying the next installment is still due on 02/28/2022). That is how
@@ -315,7 +321,11 @@ Examine:
 8. historical_impossibility — a well-established public fact makes the statement impossible
    as a contemporaneous record: the named issuer did not yet serve that city/market on that
    statement date, the company did not exist yet, or had already exited that market. Use only
-   well-established public facts; if unsure, omit rather than guess.
+   well-established public facts; if unsure, omit rather than guess. Quote the brand, the
+   statement date, and the city if you can read the city on the page image. A full city
+   telephone number printed on that same bill is place evidence when the city word is
+   garbled; still quote the city from the image when you can read it. Do not invent a
+   city or a year that is not visible.
 9. template_fabrication — a bought blank (bank statement, utility bill, invoice, pay stub,
    or similar) filled in to help a party, then printed and scanned so it looks like a paper
    original. Look for leftover template chrome (SPECIMEN, SAMPLE, Your Company Name,
@@ -369,6 +379,12 @@ Rules you must follow:
   the letter date. Court exhibits routinely prove when the borrower stopped paying.
   "Next payment still due on [older date]" or "you have been in default since [older
   date]" is ordinary arrears language, not a forged chronology.
+- Do NOT flag recorded public instruments (mortgages, deeds, assignments, satisfactions/
+  discharges) for ordinary date lag: instrument/execution date versus recording date,
+  assignment date vs recording date, or similar clerk delays. A mortgage dated today
+  may be recorded weeks or months later — that is not forgery and not a chronology
+  defect. Never treat those gaps as date_inconsistency or historical_impossibility.
+  Alteration (pasted overlays, splicing) on those pages may still be reported.
 - "confidence" is 0-100 for that specific observation. Use under 50 when you are unsure.
 - You are briefing a busy attorney. Report ONLY stop-the-desk problems: arithmetic that
   does not reconcile, pasted overlays, graphic splicing, leftover form-template language
@@ -427,6 +443,30 @@ class Entities:
                 "dates": len(self.dates),
             },
         }
+
+
+def _stamp_review_expectation(
+    extras: dict[str, Any],
+    *,
+    court_filing: bool,
+    bucket: str | None,
+    local_only: bool,
+) -> bool:
+    """Whether this scan must get a successful visual / logo-chrome response.
+
+    Court filings and an explicit local-only mode are completed without that
+    pass. A forensic exhibit that triage marks for full visual review still
+    requires it when the API key or CONTEXTUAL_MULTIMODAL is off.
+    """
+    if local_only and not court_filing:
+        extras["review_mode"] = "local_only"
+    elif court_filing:
+        extras["review_mode"] = "court_filing"
+    else:
+        extras["review_mode"] = "forensic"
+    required = (not local_only) and (not court_filing) and bucket == "full"
+    extras["visual_review_required"] = required
+    return required
 
 
 def analyze_contextual(
@@ -505,6 +545,8 @@ def _run(
         extras["skip_reason"] = skip_reason
         extras["external_verification"] = f"skipped_{skip_reason}"
         extras["document_analysis"] = f"skipped_{skip_reason}"
+        extras["visual_review_required"] = False
+        extras["review_mode"] = "not_required"
         logger.info(
             "contextual_logic skip_reason=%s doc=%s profile=%s",
             skip_reason,
@@ -513,7 +555,46 @@ def _run(
         )
         return findings, extras
 
+    from app.ai_triage import BUCKET_FULL, triage_document_ai
+    from app.gemini_review_state import note_ai_review_failure
+
+    triage = triage_document_ai(text, document_label=filename or doc_kind)
+    # Image-only / sparse OCR exhibits still need the full visual pass even when
+    # triage would otherwise keep them light — dates/Grid/Citi often live only
+    # on the page image.
+    ocr_starved = bool((doc_meta or {}).get("ocr_starved"))
+    bucket = triage.bucket
+    if ocr_starved and (not court_filing) and bucket != BUCKET_FULL:
+        bucket = BUCKET_FULL
+        extras["ai_bucket_forced"] = "ocr_starved"
+    extras["ai_bucket"] = bucket
+    extras["ai_bucket_reason"] = triage.reason
+    if ocr_starved:
+        extras["ocr_starved"] = True
+    local_only = bool(getattr(settings, "local_only_review", False))
+    visual_required = _stamp_review_expectation(
+        extras,
+        court_filing=court_filing,
+        bucket=bucket,
+        local_only=local_only,
+    )
+
+    if local_only and not court_filing:
+        extras["document_analysis"] = "local_only"
+        extras["visual_review"] = "local_only"
+        return findings, extras
+
     if not settings.gemini_api_key:
+        if visual_required:
+            note_ai_review_failure("no_api_key")
+            extras["document_analysis"] = "skipped_no_api_key"
+            extras["visual_review"] = "incomplete"
+        return findings, extras
+
+    if visual_required and not settings.contextual_multimodal:
+        note_ai_review_failure("multimodal_off")
+        extras["document_analysis"] = "skipped_multimodal_off"
+        extras["visual_review"] = "incomplete"
         return findings, extras
 
     extras["provider"] = f"google:{settings.gemini_model}"
@@ -522,15 +603,14 @@ def _run(
         # Tier 3 multimodal fraud review is for exhibits only.
         from app.config import gemini_model_is_valid
 
-        from app.ai_triage import BUCKET_FULL, triage_document_ai
-
-        triage = triage_document_ai(text, document_label=filename or doc_kind)
-        extras["ai_bucket"] = triage.bucket
-        extras["ai_bucket_reason"] = triage.reason
+        # Use the effective bucket (includes ocr_starved → FULL), not the raw
+        # triage value — otherwise sparse-OCR exhibits require visual review but
+        # never call Gemini and fail closed as not_attempted.
         visual_ok = (
             settings.contextual_multimodal
             and not court_filing
-            and triage.bucket == BUCKET_FULL
+            and not local_only
+            and bucket == BUCKET_FULL
         )
 
         if settings.contextual_multimodal and not court_filing and not gemini_model_is_valid(
@@ -541,22 +621,31 @@ def _run(
                 "^gemini-[\\w.-]+$ validation"
             )
             extras["document_analysis"] = {"status": "refused", "reason": "invalid_model"}
+            if visual_required:
+                note_ai_review_failure("error")
+                extras["visual_review"] = "incomplete"
+                return findings, extras
         elif visual_ok:
             import time as _time
-
-            from app.gemini_review_state import note_ai_review_failure
 
             t_mm = _time.perf_counter()
             extras["doc_kind"] = doc_kind
             extras["filename"] = filename
-            document_findings, status = _run_document_analysis(text, source_file, extras)
+            document_findings, status = _run_document_analysis_with_retry(
+                text, source_file, extras
+            )
             extras["multimodal_ms"] = int((_time.perf_counter() - t_mm) * 1000)
             findings.extend(document_findings)
             extras["document_analysis"] = status
             # Forensic exhibits: skipped / failed native upload must not look like a full AI review.
             dar = extras.get("document_analysis_result")
-            if isinstance(dar, dict) and not dar.get("file_sent"):
+            if status != "enabled":
+                extras["visual_review"] = "incomplete"
+            elif isinstance(dar, dict) and not dar.get("file_sent"):
                 note_ai_review_failure("file_not_sent")
+                extras["visual_review"] = "incomplete"
+            else:
+                extras["visual_review"] = "complete"
             extras["logo_chrome_ms"] = 0
             if settings.logo_chrome_pass:
                 try:
@@ -573,24 +662,36 @@ def _run(
                     )
                     extras["logo_chrome_ms"] = int((_time.perf_counter() - t_ch) * 1000)
                     findings.extend(chrome)
+                    if extras.get("logo_chrome_error"):
+                        note_ai_review_failure("error")
+                        extras["visual_review"] = "incomplete"
                 except Exception as exc:
                     extras["logo_chrome_error"] = str(exc)[:300]
+                    note_ai_review_failure("error")
+                    extras["visual_review"] = "incomplete"
             else:
                 extras["logo_chrome"] = "skipped"
         elif court_filing:
             extras["document_analysis"] = "skipped_court_filing"
             extras["external_verification"] = "skipped_court_filing"
             return findings, extras
-        elif settings.contextual_multimodal and triage.bucket != BUCKET_FULL:
-            extras["document_analysis"] = f"skipped_ai_bucket_{triage.bucket}"
+        elif settings.contextual_multimodal and bucket != BUCKET_FULL:
+            extras["document_analysis"] = f"skipped_ai_bucket_{bucket}"
             logger.info(
                 "contextual_logic visual skip ai_bucket=%s reason=%s doc=%s",
-                triage.bucket,
+                bucket,
                 triage.reason,
                 (filename or "-")[:80],
             )
+        elif local_only and not court_filing:
+            extras["document_analysis"] = "local_only"
+            extras["visual_review"] = "local_only"
         else:
             extras["document_analysis"] = "disabled"
+            if visual_required:
+                note_ai_review_failure("not_attempted")
+                extras["visual_review"] = "incomplete"
+                return findings, extras
 
         if extras["document_analysis"] == "error":
             extras["external_verification"] = "skipped_after_error"
@@ -637,8 +738,6 @@ def _claim_covered_by_findings(claim: Claim, findings: list[Finding]) -> bool:
         return False
     for item in findings:
         evidence = item.evidence or {}
-        if not evidence.get("ai_generated"):
-            continue
         if evidence.get("analysis_type") != "historical_impossibility":
             continue
         blob = " ".join(
@@ -1114,11 +1213,16 @@ def _pdf_page_texts(path: Path) -> list[str]:
     return out
 
 
-def _select_visual_page_indices(page_texts: list[str]) -> list[int]:
+def _select_visual_page_indices(
+    page_texts: list[str],
+    *,
+    ocr_starved: bool = False,
+) -> list[int]:
     """0-based page indices for Task D.
 
     ≤10 pages → all. Longer → first + last + pages whose *embedded text* matches
     signature/notary/jurat/seal or logo/letterhead keywords (not image detection).
+    OCR-starved long packets also sample evenly so statement pages mid-file are not skipped.
     """
     n = len(page_texts)
     if n <= 0:
@@ -1129,6 +1233,13 @@ def _select_visual_page_indices(page_texts: list[str]) -> list[int]:
     for idx, text in enumerate(page_texts):
         if _SIGNATURE_PAGE_RE.search(text) or _LOGO_LETTERHEAD_PAGE_RE.search(text):
             selected.add(idx)
+    if ocr_starved and len(selected) < 6:
+        # Even sample so mid-packet consumer statements are not missed.
+        step = max(1, n // 5)
+        for idx in range(0, n, step):
+            selected.add(idx)
+            if len(selected) >= 8:
+                break
     return sorted(selected)
 
 
@@ -1303,6 +1414,99 @@ def analyze_document(
     }
 
 
+# One automatic retry of the whole visual pass (2 attempts total) before Incomplete.
+_VISUAL_PASS_MAX_ATTEMPTS = 2
+# Config / billing — not transient. multimodal_off never reaches the retry path.
+_VISUAL_PASS_NO_RETRY_REASONS = frozenset({"multimodal_off", "no_api_key", "billing"})
+_VISUAL_RETRY_EXTRAS_KEYS = (
+    "document_analysis_error",
+    "document_analysis_note",
+    "document_analysis_result",
+    "document_analysis_failed_page_ranges",
+    "document_analysis_transport",
+    "document_analysis_selected_pdf_bytes",
+    "document_analysis_pages_selected",
+    "document_analysis_long_side_px",
+)
+
+
+def _visual_pass_succeeded(status: str, extras: dict[str, Any]) -> bool:
+    from app.gemini_review_state import get_ai_review_failure, get_failed_page_ranges
+
+    dar = extras.get("document_analysis_result")
+    if status != "enabled":
+        return False
+    if not isinstance(dar, dict) or not dar.get("file_sent"):
+        return False
+    if get_ai_review_failure():
+        return False
+    if get_failed_page_ranges():
+        return False
+    return True
+
+
+def _prepare_visual_pass_retry(extras: dict[str, Any]) -> None:
+    from app.gemini_review_state import clear_ai_review_failure
+
+    clear_ai_review_failure()
+    for key in _VISUAL_RETRY_EXTRAS_KEYS:
+        extras.pop(key, None)
+
+
+def _run_document_analysis_with_retry(
+    text: str, source_file: Path | None, extras: dict[str, Any]
+) -> tuple[list[Finding], str]:
+    """Run Task D visual once; on fail-closed outcome, retry the whole pass once.
+
+    multimodal_off / no_api_key never enter this path (handled earlier). Billing
+    is not retried. Timeout, API error, partial, empty, and file_not_sent get
+    exactly one automatic retry (2 attempts total), then stay fail-closed.
+    """
+    from app.gemini_review_state import get_ai_review_failure
+
+    doc_label = str(extras.get("filename") or "-")[:80]
+    last_findings: list[Finding] = []
+    last_status = "error"
+    for attempt in range(1, _VISUAL_PASS_MAX_ATTEMPTS + 1):
+        if attempt > 1:
+            _prepare_visual_pass_retry(extras)
+        extras["visual_review_attempt"] = attempt
+        extras["visual_review_attempts"] = attempt
+        logger.info(
+            "visual review attempt=%s/%s doc=%s",
+            attempt,
+            _VISUAL_PASS_MAX_ATTEMPTS,
+            doc_label,
+        )
+        last_findings, last_status = _run_document_analysis(text, source_file, extras)
+        if _visual_pass_succeeded(last_status, extras):
+            logger.info(
+                "visual review attempt=%s succeeded doc=%s",
+                attempt,
+                doc_label,
+            )
+            return last_findings, last_status
+        fail_reason = get_ai_review_failure() or last_status
+        if (
+            attempt >= _VISUAL_PASS_MAX_ATTEMPTS
+            or str(fail_reason) in _VISUAL_PASS_NO_RETRY_REASONS
+        ):
+            logger.warning(
+                "visual review attempt=%s failed reason=%s doc=%s; not retrying",
+                attempt,
+                fail_reason,
+                doc_label,
+            )
+            break
+        logger.warning(
+            "visual review attempt=%s failed reason=%s doc=%s; retrying once",
+            attempt,
+            fail_reason,
+            doc_label,
+        )
+    return last_findings, last_status
+
+
 def _run_document_analysis(
     text: str, source_file: Path | None, extras: dict[str, Any]
 ) -> tuple[list[Finding], str]:
@@ -1402,6 +1606,7 @@ def _run_document_analysis_page_images(
     from app.gemini_review_state import note_ai_review_failure
 
     suffix = source_file.suffix.lower()
+    texts: list[str] = []
     long_side = _visual_long_side_px(text, doc_kind=doc_kind, filename=filename)
     extras["document_analysis_long_side_px"] = long_side
     inline_limit = settings.contextual_max_upload_mb * 1024 * 1024
@@ -1411,7 +1616,10 @@ def _run_document_analysis_page_images(
             texts = _pdf_page_texts(source_file)
             if not texts and page_count > 0:
                 texts = [""] * page_count
-            indices = _select_visual_page_indices(texts)
+            indices = _select_visual_page_indices(
+                texts,
+                ocr_starved=bool(extras.get("ocr_starved")),
+            )
         else:
             indices = [0]
         image_parts, pages_sent, payload_bytes = _render_visual_page_parts(
@@ -1492,7 +1700,13 @@ def _run_document_analysis_page_images(
                 tmp_dir.rmdir()
             except OSError:
                 pass
-        return _findings_from_analysis_result(result, text, source_file, extras)
+        return _with_statement_checklist(
+            _findings_from_analysis_result(result, text, source_file, extras),
+            image_parts,
+            pages_sent,
+            texts,
+            extras,
+        )
 
     if not image_parts:
         extras["document_analysis_note"] = "Could not render page images; analyzed text only."
@@ -1534,7 +1748,35 @@ def _run_document_analysis_page_images(
         if held:
             release_inflight(payload_bytes)
 
-    return _findings_from_analysis_result(result, text, source_file, extras)
+    return _with_statement_checklist(
+        _findings_from_analysis_result(result, text, source_file, extras),
+        image_parts,
+        pages_sent,
+        texts,
+        extras,
+    )
+
+
+def _with_statement_checklist(
+    parsed: tuple[list[Finding], str],
+    image_parts: list[dict[str, Any]],
+    pages_sent: list[int],
+    page_texts: list[str],
+    extras: dict[str, Any],
+) -> tuple[list[Finding], str]:
+    """Keep the broad visual findings, then add per-page payment and row-chrome reads."""
+    findings, status = parsed
+    if status != "enabled" or not image_parts:
+        return findings, status
+    try:
+        from app.engines.statement_visual import statement_page_checklist
+
+        findings.extend(
+            statement_page_checklist(image_parts, pages_sent, page_texts, extras)
+        )
+    except Exception as exc:
+        extras["statement_checklist_error"] = str(exc)[:300]
+    return findings, status
 
 
 def _run_document_analysis_inline(
@@ -2037,9 +2279,42 @@ def _post_gemini(
                     time.sleep(delay)
                     continue
                 break
-            except urllib.error.URLError as exc:
-                note_ai_review_failure("error")
-                raise RuntimeError(f"Could not reach Gemini: {exc.reason}") from exc
+            except (urllib.error.URLError, TimeoutError) as exc:
+                reason_text = str(getattr(exc, "reason", exc)).lower()
+                timed_out = "timed out" in reason_text or "timeout" in reason_text
+                if not timed_out:
+                    note_ai_review_failure("error")
+                    raise RuntimeError(f"Could not reach Gemini: {exc.reason}") from exc
+                logger.warning(
+                    "gemini timeout task=%s step=%s chunk_id=%s attempt=%s/%s "
+                    "model=%s job=%s",
+                    task_label,
+                    step_label,
+                    chunk_label,
+                    attempt_on_model,
+                    max_on_model,
+                    model,
+                    job_prefix,
+                )
+                if on_backup:
+                    backup_failures += 1
+                else:
+                    primary_failures += 1
+                last_err = RuntimeError(f"Could not reach Gemini: {exc.reason}")
+                last_reason = "timeout"
+                more_primary = (not on_backup) and primary_failures < _PRIMARY_MAX_ATTEMPTS
+                more_backup = on_backup and backup_failures < _BACKUP_MAX_ATTEMPTS
+                will_failover = (
+                    (not on_backup)
+                    and primary_failures >= _PRIMARY_MAX_ATTEMPTS
+                    and backup
+                    and backup != primary
+                )
+                if more_primary or more_backup or will_failover:
+                    delay = gemini_retry_delay(max(0, global_attempt - 1), None, code=503)
+                    time.sleep(delay)
+                    continue
+                break
 
     if last_err is not None:
         note_ai_review_failure(last_reason)
@@ -2049,19 +2324,32 @@ def _post_gemini(
 
 
 def _parse_json_payload(body: dict[str, Any]) -> dict[str, Any]:
+    from app.gemini_review_state import note_ai_review_failure
+
+    def _fail(message: str) -> None:
+        lowered = message.lower()
+        if any(
+            token in lowered
+            for token in ("empty response", "no candidates", "unparsable", "not an object")
+        ):
+            note_ai_review_failure("empty_response")
+        else:
+            note_ai_review_failure("error")
+        raise RuntimeError(message)
+
     candidates = body.get("candidates") or []
     if not candidates:
-        raise RuntimeError("Gemini returned no candidates.")
+        _fail("Gemini returned no candidates.")
     parts = (candidates[0].get("content") or {}).get("parts") or []
     raw = "".join(part.get("text", "") for part in parts).strip()
     if not raw:
-        raise RuntimeError("Gemini returned an empty response.")
+        _fail("Gemini returned an empty response.")
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise RuntimeError(f"Gemini returned unparsable JSON: {exc}") from exc
+        _fail(f"Gemini returned unparsable JSON: {exc}")
     if not isinstance(parsed, dict):
-        raise RuntimeError("Gemini returned JSON that was not an object.")
+        _fail("Gemini returned JSON that was not an object.")
     return parsed
 
 
@@ -2138,7 +2426,9 @@ def _finding_from_analysis(
         return None
     if analysis_type in {"logical_inconsistency", "spelling_anomaly"}:
         return None
-    if analysis_type == "font_mismatch" and not is_field_scoped_font_mismatch(item):
+    if analysis_type == "font_mismatch" and not (
+        is_field_scoped_font_mismatch(item) or is_localized_row_chrome(item)
+    ):
         return None
 
     observation = str(item.get("observation", "")).strip()
@@ -2178,6 +2468,8 @@ def _finding_from_analysis(
         return None
     source_name = str(source_file) if source_file is not None else ""
     if is_recorded_instrument_math_noise(draft, text=text, source=source_name):
+        return None
+    if is_recorded_instrument_date_noise(draft, text=text, source=source_name):
         return None
 
     label = ANALYSIS_TITLES[analysis_type]

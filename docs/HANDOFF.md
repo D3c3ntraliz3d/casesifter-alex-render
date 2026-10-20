@@ -4,7 +4,7 @@
 
 ## Product decisions (John)
 
-- **`desktop/` — frozen, delete before broad launch.** No further Electron feature work.
+- **`desktop/` — frozen, delete before broad launch.** No further Electron feature work. See `desktop/README.md` freeze banner.
 - **Local vault stays for John’s testing** (`APP_MODE=vault`). Do not break `/api/cases` locally.
 - **Soft-launch now** (invite beta): marketing signup → hosted web app → Stripe trial → unsuspend analysis with Phase 0 lockdown.
 - **Hard gate before first paid invoice:** Persistent per-matter fact memory so cross-doc gotchas survive across sessions (**shipped in code** — needs Render Postgres + unsuspend analysis).
@@ -104,6 +104,10 @@ After pulling this branch (`APP_MODE=vault`), rescan and confirm forged-exhibit 
 | POST `/api/v1/jobs` (no key/session) | 422 | **401** |
 
 Live while suspended: **503**.
+
+## Soft-launch ops checklist
+
+Full checkbox list: **[`docs/OPS_SOFT_LAUNCH.md`](OPS_SOFT_LAUNCH.md)** (analysis Postgres/keys, Stripe `health.stripe`, `app` DNS, export smoke).
 
 ## Persistent fact memory — ops (John)
 

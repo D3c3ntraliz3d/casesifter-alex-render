@@ -1,8 +1,11 @@
-fastapi>=0.115.0
-uvicorn>=0.30.0
+fastapi>=0.143.1
+uvicorn>=0.38.0
 pydantic[email]>=2.0
 email-validator>=2.0
 stripe>=11.0.0
 argon2-cffi>=23.1.0
 sqlalchemy>=2.0.0
 psycopg[binary]>=3.1.0
+redis>=5.0.0
+pyotp>=2.9.0
+cryptography>=42.0.0

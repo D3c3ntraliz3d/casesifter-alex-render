@@ -10,14 +10,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Cookie, Depends, File, Form, Header, HTTPException, Query, Request, UploadFile
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from app.case_chat import ask_case_from_packet
@@ -28,7 +29,7 @@ from app.ephemeral import (
     ensure_sweeper,
     sweep_stale_jobs,
 )
-from app.models import UploadResponse
+from app.models import Report, UploadResponse
 from app.product_events import emit_chat_asked
 from app.scan_executor import ensure_scan_executor
 from app.scan_watchdog import ensure_watchdog
@@ -70,7 +71,10 @@ def _resolve_upload_labels(
 
     user_kind = (doc_kind or "").strip()
     if looks_like_exhibit_filename(safe) or looks_like_exhibit_filename(final_name):
-        final_kind = "exhibit"
+        # Keep Exhibit *display* name; refine kind when body is a statement/bill.
+        from app.scan_profile import looks_like_statement_text
+
+        final_kind = "bill" if looks_like_statement_text(text_sample or "") else "exhibit"
         if (
             (not user_name or user_name == safe or user_name == (filename or "").strip())
             and proposed_name
@@ -154,12 +158,15 @@ def _probe_control_plane_session(token: str) -> dict | None:
 def _require_analysis_auth(
     authorization: str | None = Header(default=None),
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    cs_session: str | None = Cookie(default=None),
 ) -> dict:
     """Authenticate only — does not require an active paid/trial entitlement."""
     keys = settings.analysis_api_key_set()
     bearer = None
     if authorization and authorization.lower().startswith("bearer "):
         bearer = authorization[7:].strip()
+    elif cs_session:
+        bearer = cs_session.strip()
     api_key = (x_api_key or "").strip() or None
     token_as_key = api_key or (bearer if bearer and bearer in keys else None)
 
@@ -216,6 +223,9 @@ def _require_analysis_auth(
                 "plan": (remote or {}).get("plan"),
                 "bearer": bearer,
                 "entitlement_unavailable": entitlement_unavailable and remote is None,
+                "org_owner_email": (remote or {}).get("org_owner_email"),
+                "account_role": (remote or {}).get("account_role"),
+                "org_id": (remote or {}).get("org_id"),
             }
         raise HTTPException(
             401,
@@ -276,8 +286,15 @@ def resolve_firm_context(auth: dict) -> dict:
     store = get_store()
     email = (auth.get("email") or "").strip().lower()
     provider_user_id = (auth.get("user_id") or "").strip() or None
+    join_owner = (auth.get("org_owner_email") or "").strip().lower() or None
+    account_role = (auth.get("account_role") or "").strip().lower() or None
     if email:
-        return store.ensure_firm_for_email(email, auth_user_id=provider_user_id)
+        return store.ensure_firm_for_email(
+            email,
+            auth_user_id=provider_user_id,
+            join_owner_email=join_owner if join_owner and join_owner != email else None,
+            account_role=account_role,
+        )
     # API-key / local open mode: shared ops firm (still firm-scoped rows).
     return store.ensure_firm_for_email("ops@casesifter.local", name="Ops / API key")
 
@@ -292,12 +309,12 @@ def require_job_owner(job_id: str, auth: dict) -> dict:
     row = get_store().get_analysis_job(job_id)
     if not row:
         raise HTTPException(404, "Unknown or expired job.")
-    if auth.get("auth") == "api_key":
-        logger.info("auth=api_key job=%s", job_id[:8])
-        return {"job": row, "firm_ctx": resolve_firm_context(auth)}
     firm_ctx = resolve_firm_context(auth)
-    if row.get("firm_id") != firm_ctx.get("firm_id"):
+    # Ops API keys map to the shared ops firm — never cross-read another firm's jobs.
+    if row.get("firm_id") and row.get("firm_id") != firm_ctx.get("firm_id"):
         raise HTTPException(404, "Unknown or expired job.")
+    if auth.get("auth") == "api_key":
+        logger.info("auth=api_key job=%s firm=%s", job_id[:8], (firm_ctx.get("firm_id") or "")[:8])
     return {"job": row, "firm_ctx": firm_ctx}
 
 
@@ -320,6 +337,9 @@ def _upsert_durable_job(
     error: str | None = None,
     document_id: str | None = None,
     attempts: int | None = None,
+    original_filename: str | None = None,
+    display_name: str | None = None,
+    doc_kind: str | None = None,
 ) -> None:
     if not firm_ctx or not firm_ctx.get("firm_id"):
         return
@@ -337,6 +357,9 @@ def _upsert_durable_job(
             message=message,
             error=error,
             attempts=attempts,
+            original_filename=original_filename,
+            display_name=display_name,
+            doc_kind=doc_kind,
         )
     except Exception:
         logger.exception("Durable job upsert failed for %s", job_id)
@@ -396,8 +419,64 @@ def _durable_interrupted_payload(row: dict) -> dict:
     }
 
 
+class SessionAcceptBody(BaseModel):
+    code: str = Field(min_length=8, max_length=200)
+
+
+def _exchange_analysis_code(code: str) -> str:
+    """Trade a one-time control-plane code for a session token. Server-side only."""
+    base = (settings.cloud_control_url or "").strip().rstrip("/")
+    if not base:
+        raise HTTPException(503, "Control plane is not configured.")
+    url = f"{base}/v1/session/exchange"
+    payload = json.dumps({"code": code}).encode("utf-8")
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    secret = (os.environ.get("SESSION_SECRET") or "").strip()
+    if secret:
+        headers["X-Internal-Session"] = secret
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raise HTTPException(401, "Invalid or expired exchange code.") from exc
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(503, "Control plane is temporarily unavailable.") from exc
+    token = str((data or {}).get("token") or "").strip()
+    if not token:
+        raise HTTPException(401, "Invalid or expired exchange code.")
+    return token
+
+
+@v1.post("/session/accept")
+def accept_analysis_session(body: SessionAcceptBody):
+    """Set the analysis-host session cookie. The token is not returned to the browser."""
+    from app.session_cookie import set_session_cookie
+
+    token = _exchange_analysis_code(body.code)
+    response = JSONResponse({"ok": True})
+    ttl_days = int(float(os.environ.get("SESSION_TTL_DAYS", "30") or 30))
+    set_session_cookie(response, token, max_age=ttl_days * 86400)
+    return response
+
+
+@v1.post("/session/logout")
+def logout_analysis_session():
+    from app.session_cookie import clear_session_cookie
+
+    response = JSONResponse({"ok": True})
+    clear_session_cookie(response)
+    return response
+
+
 @v1.post("/jobs", response_model=UploadResponse)
 async def create_ephemeral_job(
+    request: Request,
     file: UploadFile = File(...),
     submitted_by: str = Form(default="desktop-client"),
     display_name: str | None = Form(default=None),
@@ -430,6 +509,7 @@ async def create_ephemeral_job(
     resolved_matter = (matter_id or case_id or "").strip() or None
     firm_ctx = resolve_firm_context(_auth)
     persist = False
+    matter: dict | None = None
     if resolved_matter:
         persist = _should_persist(_auth, firm_ctx)
 
@@ -437,14 +517,44 @@ async def create_ephemeral_job(
             from app.fact_memory.store import get_store
 
             store = get_store()
-            matter = store.get_matter(firm_ctx["firm_id"], resolved_matter)
-            if not matter:
-                return None, []
-            if not persist:
-                return matter, []
-            return matter, store.list_prior_snapshots(firm_ctx["firm_id"], resolved_matter)
+            ctx = firm_ctx
+            row = store.get_matter(ctx["firm_id"], resolved_matter)
+            if not row:
+                # Email-first resolve already ran; try reclaim when the SPA still
+                # has a matter id from a firm this account previously owned.
+                email = (ctx.get("email") or _auth.get("email") or "").strip().lower()
+                recovered = None
+                if email:
+                    recovered = store.reclaim_access_to_matter(
+                        resolved_matter,
+                        email=email,
+                        auth_user_id=_auth.get("user_id") or ctx.get("user_id"),
+                    )
+                if recovered:
+                    ctx = recovered
+                    row = store.get_matter(ctx["firm_id"], resolved_matter)
+                    logger.info(
+                        "matter reclaim ok matter=%s firm=%s email=%s",
+                        resolved_matter[:8],
+                        (ctx.get("firm_id") or "")[:8],
+                        email,
+                    )
+                else:
+                    logger.info(
+                        "matter miss firm=%s matter=%s email=%s auth=%s",
+                        (ctx.get("firm_id") or "")[:8],
+                        resolved_matter[:8],
+                        email or "-",
+                        (_auth.get("auth") or "-"),
+                    )
+            if not row:
+                return None, [], ctx
+            if not _should_persist(_auth, ctx):
+                return row, [], ctx
+            return row, store.list_prior_snapshots(ctx["firm_id"], resolved_matter), ctx
 
-        matter, priors = await asyncio.to_thread(_load_matter_priors)
+        matter, priors, firm_ctx = await asyncio.to_thread(_load_matter_priors)
+        persist = _should_persist(_auth, firm_ctx)
         if not matter:
             raise HTTPException(404, "Matter not found for this account.")
         # Prefer matter priors over client peer_snapshots when both present.
@@ -553,9 +663,21 @@ async def create_ephemeral_job(
         except Exception:
             logger.exception("active-job dedupe / attempts check failed")
 
+    index_warn: dict | None = None
+    if matter:
+        try:
+            from app.auto_title import index_mismatch_warning
+
+            index_warn = index_mismatch_warning(safe_name, matter.get("index_number"))
+        except Exception:
+            logger.exception("index hygiene check failed matter=%s", resolved_matter)
+
     queue_msg = "Queued for analysis." + (
         " Matter fact memory enabled." if persist else ""
     )
+    if index_warn and index_warn.get("message"):
+        queue_msg = f"{queue_msg} {index_warn['message']}"
+    label_name, label_kind = _resolve_upload_labels(safe_name, display_name, doc_kind)
     create_job(job_id, safe_name)
     update_job(job_id, message=queue_msg)
     _upsert_durable_job(
@@ -566,6 +688,9 @@ async def create_ephemeral_job(
         status="queued",
         message=queue_msg,
         attempts=next_attempts,
+        original_filename=safe_name,
+        display_name=label_name or safe_name,
+        doc_kind=label_kind,
     )
     if persist:
         # Marker so sweeper retains report (facts live in DB; PDF still deleted).
@@ -597,7 +722,28 @@ async def create_ephemeral_job(
     import threading
 
     threading.Thread(target=_kick, daemon=True, name=f"schedule-{job_id[:8]}").start()
-    return UploadResponse(job_id=job_id, filename=safe_name, status="queued")
+    if firm_ctx and firm_ctx.get("firm_id"):
+        try:
+            from app.fact_memory.store import get_store
+
+            request_id = (request.headers.get("x-request-id") or "").strip()[:64] or uuid.uuid4().hex
+            get_store().audit(
+                firm_ctx.get("firm_id"),
+                firm_ctx.get("user_id"),
+                "scan.start",
+                job_id,
+                request_id=request_id,
+            )
+        except Exception:
+            logger.exception("scan.start audit failed job=%s", job_id[:8])
+    return UploadResponse(
+        job_id=job_id,
+        filename=safe_name,
+        status="queued",
+        index_warning=(index_warn or {}).get("message"),
+        filename_index=(index_warn or {}).get("filename_index"),
+        matter_index=(index_warn or {}).get("matter_index"),
+    )
 
 
 def _persist_pipeline_result(
@@ -639,7 +785,13 @@ def _persist_pipeline_result(
             break
     page_count = len(report.page_dimensions or []) or None
     finding_dicts = [f.model_dump(mode="json") for f in (report.findings or [])]
-    report_dict = report.model_dump(mode="json")
+    # Inline heatmaps before durable encrypt — disk artifacts are deleted after persist.
+    try:
+        from app.report.generator import _embed_heatmaps
+
+        report_dict = _embed_heatmaps(report).model_dump(mode="json")
+    except Exception:
+        report_dict = report.model_dump(mode="json")
     try:
         result = store.persist_scan(
             firm_id=firm_ctx["firm_id"],
@@ -817,28 +969,34 @@ def get_ephemeral_job(
 
 
 
+def _resolve_report_dict(job_id: str, owned: dict) -> dict | None:
+    """Load report JSON from disk or durable fact-memory (post-ephemeral delete)."""
+    report = load_report(job_id)
+    if report is not None:
+        return report.model_dump(mode="json")
+    row = owned.get("job") or {}
+    doc_id = row.get("document_id")
+    firm_id = (owned.get("firm_ctx") or {}).get("firm_id")
+    matter_id = row.get("matter_id")
+    if doc_id and firm_id and matter_id:
+        try:
+            from app.fact_memory.store import get_store
+
+            durable = get_store().get_document_report(firm_id, matter_id, doc_id)
+            if isinstance(durable, dict):
+                return durable
+        except Exception:
+            logger.debug("durable report fallback failed job=%s", job_id[:8], exc_info=True)
+    return None
+
+
 @v1.get("/jobs/{job_id}/report")
 def get_ephemeral_report(job_id: str, _auth: dict = Depends(_require_analysis_auth)):
     owned = require_job_owner(job_id, _auth)
-    report = load_report(job_id)
-    if report is None:
-        # Persisted jobs delete disk reports at terminal; serve from Postgres.
-        row = owned.get("job") or {}
-        doc_id = row.get("document_id")
-        firm_id = (owned.get("firm_ctx") or {}).get("firm_id")
-        matter_id = row.get("matter_id")
-        if doc_id and firm_id and matter_id:
-            try:
-                from app.fact_memory.store import get_store
-
-                durable = get_store().get_document_report(firm_id, matter_id, doc_id)
-                if isinstance(durable, dict):
-                    from app.case_conflict_toggle import strip_report
-
-                    return JSONResponse(strip_report(durable))
-            except Exception:
-                logger.debug("durable report fallback failed job=%s", job_id[:8], exc_info=True)
+    raw = _resolve_report_dict(job_id, owned)
+    if raw is None:
         progress = load_progress(job_id)
+        row = owned.get("job") or {}
         if progress is None and not row:
             raise HTTPException(404, "Unknown or expired job.")
         if progress is None:
@@ -846,7 +1004,53 @@ def get_ephemeral_report(job_id: str, _auth: dict = Depends(_require_analysis_au
         raise HTTPException(409, "Report is not ready yet.")
     from app.case_conflict_toggle import strip_report
 
-    return JSONResponse(strip_report(report.model_dump(mode="json")))
+    return JSONResponse(strip_report(raw))
+
+
+@v1.get("/jobs/{job_id}/export/{kind}")
+def export_ephemeral_report(job_id: str, kind: str, _auth: dict = Depends(_require_analysis_auth)):
+    """Regenerate HTML/PDF/JSON from durable report (disk files are deleted after persist)."""
+    kind = (kind or "").strip().lower()
+    if kind not in {"html", "pdf", "json"}:
+        raise HTTPException(400, "Export kind must be html, pdf, or json.")
+    owned = require_job_owner(job_id, _auth)
+    raw = _resolve_report_dict(job_id, owned)
+    if raw is None:
+        progress = load_progress(job_id)
+        if progress is None:
+            raise HTTPException(404, "Unknown or expired job.")
+        raise HTTPException(409, "Report is not ready yet.")
+    from app.case_conflict_toggle import strip_report
+
+    stripped = strip_report(raw)
+    filename = f"exhibit-report-{job_id}.{kind}"
+    if kind == "json":
+        body = json.dumps(stripped, indent=2, default=str).encode("utf-8")
+        return Response(
+            content=body,
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    try:
+        report = Report.model_validate(stripped)
+    except Exception as exc:
+        logger.warning("export validate failed job=%s: %s", job_id[:8], exc)
+        raise HTTPException(500, "Stored report could not be rendered.") from exc
+    from app.report.generator import render_html, render_pdf_bytes
+
+    if kind == "html":
+        html = render_html(report)
+        return Response(
+            content=html.encode("utf-8"),
+            media_type="text/html; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    pdf_bytes = render_pdf_bytes(report)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @v1.delete("/jobs/{job_id}")

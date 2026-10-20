@@ -152,6 +152,8 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     doc_cols = {row[1] for row in conn.execute("PRAGMA table_info(documents)")}
     if "last_scanned_at" not in doc_cols:
         conn.execute("ALTER TABLE documents ADD COLUMN last_scanned_at TEXT")
+    if "filed_date" not in doc_cols:
+        conn.execute("ALTER TABLE documents ADD COLUMN filed_date TEXT")
     snap_cols = {row[1] for row in conn.execute("PRAGMA table_info(scan_snapshots)")}
     if "text_excerpt" not in snap_cols:
         conn.execute("ALTER TABLE scan_snapshots ADD COLUMN text_excerpt TEXT")
@@ -412,6 +414,7 @@ def update_document(document_id: str, **fields: Any) -> dict[str, Any] | None:
         "risk_level",
         "risk_score",
         "last_scanned_at",
+        "filed_date",
     }
     updates = {k: v for k, v in fields.items() if k in allowed}
     current = get_document(document_id)
@@ -622,8 +625,12 @@ def elevate_documents_for_fact_conflicts(case_id: str) -> int:
         document_id = str(row.get("id") or "")
         if not document_id:
             continue
-        target = risk_level_from_score(row.get("risk_score"))
         cur = str(row.get("risk_level") or "")
+        # Incomplete visual review is not a score band. Score 0 must not
+        # rewrite it back to low risk.
+        if cur == "incomplete":
+            continue
+        target = risk_level_from_score(row.get("risk_score"))
         if cur == target:
             continue
         update_document(document_id, risk_level=target)

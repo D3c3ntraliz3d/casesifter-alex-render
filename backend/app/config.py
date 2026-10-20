@@ -79,6 +79,11 @@ class Settings(BaseSettings):
     # opt-in because it uploads the original file and extracted text to Google.
     # Leave false for sealed, privileged, or otherwise restricted evidence.
     contextual_multimodal: bool = False
+    # Explicit opt-in for a scan that was never supposed to call Gemini.
+    # The report is labeled local-only and can show local findings.
+    # Leaving the API key unset, or leaving CONTEXTUAL_MULTIMODAL false, does
+    # not turn this on. Those forensic scans stay uncleared.
+    local_only_review: bool = False
     # Inline base64 path for small exhibits. Larger PDFs use the Gemini Files API
     # (and chunking above 50 MB / 1000 pages) — see contextual_logic / pdf_chunks.
     contextual_max_upload_mb: int = 15

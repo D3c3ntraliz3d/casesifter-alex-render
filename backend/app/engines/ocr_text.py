@@ -131,6 +131,11 @@ def _text_looks_untrustworthy(text: str) -> bool:
     return False
 
 
+def text_is_ocr_starved(text: str) -> bool:
+    """True when the text layer is still too thin for deterministic statement checks alone."""
+    return _text_looks_untrustworthy(text or "")
+
+
 def _prefer_ocr_for_scans(
     path: Path,
     pdf_pages: list[dict[str, Any]],

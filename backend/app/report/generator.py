@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import io
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -68,8 +69,20 @@ def _embed_heatmaps(report: Report) -> Report:
     return clone
 
 
+def render_pdf_bytes(report: Report) -> bytes:
+    """Render PDF into memory (hosted durable export; no disk report required)."""
+    buf = io.BytesIO()
+    _build_pdf(report, buf)
+    return buf.getvalue()
+
+
 def render_pdf(report: Report) -> Path:
     out = job_dir(report.job_id) / "report.pdf"
+    _build_pdf(report, str(out))
+    return out
+
+
+def _build_pdf(report: Report, destination: str | io.BytesIO) -> None:
     styles = getSampleStyleSheet()
     styles.add(
         ParagraphStyle(
@@ -125,7 +138,8 @@ def render_pdf(report: Report) -> Path:
         "green": colors.HexColor("#276749"),
         "yellow": colors.HexColor("#b7791f"),
         "red": colors.HexColor("#c53030"),
-    }[report.risk_level]
+        "incomplete": colors.HexColor("#14324a"),
+    }.get(report.risk_level, colors.HexColor("#14324a"))
 
     story = []
     story.append(Paragraph("CaseSifter — Authenticity Report", styles["CoverTitle"]))
@@ -164,7 +178,15 @@ def render_pdf(report: Report) -> Path:
 
     story.append(Paragraph("Detailed findings", styles["Section"]))
     if not report.findings:
-        story.append(Paragraph("No automated findings were recorded.", styles["Body"]))
+        if report.ai_review == "incomplete":
+            story.append(
+                Paragraph(
+                    "Visual review did not complete. This file was not cleared.",
+                    styles["Body"],
+                )
+            )
+        else:
+            story.append(Paragraph("No automated findings were recorded.", styles["Body"]))
     for item in report.findings:
         if item.severity == "info":
             continue
@@ -254,7 +276,7 @@ def render_pdf(report: Report) -> Path:
     story.append(Paragraph(report.disclaimer, styles["Small"]))
 
     doc = SimpleDocTemplate(
-        str(out),
+        destination,
         pagesize=letter,
         title=f"Exhibit scan — {report.audit.filename}",
         leftMargin=0.75 * inch,
@@ -263,7 +285,6 @@ def render_pdf(report: Report) -> Path:
         bottomMargin=0.7 * inch,
     )
     doc.build(story)
-    return out
 
 
 def _fmt(value) -> str:
