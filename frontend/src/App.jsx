@@ -3601,22 +3601,16 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
         <div className="toolbar tight">
           <button className="text-link" type="button" onClick={() => { setBusy(false); onBack(); }}>← All cases</button>
           <div className="row-actions">
-            {!caseData.archived_at && docs.length > 0 && (
+            {!caseData.archived_at && selectedDocs.size > 0 && (
               <button
                 className="btn secondary"
                 type="button"
-                disabled={busy || selectedDocs.size === 0}
-                title={
-                  selectedDocs.size === 0
-                    ? "Select files on this page to rescan"
-                    : `Rescan ${selectedDocs.size} selected file${selectedDocs.size === 1 ? "" : "s"}`
-                }
+                disabled={busy}
+                title={`Rescan ${selectedDocs.size} selected file${selectedDocs.size === 1 ? "" : "s"}`}
                 onClick={rescanSelected}
               >
                 <RefreshCw size={14} />{" "}
-                {selectedDocs.size === 0
-                  ? "Rescan selected"
-                  : `Rescan selected (${selectedDocs.size})`}
+                {`Rescan selected (${selectedDocs.size})`}
               </button>
             )}
             {!caseData.archived_at &&
