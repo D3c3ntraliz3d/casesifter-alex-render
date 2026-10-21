@@ -740,6 +740,8 @@ _CORS_ORIGINS = [
     "https://casesifter.com",
     "https://casesifter-app.onrender.com",
     "https://casesifter-marketing.onrender.com",
+    "https://casesifter-alex-app.onrender.com",
+    "https://casesifter-alex-marketing.onrender.com",
     "http://127.0.0.1:5173",
     "http://localhost:5173",
 ]
@@ -757,17 +759,41 @@ install_api_headers(app)
 _ORIGIN_ALLOW = {origin.rstrip("/") for origin in _CORS_ORIGINS}
 
 
+def _control_origin_blocked(origin: str, *, referer: str = "", sec_fetch_site: str = "") -> bool:
+    """Mirror analysis cookie CSRF: allow empty Origin only with same-origin hints."""
+    cleaned = (origin or "").rstrip("/")
+    if cleaned in _ORIGIN_ALLOW:
+        return False
+    if cleaned:
+        return True
+    if not _is_production():
+        return False
+    if (sec_fetch_site or "").strip().lower() == "same-origin":
+        return False
+    ref = (referer or "").strip()
+    if ref:
+        try:
+            from urllib.parse import urlparse
+
+            parsed = urlparse(ref)
+            ref_origin = f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+            if ref_origin in _ORIGIN_ALLOW:
+                return False
+        except Exception:
+            pass
+    return True
+
+
 @app.middleware("http")
 async def _cookie_csrf(request: Request, call_next):
     if request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.cookies.get(COOKIE_NAME):
         authorization = request.headers.get("authorization") or ""
         if not authorization.lower().startswith("bearer "):
-            origin = (request.headers.get("origin") or "").rstrip("/")
-            if _is_production():
-                allowed = origin in _ORIGIN_ALLOW
-            else:
-                allowed = not origin or origin in _ORIGIN_ALLOW
-            if not allowed:
+            if _control_origin_blocked(
+                request.headers.get("origin") or "",
+                referer=request.headers.get("referer") or "",
+                sec_fetch_site=request.headers.get("sec-fetch-site") or "",
+            ):
                 return JSONResponse({"detail": "Cross-site request blocked."}, status_code=403)
     return await call_next(request)
 
