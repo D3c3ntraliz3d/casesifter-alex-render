@@ -2101,12 +2101,21 @@ class FactMemoryStore:
         return None
 
     def flag_missing_sources(self) -> int:
-        """Mark reports whose original bytes were never stored."""
+        """Align source_missing with whether bytes exist (DB ciphertext or S3 key).
+
+        Older builds flagged every row without ``source_enc``, which wrongly marked
+        SOURCE_FILE_RETENTION=s3 documents missing whenever the store booted.
+        """
         with self.session() as s:
-            rows = s.execute(select(Document).where(Document.source_enc.is_(None))).scalars().all()
+            rows = s.execute(select(Document)).scalars().all()
             changed = 0
             for doc in rows:
-                if not doc.source_missing:
+                has_bytes = bool(doc.source_enc) or bool((doc.source_blob_key or "").strip())
+                if has_bytes:
+                    if doc.source_missing:
+                        doc.source_missing = False
+                        changed += 1
+                elif not doc.source_missing:
                     doc.source_missing = True
                     changed += 1
             if changed:
@@ -2120,7 +2129,11 @@ class FactMemoryStore:
             ).scalar_one_or_none()
             if doc is None:
                 return {"job_id": job_id, "status": "unknown"}
-            if doc.source_enc and not doc.source_missing:
+            has_bytes = bool(doc.source_enc) or bool((doc.source_blob_key or "").strip())
+            if has_bytes:
+                if doc.source_missing:
+                    doc.source_missing = False
+                    s.commit()
                 return {
                     "job_id": job_id,
                     "document_id": doc.id,

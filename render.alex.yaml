@@ -9,6 +9,60 @@ envVarGroups:
     envVars:
       - key: SESSION_SECRET
         generateValue: true
+  # Durable secrets for analysis + scan-worker. Linked via fromGroup so a
+  # service-level env PUT / partial sync cannot drop GEMINI/FACT/S3 keys.
+  # Values are Dashboard/API-only (sync: false) — never commit secret values.
+  - name: casesifter-alex-secrets
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: FACT_MEMORY_MASTER_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: CLAUDE_MODEL
+        sync: false
+      - key: GEMINI_MODEL
+        sync: false
+      - key: GEMINI_MAX_CONCURRENT
+        sync: false
+      - key: GEMINI_MAX_INFLIGHT_MB
+        sync: false
+      - key: SENTRY_DSN
+        sync: false
+      # Do not declare SENTRY_BACKEND_DSN here until the group has a real
+      # value — empty sync:false on a new group key can blank linked services.
+      - key: S3_BUCKET
+        sync: false
+      - key: S3_ENDPOINT_URL
+        sync: false
+      - key: S3_ACCESS_KEY_ID
+        sync: false
+      - key: S3_SECRET_ACCESS_KEY
+        sync: false
+      - key: S3_REGION
+        sync: false
+      - key: WORKER_SERVICE_TOKEN
+        sync: false
+      # Backup copies of linked resources — primary still fromDatabase/fromService.
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: SOURCE_FILE_RETENTION
+        value: s3
+  - name: casesifter-alex-r2
+    envVars:
+      - key: S3_ACCESS_KEY_ID
+        sync: false
+      - key: S3_SECRET_ACCESS_KEY
+        sync: false
+      - key: S3_BUCKET
+        sync: false
+      - key: S3_ENDPOINT_URL
+        sync: false
+      - key: WORKER_SERVICE_TOKEN
+        sync: false
 
 databases:
   # Private network only (empty IP allow list). Control + analysis use this.
@@ -32,6 +86,8 @@ services:
         - render.alex.yaml
     envVars:
       - fromGroup: casesifter-alex-auth
+      - fromGroup: casesifter-alex-secrets
+      - fromGroup: casesifter-alex-r2
       - key: APP_MODE
         value: analysis
       - key: APP_ENV
@@ -43,6 +99,8 @@ services:
         value: "true"
       - key: EPHEMERAL_TTL_HOURS
         value: "6"
+      # SOURCE_FILE_RETENTION also in casesifter-alex-secrets (=s3). Keep here so
+      # blueprint service config cannot drift if the group link is missing.
       - key: SOURCE_FILE_RETENTION
         value: s3
       - key: PERSIST_FACTS
@@ -51,8 +109,6 @@ services:
         fromDatabase:
           name: casesifter-alex-fact-memory
           property: connectionString
-      - key: FACT_MEMORY_MASTER_KEY
-        sync: false
       - key: ENTITLEMENT_MODE
         value: cloud
       - key: CLOUD_CONTROL_URL
@@ -60,8 +116,6 @@ services:
       - key: SESSION_TTL_DAYS
         value: "30"
       - key: ANALYSIS_API_KEYS
-        sync: false
-      - key: GEMINI_API_KEY
         sync: false
       - key: CONTEXTUAL_MULTIMODAL
         value: "true"
@@ -95,10 +149,6 @@ services:
         value: "standard"
       - key: SCAN_MAX_CONCURRENT
         sync: false
-      - key: GEMINI_MAX_CONCURRENT
-        sync: false
-      - key: GEMINI_MAX_INFLIGHT_MB
-        sync: false
       - key: SCAN_MEMORY_GUARD_MB
         sync: false
       - key: SCAN_JOB_TIMEOUT_S
@@ -113,32 +163,18 @@ services:
         value: "60"
       - key: GOTCHA_VERIFY_PROVIDER
         value: auto
-      - key: ANTHROPIC_API_KEY
-        sync: false
-      - key: CLAUDE_MODEL
-        sync: false
-      - key: SENTRY_BACKEND_DSN
-        sync: false
-      - key: SENTRY_DSN
-        sync: false
       - key: SENTRY_ENVIRONMENT
         value: production
       # Scans run on casesifter-alex-scan-worker (R2 + Redis).
-      # Link a Dashboard env group (e.g. casesifter-alex-r2) by hand for
-      # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / WORKER_SERVICE_TOKEN —
-      # not declared here so a sync can never blank them.
+      # Secrets (GEMINI/FACT/S3/WORKER_TOKEN) live in casesifter-alex-secrets +
+      # casesifter-alex-r2 — do not redeclare as service sync:false or a wipe
+      # can leave empty service-level keys that override the groups.
       - key: SCAN_BACKEND
         value: worker
       - key: BLOB_BACKEND
         value: s3
       - key: QUEUE_BACKEND
         value: redis
-      - key: S3_BUCKET
-        sync: false
-      - key: S3_ENDPOINT_URL
-        sync: false
-      - key: S3_REGION
-        value: auto
       - key: REDIS_URL
         fromService:
           type: keyvalue
@@ -165,22 +201,20 @@ services:
         - backend/**
         - render.alex.yaml
     envVars:
+      - fromGroup: casesifter-alex-secrets
+      - fromGroup: casesifter-alex-r2
       - key: APP_MODE
         value: analysis
       - key: APP_ENV
         value: production
+      - key: SOURCE_FILE_RETENTION
+        value: s3
       - key: SCAN_BACKEND
         value: worker
       - key: BLOB_BACKEND
         value: s3
       - key: QUEUE_BACKEND
         value: redis
-      - key: S3_BUCKET
-        sync: false
-      - key: S3_ENDPOINT_URL
-        sync: false
-      - key: S3_REGION
-        value: auto
       - key: REDIS_URL
         fromService:
           type: keyvalue
@@ -197,8 +231,6 @@ services:
         value: "3"
       - key: WORKER_JOB_TIMEOUT_S
         value: "1800"
-      - key: GEMINI_API_KEY
-        sync: false
       - key: TASK_A_EXTRACT_PRIMARY
         value: "gemini-3.6-flash"
       - key: TASK_A_EXTRACT_BACKUP
@@ -225,14 +257,6 @@ services:
         value: "minimal"
       - key: GEMINI_SERVICE_TIER
         value: "standard"
-      - key: GEMINI_MAX_CONCURRENT
-        sync: false
-      - key: GEMINI_MAX_INFLIGHT_MB
-        sync: false
-      - key: ANTHROPIC_API_KEY
-        sync: false
-      - key: CLAUDE_MODEL
-        sync: false
       - key: GOTCHA_VERIFY_PROVIDER
         value: auto
       - key: CONTEXTUAL_MULTIMODAL
@@ -247,12 +271,10 @@ services:
         value: "10"
       - key: GEMINI_STAGE_TIMEOUT_S
         value: "900"
-      - key: SENTRY_DSN
-        sync: false
-      - key: SENTRY_BACKEND_DSN
-        sync: false
       - key: SENTRY_ENVIRONMENT
         value: production
+      - key: PERSIST_FACTS
+        value: "true"
 
   - type: web
     name: casesifter-alex-control

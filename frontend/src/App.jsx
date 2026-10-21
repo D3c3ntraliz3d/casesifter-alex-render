@@ -18,7 +18,6 @@ import {
   getJob,
   isAnalysisUnreachableError,
   isHostedAnalysis,
-  isInterruptedOrExpiredJob,
   listCaseChat,
   listCaseGotchas,
   listCases,
@@ -2143,15 +2142,52 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
     );
     // Empty refresh must not wipe placeholders for in-flight uploads.
     if (!serverShas.size && !serverJobIds.size) return;
-    setPendingDocs((prev) => {
-      const next = prev.filter((p) => {
-        const sha = String(p.sha256 || "").toLowerCase();
-        if (sha && serverShas.has(sha)) return false;
-        if (p.scan_job_id && serverJobIds.has(p.scan_job_id)) return false;
-        return true;
-      });
-      return next.length === prev.length ? prev : next;
+    const pendingToServer = new Map();
+    const kept = [];
+    for (const p of pendingDocs) {
+      const sha = String(p.sha256 || "").toLowerCase();
+      const match =
+        (sha && server.find((d) => String(d.sha256 || "").toLowerCase() === sha)) ||
+        (p.scan_job_id && server.find((d) => d.scan_job_id === p.scan_job_id)) ||
+        null;
+      if (match) {
+        pendingToServer.set(p.id, match.id);
+        continue;
+      }
+      kept.push(p);
+    }
+    if (kept.length !== pendingDocs.length) {
+      setPendingDocs(kept);
+    }
+    if (!pendingToServer.size) return;
+    // Keep checkboxes / Cancel when pending:* rows become durable ids.
+    setSelectedDocs((prev) => {
+      let changed = false;
+      const next = new Set();
+      for (const id of prev) {
+        const mapped = pendingToServer.get(id);
+        if (mapped) {
+          next.add(mapped);
+          changed = true;
+        } else {
+          next.add(id);
+        }
+      }
+      return changed ? next : prev;
     });
+    setLiveScan((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const [pendingId, serverId] of pendingToServer) {
+        if (!next[pendingId]) continue;
+        if (!next[serverId]) next[serverId] = { ...next[pendingId] };
+        delete next[pendingId];
+        changed = true;
+      }
+      return changed ? next : prev;
+    });
+    // pendingDocs intentionally omitted from deps — only reconcile when server list changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [caseData.documents]);
 
   function armRescan(doc) {
@@ -2380,7 +2416,9 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
     return () => {
       cancelled = true;
     };
-  }, [docs, caseData.id, uploadNote]);
+  // Do not depend on uploadNote — progress text must not re-run cache coverage
+  // (that flickered the Locate banner and felt like a page reset mid-upload).
+  }, [docs, caseData.id]);
 
   // Hosted: auto-resubmit stall/timeout/interrupted jobs from IndexedDB once per matter session.
   // Server enforces attempts per matter+sha; sessionStorage prevents reload loops.
@@ -2892,12 +2930,8 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
           disarmRescan(source.id);
           scanFailed.push(`${doc.display_name || doc.original_filename}: ${err.message || "scan failed"}`);
         }
-        try {
-          await onRefresh();
-        } catch {
-          /* keep going */
-        }
-        // Yield so the UI can paint between heavy desktop analyzes.
+        // Soft poll via liveScan — avoid a full matter refresh after every file
+        // (that jerked scroll/selection and felt like leaving the page).
         await new Promise((r) => setTimeout(r, 50));
       }
     }
@@ -3123,187 +3157,51 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
         if (indexWarnings.length) {
           setIndexMismatchNote(indexWarnings.slice(0, 3).join(" · "));
         }
+        // Soft attach only — do NOT await each scan here. Waiting per file blocked
+        // the page, stacked full matter refreshes, and felt like a reload/reset.
+        // liveScan + hosted matter poll patch rows in place while the user stays put.
+        setLiveScan((prev) => {
+          const next = { ...prev };
+          for (const item of pending) {
+            if (!item.jobId) continue;
+            const id = `pending:${item.jobId}`;
+            next[id] = {
+              armed: true,
+              jobId: item.jobId,
+              previousJobId: null,
+            };
+          }
+          return next;
+        });
         try {
           await retitleCaseDocuments(matterId);
-          await onRefresh();
         } catch {
           /* names/kinds still apply on scan */
         }
-        // Release global busy after queue so Re-scan / Re-run AI stay clickable
-        // while polling (source PDFs are already in the local cache).
-        setBusy(false);
-        let done = 0;
-        let ok = 0;
-        const analysisFailed = [];
-        const resubmittedSha = new Set();
-        const patchPending = (item, patch) => {
-          const shaKey = String(item.sha256 || "").toLowerCase();
-          setPendingDocs((prev) =>
-            prev.map((p) => {
-              const match =
-                (item.jobId && p.scan_job_id === item.jobId) ||
-                (shaKey && String(p.sha256 || "").toLowerCase() === shaKey);
-              return match ? { ...p, ...patch } : p;
-            })
-          );
-        };
-        for (const item of pending) {
-          setUploadNote(
-            `${ok} complete · ${pending.length - done} remaining · Analyzing ${done + 1} of ${pending.length}: ${item.name}`
-          );
-          let progress = null;
-          let blips = 0;
-          try {
-            for (let i = 0; i < 240; i += 1) {
-              try {
-                progress = await getJob(item.jobId, { includeReport: false });
-                blips = 0;
-              } catch (err) {
-                if (isInterruptedOrExpiredJob(err)) {
-                  const sha = String(item.sha256 || "").toLowerCase();
-                  if (sha && resubmittedSha.has(sha)) {
-                    throw err;
-                  }
-                  if (sha) resubmittedSha.add(sha);
-                  const again = await createAnalysisJob(item.file, {
-                    matterId,
-                    submittedBy: "web-app",
-                  });
-                  item.jobId = again.job_id;
-                  patchPending(item, {
-                    scan_job_id: again.job_id,
-                    status: "queued",
-                    scan_in_progress: true,
-                    id: `pending:${again.job_id}`,
-                  });
-                  blips = 0;
-                  continue;
-                }
-                // A scan can stall the status call. One dropped poll is not an outage.
-                if (!isAnalysisUnreachableError(err) || blips >= 5) throw err;
-                blips += 1;
-                await new Promise((r) => setTimeout(r, 2000));
-                continue;
-              }
-              if (progress.status === "interrupted" || progress.interrupted) {
-                const sha = String(item.sha256 || "").toLowerCase();
-                if (sha && resubmittedSha.has(sha)) {
-                  break;
-                }
-                if (sha) resubmittedSha.add(sha);
-                const again = await createAnalysisJob(item.file, {
-                  matterId,
-                  submittedBy: "web-app",
-                });
-                item.jobId = again.job_id;
-                patchPending(item, {
-                  scan_job_id: again.job_id,
-                  status: "queued",
-                  scan_in_progress: true,
-                  id: `pending:${again.job_id}`,
-                });
-                continue;
-              }
-              if (
-                progress.status === "complete" ||
-                progress.status === "failed" ||
-                progress.status === "cancelled" ||
-                progress.status === "canceled"
-              ) {
-                break;
-              }
-              const pos = progress.queue_position;
-              const eta = progress.eta_seconds;
-              const etaLabel =
-                typeof eta === "number" && eta > 0
-                  ? eta >= 60
-                    ? ` · ~${Math.round(eta / 60)} min`
-                    : ` · ~${eta}s`
-                  : "";
-              const queueLabel =
-                typeof pos === "number" && pos > 0 ? ` · queue #${pos}` : "";
-              const stage = /gemini busy/i.test(String(progress.message || ""))
-                ? "Gemini busy, retrying"
-                : progress.status === "local_done"
-                  ? "waiting for Gemini"
-                  : progress.message || progress.stage || "analyzing";
-              patchPending(item, {
-                status: progress.status === "queued" ? "queued" : "scanning",
-                stage: progress.stage || stage,
-                scan_in_progress: true,
-                scan_job_id: item.jobId,
-              });
-              setUploadNote(
-                `${ok} complete · ${done} done · ${pending.length - done} left · ` +
-                  `${item.name}${queueLabel}${etaLabel} — ${stage}`
-              );
-              await new Promise((r) => setTimeout(r, 1000));
-            }
-            if (progress?.status === "complete") {
-              ok += 1;
-              patchPending(item, {
-                status: "scanning",
-                scan_in_progress: true,
-                stage: "persisting",
-              });
-            } else if (
-              progress?.status === "cancelled" ||
-              progress?.status === "canceled"
-            ) {
-              patchPending(item, {
-                status: "cancelled",
-                scan_in_progress: false,
-                scan_failed_open: true,
-                last_error: "cancelled_by_user",
-              });
-            } else {
-              analysisFailed.push({
-                file: item.file,
-                error: progress?.error || progress?.message || "analysis failed",
-              });
-              patchPending(item, {
-                status: progress?.status === "interrupted" ? "interrupted" : "failed",
-                scan_in_progress: false,
-                scan_failed_open: true,
-                last_error: progress?.error || progress?.message || "analysis failed",
-              });
-            }
-          } catch (err) {
-            analysisFailed.push({ file: item.file, error: err.message || "analysis failed" });
-            patchPending(item, {
-              status: "failed",
-              scan_in_progress: false,
-              scan_failed_open: true,
-              last_error: err.message || "analysis failed",
-            });
-          }
-          done += 1;
-        }
-        const allFailed = [
-          ...queueFailed.map((f) => ({ file: f.file, error: f.error })),
-          ...analysisFailed,
-        ];
-        setFailedBatch(allFailed.map((f) => f.file));
         try {
           await onRefresh();
         } catch {
-          /* ignore */
+          /* placeholders already show queued rows */
         }
+        setBusy(false);
+        setFailedBatch(queueFailed.map((f) => f.file));
         const dupeNote = skippedDupes
           ? ` Skipped ${skippedDupes} duplicate file${skippedDupes === 1 ? "" : "s"} (already on this matter — use Re-scan).`
           : "";
-        if (allFailed.length) {
+        if (queueFailed.length) {
           onError(
-            ok
-              ? `Queued ${pending.length}; ${ok} finished. Failed: ${allFailed
+            pending.length
+              ? `Queued ${pending.length}. Upload failed: ${queueFailed
                   .map((f) => `${f.file.name}: ${f.error}`)
                   .join(" · ")}`
-              : `None of ${valid.length} files finished. ${allFailed
+              : `None of ${valid.length} files uploaded. ${queueFailed
                   .map((f) => `${f.file.name}: ${f.error}`)
                   .join(" · ")}`
           );
           setUploadNote(
-            `${ok} of ${valid.length} complete. Use Retry failed for the rest.${dupeNote}`
+            pending.length
+              ? `Queued ${pending.length} — scanning in the background. ${queueFailed.length} need Retry failed.${dupeNote}`
+              : `Upload failed.${dupeNote}`
           );
         } else if (!pending.length && skippedDupes) {
           onError("");
@@ -3313,7 +3211,7 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
         } else {
           onError("");
           setUploadNote(
-            `Added and analyzed ${ok} file${ok === 1 ? "" : "s"}.${dupeNote}`
+            `Queued ${pending.length} file${pending.length === 1 ? "" : "s"} — scanning in the background. Stay on this matter.${dupeNote}`
           );
         }
       } finally {
