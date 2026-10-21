@@ -5,6 +5,21 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+# Client auto-retry used to upload as retry-<sha12>.pdf; auto_title then showed
+# "retry <sha…>". Match only that placeholder — not titles that contain "retry".
+_SYNTHETIC_AUTO_RETRY_NAME = re.compile(
+    r"(?i)^retry[-_\s]+([0-9a-f]{8,16})(?:\.pdf)?$"
+)
+
+
+def is_synthetic_auto_retry_name(name: str | None) -> bool:
+    """True for auto-retry placeholders like ``retry-a1b2c3d4e5f6.pdf`` / ``retry a1b2…``."""
+    raw = (name or "").strip()
+    if not raw:
+        return False
+    return bool(_SYNTHETIC_AUTO_RETRY_NAME.match(Path(raw).name.strip()))
+
+
 # Filename / NYSCEF type first. Caption body almost always contains "complaint"
 # or "answer" and must not override AFFIDAVIT OF SERVICE, NOTICE OF MOTION, etc.
 FILENAME_KIND_PATTERNS: list[tuple[str, re.Pattern[str]]] = [

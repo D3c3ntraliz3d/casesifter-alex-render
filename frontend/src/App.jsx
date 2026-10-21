@@ -86,6 +86,19 @@ import {
   writeAppHref,
 } from "./appRoute.js";
 
+/** Client auto-retry used to name uploads ``retry-<sha12>.pdf`` (titles became "retry …"). */
+function isSyntheticAutoRetryName(name) {
+  return /^retry[-_\s]+[0-9a-f]{8,16}(?:\.pdf)?$/i.test(String(name || "").trim());
+}
+
+function pickNonSyntheticLabel(candidates, fallback) {
+  for (const c of candidates) {
+    const s = String(c || "").trim();
+    if (s && !isSyntheticAutoRetryName(s)) return s;
+  }
+  return fallback;
+}
+
 const STAGES = [
   ["queued", "Queued"],
   ["local_done", "Local done"],
@@ -2317,12 +2330,38 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
             misses.push(sha.slice(0, 12));
             continue;
           }
-          const name = `retry-${sha.slice(0, 12)}.pdf`;
-          const file = new File([blob], name, { type: blob.type || "application/pdf" });
+          const fromDoc = docs.find(
+            (d) => String(d.sha256 || "").toLowerCase() === sha
+          );
+          const displayName = pickNonSyntheticLabel(
+            [
+              fromDoc?.display_name,
+              row.display_name,
+              fromDoc?.original_filename,
+              row.original_filename,
+            ],
+            `document-${sha.slice(0, 12)}.pdf`
+          );
+          const fileName = pickNonSyntheticLabel(
+            [
+              fromDoc?.original_filename,
+              row.original_filename,
+              fromDoc?.display_name,
+              row.display_name,
+            ],
+            displayName
+          );
+          const safeFileName = /\.[a-z0-9]{2,5}$/i.test(fileName)
+            ? fileName
+            : `${fileName}.pdf`;
+          const file = new File([blob], safeFileName, {
+            type: blob.type || "application/pdf",
+          });
           try {
             const result = await createAnalysisJob(file, {
               matterId: caseData.id,
               submittedBy: "web-app-auto-retry",
+              displayName,
             });
             if (result?.job_id) pendingJobIds.push(result.job_id);
             if (result?.skipped === "already_active") skippedActive += 1;

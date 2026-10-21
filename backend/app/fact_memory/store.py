@@ -787,6 +787,98 @@ class FactMemoryStore:
             ).scalars().all()
             return [self._document_dict(d, fernet) for d in rows]
 
+    def _best_job_labels_for_sha(
+        self, s: Session, *, firm_id: str, matter_id: str, sha256: str
+    ) -> tuple[str | None, str | None]:
+        """Oldest non-synthetic original_filename / display_name from analysis_jobs."""
+        from app.auto_title import is_synthetic_auto_retry_name
+
+        sha = (sha256 or "").lower()
+        if not sha:
+            return None, None
+        rows = (
+            s.execute(
+                select(AnalysisJob)
+                .where(AnalysisJob.firm_id == firm_id)
+                .where(AnalysisJob.matter_id == matter_id)
+                .where(AnalysisJob.sha256 == sha)
+                .order_by(AnalysisJob.created_at.asc())
+            )
+            .scalars()
+            .all()
+        )
+        best_original: str | None = None
+        best_display: str | None = None
+        for row in rows:
+            orig = (getattr(row, "original_filename", None) or "").strip()
+            disp = (getattr(row, "display_name", None) or "").strip()
+            if not best_original and orig and not is_synthetic_auto_retry_name(orig):
+                best_original = orig
+            if not best_display and disp and not is_synthetic_auto_retry_name(disp):
+                best_display = disp
+            if best_original and best_display:
+                break
+        return best_original, best_display
+
+    def heal_synthetic_auto_retry_names(
+        self, firm_id: str, matter_id: str, *, user_id: str | None = None
+    ) -> int:
+        """Rewrite titles poisoned by client auto-retry placeholders (retry-<sha>.pdf).
+
+        Recovers labels from older analysis_jobs for the same sha. Returns update count.
+        """
+        from app.auto_title import is_synthetic_auto_retry_name
+
+        with self.session() as s:
+            if not s.execute(
+                select(Matter).where(Matter.id == matter_id, Matter.firm_id == firm_id)
+            ).scalar_one_or_none():
+                return 0
+            fernet = self._fernet(s, firm_id)
+            docs = (
+                s.execute(
+                    select(Document).where(
+                        Document.firm_id == firm_id, Document.matter_id == matter_id
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            updated = 0
+            for doc in docs:
+                cur_original = enc.decrypt_text(fernet, doc.original_filename_enc) or ""
+                cur_display = enc.decrypt_text(fernet, doc.display_name_enc) or ""
+                if not (
+                    is_synthetic_auto_retry_name(cur_original)
+                    or is_synthetic_auto_retry_name(cur_display)
+                ):
+                    continue
+                best_original, best_display = self._best_job_labels_for_sha(
+                    s, firm_id=firm_id, matter_id=matter_id, sha256=doc.sha256 or ""
+                )
+                new_original = (
+                    best_original
+                    if is_synthetic_auto_retry_name(cur_original) and best_original
+                    else cur_original
+                )
+                new_display = (
+                    best_display or best_original
+                    if is_synthetic_auto_retry_name(cur_display)
+                    and (best_display or best_original)
+                    else cur_display
+                )
+                if new_original == cur_original and new_display == cur_display:
+                    continue
+                doc.original_filename_enc = enc.encrypt_text(fernet, new_original)
+                doc.display_name_enc = enc.encrypt_text(fernet, new_display)
+                updated += 1
+            if updated:
+                self._audit(
+                    s, firm_id, user_id, "document.heal_auto_retry_names", matter_id
+                )
+                s.commit()
+            return updated
+
     def update_document_filed_date(
         self,
         firm_id: str,
@@ -1428,16 +1520,35 @@ class FactMemoryStore:
             if filed_date is None and existing is not None and existing.filed_date is not None:
                 filed_date = existing.filed_date
 
+            from app.auto_title import is_synthetic_auto_retry_name
+
+            keep_original = original_filename
+            keep_display = display_name or original_filename
+            if existing is not None:
+                prev_original = enc.decrypt_text(fernet, existing.original_filename_enc) or ""
+                prev_display = enc.decrypt_text(fernet, existing.display_name_enc) or ""
+                # Auto-retry used to resubmit as retry-<sha>.pdf and overwrite real titles.
+                if (
+                    is_synthetic_auto_retry_name(keep_original)
+                    and prev_original
+                    and not is_synthetic_auto_retry_name(prev_original)
+                ):
+                    keep_original = prev_original
+                if (
+                    is_synthetic_auto_retry_name(keep_display)
+                    and prev_display
+                    and not is_synthetic_auto_retry_name(prev_display)
+                ):
+                    keep_display = prev_display
+
             doc = existing or Document(
                 id=_new_id(),
                 matter_id=matter_id,
                 firm_id=firm_id,
                 sha256=sha256,
             )
-            doc.original_filename_enc = enc.encrypt_text(fernet, original_filename)
-            doc.display_name_enc = enc.encrypt_text(
-                fernet, display_name or original_filename
-            )
+            doc.original_filename_enc = enc.encrypt_text(fernet, keep_original)
+            doc.display_name_enc = enc.encrypt_text(fernet, keep_display)
             doc.doc_type = doc_type
             doc.filed_date = filed_date
             doc.page_count = page_count
@@ -1468,8 +1579,8 @@ class FactMemoryStore:
                     )
             snapshot = {
                 "document_id": doc.id,
-                "display_name": display_name or original_filename,
-                "original_filename": original_filename,
+                "display_name": keep_display,
+                "original_filename": keep_original,
                 "doc_kind": doc_type,
                 "sha256": sha256,
                 "entities": entities or {},
@@ -2114,7 +2225,7 @@ class FactMemoryStore:
         ai_review_reason: str | None = None,
         allow_rerun: bool = False,
     ) -> dict[str, Any] | None:
-        terminal = frozenset({"complete", "failed", "interrupted"})
+        terminal = frozenset({"complete", "failed", "interrupted", "cancelled"})
         with self.session() as s:
             row = s.get(AnalysisJob, job_id)
             if row is None:
@@ -2383,6 +2494,13 @@ class FactMemoryStore:
                 seen_sha.add(sha)
                 payload = self._analysis_job_dict(row)
                 payload["attempts"] = attempts
+                best_original, best_display = self._best_job_labels_for_sha(
+                    s, firm_id=firm_id, matter_id=matter_id, sha256=sha
+                )
+                if best_original:
+                    payload["original_filename"] = best_original
+                if best_display:
+                    payload["display_name"] = best_display
                 out.append(payload)
             return out
 

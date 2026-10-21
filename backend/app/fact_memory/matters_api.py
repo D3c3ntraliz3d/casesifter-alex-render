@@ -349,6 +349,14 @@ def get_matter(matter_id: str, auth: dict = Depends(_require_analysis_auth)):
 
     storage_recovered = False
     try:
+        try:
+            store.heal_synthetic_auto_retry_names(
+                ctx["firm_id"], matter_id, user_id=ctx.get("user_id")
+            )
+        except Exception:
+            logger.exception(
+                "heal synthetic auto-retry names failed matter=%s", matter_id[:8]
+            )
         docs = store.list_documents(ctx["firm_id"], matter_id)
         conflicts: list[dict] = []
         if case_fact_conflicts_enabled():
