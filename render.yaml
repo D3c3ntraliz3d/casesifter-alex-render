@@ -352,7 +352,13 @@ services:
         - frontend/**
         - render.yaml
     routes:
-      # SPA fallback — existing files in dist (e.g. /build-info.json) are served first
+      # Same-origin control + analysis (match alex): first-party cookies; listed before SPA fallback.
+      - type: rewrite
+        source: /v1/*
+        destination: https://casesifter-control.onrender.com/v1/*
+      - type: rewrite
+        source: /api/*
+        destination: https://casesifter-analysis.onrender.com/api/*
       - type: rewrite
         source: /*
         destination: /index.html
@@ -392,15 +398,18 @@ services:
         value: none
       - path: /*
         name: Content-Security-Policy
-        value: "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob:; connect-src 'self' https://casesifter-control.onrender.com https://casesifter-analysis.onrender.com https://app.casesifter.com https://www.casesifter.com https://casesifter.com https://*.ingest.sentry.io https://*.sentry.io; form-action 'self' https://checkout.stripe.com https://billing.stripe.com; upgrade-insecure-requests"
+        value: "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob:; connect-src 'self' https://*.ingest.sentry.io https://*.sentry.io; form-action 'self' https://checkout.stripe.com https://billing.stripe.com; upgrade-insecure-requests"
     # Custom domain app.casesifter.com — attach in Render Dashboard → casesifter-app → Custom Domains
-    # (Blueprint cannot always bind domains without dashboard/API access.)
-    # Vite inlines these at build time. After changing them: Clear build cache → Manual Deploy.
+    # Vite inlines SAME_ORIGIN at build time. After changing: Clear build cache → Manual Deploy.
     envVars:
+      - key: VITE_CONTROL_SAME_ORIGIN
+        value: "1"
       - key: VITE_CONTROL_PLANE_URL
-        value: https://casesifter-control.onrender.com
+        value: ""
+      - key: VITE_ANALYSIS_SAME_ORIGIN
+        value: "1"
       - key: VITE_ANALYSIS_API_URL
-        value: https://casesifter-analysis.onrender.com
+        value: ""
       - key: VITE_SENTRY_ENVIRONMENT
         value: production
       - key: VITE_SENTRY_DSN
