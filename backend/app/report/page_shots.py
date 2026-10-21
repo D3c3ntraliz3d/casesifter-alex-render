@@ -361,7 +361,12 @@ def _extract_bbox(evidence: dict[str, Any], size: tuple[int, int]) -> tuple[int,
     if parsed:
         return parsed
     # Pixel box with origin: [x, y, w, h] or {x,y,width,height}
-    box = evidence.get("overlay_box") or evidence.get("box_px")
+    # overlay_box_px historically stored [w,h] only — ignore length < 4 (no invent).
+    box = (
+        evidence.get("overlay_box")
+        or evidence.get("box_px")
+        or evidence.get("overlay_box_px")
+    )
     if isinstance(box, (list, tuple)) and len(box) >= 4:
         try:
             x, y, bw, bh = (int(box[0]), int(box[1]), int(box[2]), int(box[3]))

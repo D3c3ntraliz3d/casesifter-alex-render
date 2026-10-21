@@ -53,6 +53,7 @@ STATEMENT_HINT_RE = re.compile(
     r"account\s*(?:number|no\.?)|"
     r"amount\s*due|"
     r"statement\s*date|"
+    r"statement\s*period|"
     r"previous\s*balance|"
     r"invoice\s*(?:number|no\.?)|"
     r"billing\s*(?:period|date)|"
@@ -60,7 +61,7 @@ STATEMENT_HINT_RE = re.compile(
     r"meter\s*(?:read|reading|number)|"
     r"kwh|therms|"
     r"check\s*number|"
-    r"national\s*grid|con\s*edison|keyspan|pseg|verizon"
+    r"national\s*grid|con\s*edison|keyspan|pseg|verizon|cigna"
     r")"
 )
 

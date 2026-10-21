@@ -3,8 +3,14 @@
 Exhibits only. A utility bill or account statement whose own labeled dates cannot
 coexist is internally false. That does not depend on a model pass.
 
+Harvests labeled OCR dates (statement/bill, period, due, next meter read,
+production/tracking) with page + character offset, then flags material conflicts:
+inverted periods, statement vs period, due-date impossibilities, next-read before
+bill date, and production/tracking timestamps before the claimed period.
+
 Recorded instruments and court filings are out of scope. Demand letters that
-recite an older missed installment are not a date defect.
+recite an older missed installment are not a date defect. Filing-stamp dates are
+never used as anchors or left in quotes.
 """
 
 from __future__ import annotations
@@ -54,6 +60,9 @@ DATE_TOKEN = re.compile(
     r"("
     r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}"
     r"|"
+    # ISO embedded in production/tracking chrome: 2004-07-30
+    r"(?:19|20)\d{2}-\d{2}-\d{2}"
+    r"|"
     # "April 2007" / "December 2011" — month and year, no day.
     + _MONTH
     + r"\.?\s*\d{4}"
@@ -65,6 +74,12 @@ DATE_TOKEN = re.compile(
     r")",
     re.I,
 )
+# Month+day without year — period starts often omit the year when the end carries it.
+_MONTH_DAY = (
+    r"("
+    + _MONTH
+    + r"\.?\s*\d{1,2}(?:st|nd|rd|th)?)"
+)
 # Token-optional labels: NYSCEF OCR glues ("StatementDate") and mistypes ("Bill Daie").
 STATEMENT_DATE = re.compile(
     r"(?i)\b("
@@ -74,7 +89,7 @@ STATEMENT_DATE = re.compile(
     r"invoice\s*date|"
     r"billing\s*date|"
     r"stm?t\.?\s*date"
-    r")\s*[:#]?\s*"
+    r")\s*[:#|]?\s*"
     + DATE_TOKEN.pattern
 )
 DUE_DATE = re.compile(
@@ -86,6 +101,28 @@ DUE_DATE = re.compile(
     r"(?:new\s*)?charges\s*due"
     r")\s*[:#]?\s*"
     + DATE_TOKEN.pattern
+)
+NEXT_METER_READ = re.compile(
+    r"(?i)\b("
+    r"next\s*meter\s*read(?:ing)?|"
+    r"next\s*scheduled\s*(?:meter\s*)?read(?:ing)?|"
+    r"next\s*read(?:ing)?(?:\s*date)?"
+    r")\s*[:#|]?\s*"
+    + DATE_TOKEN.pattern
+)
+PRODUCTION_DATE = re.compile(
+    r"(?i)\b("
+    r"production\s*(?:date|tracking|timestamp)|"
+    r"print(?:ed|ing)?\s*(?:date|production|timestamp)|"
+    r"system\s*tracking|"
+    r"run\s*date|"
+    r"generated\s*(?:on|at|date)?"
+    r")\s*[:#|]?\s*"
+    + DATE_TOKEN.pattern
+)
+# Issuer tracking chrome: 24091148-10295-2004-07-30-N790-003739620
+TRACKING_EMBEDDED_ISO = re.compile(
+    r"(?<!\d)\d{4,}-\d{2,}-((?:19|20)\d{2})-(\d{2})-(\d{2})(?=-\w)"
 )
 # "Payment Received Nov 16" with no year. A printed year (Nov 16, 2006) is a prior payment.
 # Allow OCR glue: PaymentReceived, pymt received.
@@ -99,8 +136,27 @@ PAYMENT_NO_YEAR = re.compile(
 # OCR often keeps "due by" and the year while eating the month ("due by oncemas a 2011").
 DUE_BY_YEAR = re.compile(r"(?i)\bdue\s*by\b.{0,40}?((?:19|20)\d{2})\b")
 PERIOD_SPAN = re.compile(
-    r"(?i)\b(service\s*period|billing\s*period|service\s*from|from)\s*[:#]?\s*"
+    r"(?i)\b("
+    r"statement\s*period|"
+    r"service\s*period|"
+    r"billing\s*period|"
+    r"period\s*(?:from|covering)|"
+    r"service\s*from|"
+    r"from"
+    r")\s*[:#]?\s*"
     + DATE_TOKEN.pattern
+    + r"\s*(?:-|–|—|to|through)\s*"
+    + DATE_TOKEN.pattern
+)
+# "Statement Period Jan. 1 - Feb. 28, 2009" — year only on the end date.
+PERIOD_SPAN_OPEN_START = re.compile(
+    r"(?i)\b("
+    r"statement\s*period|"
+    r"service\s*period|"
+    r"billing\s*period|"
+    r"period"
+    r")\s*[:#]?\s*"
+    + _MONTH_DAY
     + r"\s*(?:-|–|—|to|through)\s*"
     + DATE_TOKEN.pattern
 )
@@ -110,6 +166,10 @@ COURT_STAMP = re.compile(
 # Same statement: a print date a few weeks after the period is ordinary.
 PERIOD_SLACK_BEFORE = 45
 PERIOD_SLACK_AFTER = 90
+# Production/print before the claimed period by this much is leftover template chrome.
+PRODUCTION_BEFORE_PERIOD_DAYS = 90
+# Without a period, a production date this far before the bill date is not contemporaneous.
+PRODUCTION_BEFORE_STATEMENT_DAYS = 180
 # Due date years after the bill date, or well before it, is not a current bill.
 DUE_AFTER_DAYS = 400
 DUE_BEFORE_DAYS = 60
@@ -187,14 +247,9 @@ def _statement_blocks(text: str) -> list[tuple[int, str]]:
 
 def _conflicts_in_block(block: str, source: str, page_no: int | None = None) -> list[Finding]:
     statement = _first_date(STATEMENT_DATE, block)
-    period = PERIOD_SPAN.search(block)
-    period_start = period_end = None
-    period_start_raw = period_end_raw = ""
-    if period:
-        period_start = _parse_date(period.group(2))
-        period_end = _parse_date(period.group(3))
-        period_start_raw = period.group(2)
-        period_end_raw = period.group(3)
+    period_start, period_end, period_start_raw, period_end_raw, period_at = _period_bounds(block)
+    production = _first_production_date(block)
+    next_reads = _all_dates(NEXT_METER_READ, block)
 
     findings: list[Finding] = []
     if period_start and period_end and period_start > period_end:
@@ -210,7 +265,7 @@ def _conflicts_in_block(block: str, source: str, page_no: int | None = None) -> 
                     "statement does not print an inverted billing window."
                 ),
                 source=source,
-                quote=_snippet(block, period.start()),
+                quote=_snippet(block, period_at or 0),
                 page=page_no,
             )
         )
@@ -235,6 +290,21 @@ def _conflicts_in_block(block: str, source: str, page_no: int | None = None) -> 
                     page=page_no,
                 )
             )
+    findings.extend(
+        _production_conflicts(
+            block,
+            production,
+            statement,
+            period_start,
+            period_end,
+            period_start_raw,
+            period_end_raw,
+            period_at,
+            source,
+            page_no,
+        )
+    )
+    findings.extend(_next_meter_conflicts(block, next_reads, statement, source, page_no))
     dues = _all_dates(DUE_DATE, block)
     if statement:
         for due_date, due_raw, due_at in dues:
@@ -324,6 +394,224 @@ def _conflicts_in_block(block: str, source: str, page_no: int | None = None) -> 
     return findings
 
 
+def harvest_labeled_dates(
+    text: str,
+    *,
+    page_no: int | None = None,
+) -> list[dict[str, object]]:
+    """Collect labeled exhibit dates with page + character offset (bbox when available later).
+
+    Deterministic OCR index for chronology conflicts. Filing-stamp lines are skipped.
+    """
+    out: list[dict[str, object]] = []
+    for page, block in _statement_blocks(text):
+        page_use = page_no if page_no is not None else page
+        for role, pattern in (
+            ("statement_date", STATEMENT_DATE),
+            ("due_date", DUE_DATE),
+            ("next_meter_read", NEXT_METER_READ),
+            ("production_date", PRODUCTION_DATE),
+        ):
+            for parsed, raw, at in _all_dates(pattern, block):
+                out.append(
+                    {
+                        "role": role,
+                        "date": parsed.isoformat(),
+                        "raw": raw,
+                        "page": page_use,
+                        "offset": at,
+                        "bbox": None,
+                    }
+                )
+        period_start, period_end, start_raw, end_raw, period_at = _period_bounds(block)
+        if period_start and start_raw:
+            out.append(
+                {
+                    "role": "period_start",
+                    "date": period_start.isoformat(),
+                    "raw": start_raw,
+                    "page": page_use,
+                    "offset": period_at,
+                    "bbox": None,
+                }
+            )
+        if period_end and end_raw:
+            out.append(
+                {
+                    "role": "period_end",
+                    "date": period_end.isoformat(),
+                    "raw": end_raw,
+                    "page": page_use,
+                    "offset": period_at,
+                    "bbox": None,
+                }
+            )
+        for parsed, raw, at in _tracking_iso_dates(block):
+            out.append(
+                {
+                    "role": "production_tracking",
+                    "date": parsed.isoformat(),
+                    "raw": raw,
+                    "page": page_use,
+                    "offset": at,
+                    "bbox": None,
+                }
+            )
+    return out
+
+
+def _period_bounds(
+    block: str,
+) -> tuple[date | None, date | None, str, str, int | None]:
+    """Return (start, end, start_raw, end_raw, match_offset) for a labeled period."""
+    period = PERIOD_SPAN.search(block)
+    if period and not _near_court_stamp(block, period.start()):
+        start = _parse_date(period.group(2))
+        end = _parse_date(period.group(3))
+        if start or end:
+            return start, end, period.group(2), period.group(3), period.start()
+    open_start = PERIOD_SPAN_OPEN_START.search(block)
+    if open_start and not _near_court_stamp(block, open_start.start()):
+        end = _parse_date(open_start.group(3))
+        start_raw = open_start.group(2)
+        end_raw = open_start.group(3)
+        start = None
+        if end:
+            month_day = _parse_month_day(start_raw)
+            if month_day:
+                start = _safe_date(end.year, month_day[0], month_day[1])
+            else:
+                # "Jan. 1" may fail _parse_month_day if punctuation differs; try with end year.
+                start = _parse_date(f"{start_raw}, {end.year}") or _parse_date(
+                    f"{start_raw} {end.year}"
+                )
+        return start, end, start_raw, end_raw, open_start.start()
+    return None, None, "", "", None
+
+
+def _first_production_date(block: str) -> tuple[date, str, int] | None:
+    labeled = _first_date(PRODUCTION_DATE, block)
+    if labeled:
+        return labeled
+    tracking = _tracking_iso_dates(block)
+    return tracking[0] if tracking else None
+
+
+def _tracking_iso_dates(block: str) -> list[tuple[date, str, int]]:
+    found: list[tuple[date, str, int]] = []
+    for match in TRACKING_EMBEDDED_ISO.finditer(block):
+        if _near_court_stamp(block, match.start()):
+            continue
+        year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
+        parsed = _safe_date(year, month, day)
+        if not parsed:
+            continue
+        raw = f"{year:04d}-{month:02d}-{day:02d}"
+        found.append((parsed, raw, match.start(1)))
+    return found
+
+
+def _production_conflicts(
+    block: str,
+    production: tuple[date, str, int] | None,
+    statement: tuple[date, str, int] | None,
+    period_start: date | None,
+    period_end: date | None,
+    period_start_raw: str,
+    period_end_raw: str,
+    period_at: int | None,
+    source: str,
+    page_no: int | None,
+) -> list[Finding]:
+    """Print/production date years before the claimed period is leftover template chrome."""
+    if production is None:
+        return []
+    prod_date, prod_raw, prod_at = production
+    if period_start is not None:
+        lead = (period_start - prod_date).days
+        if lead < PRODUCTION_BEFORE_PERIOD_DAYS:
+            return []
+        right_raw = (
+            f"{period_start_raw}–{period_end_raw}"
+            if period_start_raw and period_end_raw
+            else period_start_raw or period_end_raw or period_start.isoformat()
+        )
+        right_at = period_at if period_at is not None else prod_at
+        return [
+            _date_finding(
+                title="Production date cannot belong to this statement period",
+                left_raw=prod_raw,
+                right_raw=right_raw,
+                left=prod_date,
+                right=period_start,
+                why=(
+                    "A production or tracking timestamp years before the statement "
+                    "period is leftover template chrome, not a contemporaneous print "
+                    "of that billing window."
+                ),
+                source=source,
+                quote=_quote_pair(block, prod_at, prod_raw, right_at, right_raw),
+                page=page_no,
+            )
+        ]
+    if statement is not None:
+        lead = (statement[0] - prod_date).days
+        if lead < PRODUCTION_BEFORE_STATEMENT_DAYS:
+            return []
+        return [
+            _date_finding(
+                title="Production date cannot belong to this statement date",
+                left_raw=prod_raw,
+                right_raw=statement[1],
+                left=prod_date,
+                right=statement[0],
+                why=(
+                    "A production or tracking timestamp far before the bill date "
+                    "cannot be a contemporaneous print of this statement."
+                ),
+                source=source,
+                quote=_quote_pair(block, prod_at, prod_raw, statement[2], statement[1]),
+                page=page_no,
+            )
+        ]
+    return []
+
+
+def _next_meter_conflicts(
+    block: str,
+    next_reads: list[tuple[date, str, int]],
+    statement: tuple[date, str, int] | None,
+    source: str,
+    page_no: int | None,
+) -> list[Finding]:
+    """Next meter reading must fall after the bill/statement date on the same exhibit."""
+    if not next_reads or statement is None:
+        return []
+    out: list[Finding] = []
+    bill_date, bill_raw, bill_at = statement
+    for read_date, read_raw, read_at in next_reads:
+        if read_date >= bill_date:
+            continue
+        out.append(
+            _date_finding(
+                title="Next meter reading cannot predate this bill date",
+                left_raw=read_raw,
+                right_raw=bill_raw,
+                left=read_date,
+                right=bill_date,
+                why=(
+                    "A utility bill does not schedule the next meter reading before "
+                    "its own bill date. Those labels cannot coexist on one authentic "
+                    "issuer statement."
+                ),
+                source=source,
+                quote=_quote_pair(block, read_at, read_raw, bill_at, bill_raw),
+                page=page_no,
+            )
+        )
+    return out
+
+
 def _undated_payment_conflicts(
     block: str,
     statement: tuple[date, str, int] | None,
@@ -410,11 +698,34 @@ def _all_dates(pattern: re.Pattern[str], block: str) -> list[tuple[date, str, in
 
 
 def _quote_pair(block: str, at_a: int, raw_a: str, at_b: int, raw_b: str) -> str:
-    """Keep both labeled dates in the quote when they sit far apart on the page."""
-    snippet = _snippet(block, min(at_a, at_b))
-    if raw_a in snippet and raw_b in snippet:
+    """Keep both labeled dates in the quote when they sit far apart on the page.
+
+    Drop e-filing stamp chrome from the quote so materiality gates do not treat a
+    body-vs-body date conflict as filing-stamp noise.
+    """
+    snippet = _strip_court_stamp_chrome(_snippet(block, min(at_a, at_b)))
+    if raw_a in snippet and raw_b in snippet and not COURT_STAMP.search(snippet):
         return snippet
     return re.sub(r"\s+", " ", f"{raw_a} … {raw_b}").strip()[:240]
+
+
+def _strip_court_stamp_chrome(text: str) -> str:
+    """Remove NYSCEF / FILED lines so quotes stay on exhibit body labels."""
+    lines = []
+    for line in (text or "").splitlines():
+        if COURT_STAMP.search(line) or re.search(r"(?i)\bCOUNTY\s+CLERK\b", line):
+            continue
+        lines.append(line)
+    cleaned = re.sub(r"\s+", " ", " ".join(lines)).strip()
+    # Flattened single-line OCR: cut from the stamp token onward.
+    cut = re.search(
+        r"(?i)\b(?:NYSCEF|FILED:|RECEIVED\s+NYSCEF|INDEX\s+NO\.?|DOC(?:UMENT)?\.?\s*NO\.?|"
+        r"COUNTY\s+CLERK)\b",
+        cleaned,
+    )
+    if cut and cut.start() > 20:
+        cleaned = cleaned[: cut.start()].strip()
+    return cleaned[:240]
 
 
 def _near_court_stamp(block: str, at: int) -> bool:
@@ -452,6 +763,9 @@ def _parse_date(raw: str) -> date | None:
     text = re.sub(r"\s+", " ", (raw or "").strip())
     if not text:
         return None
+    iso = re.match(r"^((?:19|20)\d{2})-(\d{2})-(\d{2})$", text)
+    if iso:
+        return _safe_date(int(iso.group(1)), int(iso.group(2)), int(iso.group(3)))
     month_year = re.match(
         r"^(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
         r"Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|"

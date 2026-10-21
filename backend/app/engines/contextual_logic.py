@@ -2012,17 +2012,35 @@ def _findings_from_analysis_result(
     source_file: Path | None,
     extras: dict[str, Any],
 ) -> tuple[list[Finding], str]:
+    raw_items = (result.get("findings") or [])[: settings.contextual_max_ai_findings]
+    findings: list[Finding] = []
+    dropped: list[dict[str, Any]] = []
+    raw_slim: list[dict[str, Any]] = []
+    for index, item in enumerate(raw_items):
+        slim = _slim_raw_analysis_item(item)
+        raw_slim.append(slim)
+        converted, drop_reason = _convert_analysis_item(
+            item, index, result, text=text, source_file=source_file
+        )
+        if converted:
+            findings.append(converted)
+        else:
+            dropped.append({**slim, "drop_reason": drop_reason or "filtered"})
     extras["document_analysis_result"] = {
-        "count": len(result.get("findings") or []),
+        "count": len(raw_items),
+        "shipped_count": len(findings),
+        "dropped_count": len(dropped),
+        "raw_findings": raw_slim,
+        "dropped_findings": dropped,
         "file_sent": result.get("file_sent"),
         "overall_note": result.get("overall_note"),
         "failed_page_ranges": extras.get("document_analysis_failed_page_ranges"),
     }
-    findings: list[Finding] = []
-    for index, item in enumerate((result.get("findings") or [])[: settings.contextual_max_ai_findings]):
-        converted = _finding_from_analysis(item, index, result, text=text, source_file=source_file)
-        if converted:
-            findings.append(converted)
+    _log_overall_note_completeness(
+        str(result.get("overall_note") or ""),
+        findings,
+        source_file=source_file,
+    )
     return findings, "enabled"
 
 
@@ -2423,6 +2441,130 @@ ANALYSIS_TITLES = {
 # Critical forgery classes are promoted later in apply_forgery_severity.
 SEVERITY_CAP = {"info": "info", "low": "low", "medium": "medium", "high": "medium", "critical": "medium"}
 
+# Gemini sometimes frames consumer-statement period/YTD math or template-date
+# chronology as logical_inconsistency, which used to be hard-dropped. Remap only
+# when the blob supports a shippable exhibit-fraud class — never bare advocacy.
+_LOGICAL_MATH_RE = re.compile(
+    r"(?i)("
+    r"\bytd\b|year[\s-]?to[\s-]?date|"
+    r"period.{0,60}(?:performance|return|calculation|total|amount|ytd)|"
+    r"(?:performance|return|calculation).{0,60}(?:period|ytd)|"
+    r"mutually\s+contradictory.{0,80}(?:period|ytd|calculation|performance|math)|"
+    r"conflicting.{0,60}(?:ytd|period|performance|calculation)|"
+    r"do(?:es)?\s+not\s+(?:add|reconcile|balance|sum)\b|"
+    r"\barithmetic\b|\bsubtotal\b|"
+    r"(?:opening|closing|ending|previous|beginning)\s+balance|"
+    r"words?\s+(?:and|vs\.?|versus)\s+numeral"
+    r")"
+)
+_LOGICAL_CHRONOLOGY_RE = re.compile(
+    r"(?i)("
+    r"production\s+(?:date|timestamp|tracking)|"
+    r"print(?:ed|ing)?\s+(?:date|production|timestamp)|"
+    r"system\s+tracking|"
+    r"bought[\s-]?template|template\s+(?:chrome|date|leftover)|"
+    r"predates|pre-dates|predate|"
+    r"next\s+meter\s+reading|"
+    r"statement\s+(?:period|date|year).{0,100}(?:20\d{2}|19\d{2})"
+    r"|"
+    r"(?:20\d{2}|19\d{2}).{0,60}(?:production|print|tracking).{0,60}"
+    r"(?:20\d{2}|19\d{2}|statement)"
+    r")"
+)
+_LOGICAL_DIGIT_RE = re.compile(r"\d")
+# Completeness: issuer named in overall_note but absent from shipped titles.
+_NOTE_COMPLETENESS_ISSUERS = (
+    "National Grid",
+    "CIGNA",
+    "Citibank",
+    "Verizon",
+    "KeySpan",
+    "Con Edison",
+    "Wells Fargo",
+    "Bank of America",
+    "Chase",
+    "PSEG",
+    "AT&T",
+    "T-Mobile",
+    "Spectrum",
+    "Comcast",
+    "Capital One",
+)
+
+
+def _analysis_item_blob(item: dict[str, Any]) -> str:
+    return " ".join(
+        str(item.get(key) or "")
+        for key in ("title", "observation", "why_suspicious", "quoted_evidence")
+    )
+
+
+def _remap_logical_inconsistency(item: dict[str, Any]) -> str | None:
+    """Map evidence-backed logical_inconsistency to a shippable analysis type.
+
+    Returns math_error / date_inconsistency when the cited content supports that
+    class. Returns None for advocacy-shaped or unsupported logic notes so they
+    stay suppressed.
+    """
+    blob = _analysis_item_blob(item)
+    if not blob.strip():
+        return None
+    has_digit = bool(_LOGICAL_DIGIT_RE.search(blob))
+    if _LOGICAL_MATH_RE.search(blob) and has_digit:
+        return "math_error"
+    if _LOGICAL_CHRONOLOGY_RE.search(blob) and has_digit:
+        return "date_inconsistency"
+    return None
+
+
+def _slim_raw_analysis_item(item: Any) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        return {"analysis_type": None, "title": str(item)[:120], "invalid": True}
+    quoted = str(item.get("quoted_evidence") or "").strip()[:200]
+    observation = str(item.get("observation") or "").strip()[:240]
+    return {
+        "analysis_type": str(item.get("analysis_type") or "").strip().lower() or None,
+        "title": str(item.get("title") or "").strip()[:160] or None,
+        "page": item.get("page"),
+        "severity": str(item.get("severity") or "").strip().lower() or None,
+        "confidence": item.get("confidence"),
+        "quoted_evidence": quoted or None,
+        "observation": observation or None,
+    }
+
+
+def _log_overall_note_completeness(
+    overall_note: str,
+    findings: list[Finding],
+    *,
+    source_file: Path | None = None,
+) -> None:
+    """Warn when overall_note names an issuer/page that did not ship as a finding.
+
+    Retry is phase 2; this only makes under-emission visible in logs/extras.
+    """
+    note = (overall_note or "").strip()
+    if not note:
+        return
+    titles = " ".join(f.title or "" for f in findings).lower()
+    missing: list[str] = []
+    for issuer in _NOTE_COMPLETENESS_ISSUERS:
+        if not re.search(rf"\b{re.escape(issuer)}\b", note, re.I):
+            continue
+        if issuer.lower() not in titles:
+            missing.append(issuer)
+    if not missing:
+        return
+    doc = str(source_file) if source_file is not None else "-"
+    logger.warning(
+        "document_analysis completeness gap doc=%s note_issuers_missing_from_titles=%s "
+        "shipped=%s note=%s",
+        doc[:120],
+        ",".join(missing),
+        len(findings),
+        note[:240],
+    )
+
 
 def _finding_from_analysis(
     item: dict[str, Any],
@@ -2431,28 +2573,50 @@ def _finding_from_analysis(
     text: str = "",
     source_file: Path | None = None,
 ) -> Finding | None:
-    """Convert one model-reported observation into a Finding, discounted and labelled.
+    """Convert one model-reported observation into a Finding, discounted and labelled."""
+    converted, _reason = _convert_analysis_item(
+        item, index, result, text=text, source_file=source_file
+    )
+    return converted
+
+
+def _convert_analysis_item(
+    item: dict[str, Any],
+    index: int,
+    result: dict[str, Any],
+    text: str = "",
+    source_file: Path | None = None,
+) -> tuple[Finding | None, str | None]:
+    """Convert one model observation. Returns (finding, drop_reason).
 
     Category stays "contextual" for every analysis type. A model's opinion about splicing
     is not equivalent to the deterministic copy-move detector's output, so it must not be
     filed under "image" where a reader would take it for measured evidence.
     """
     if not isinstance(item, dict):
-        return None
-    analysis_type = str(item.get("analysis_type", "")).strip().lower()
-    if analysis_type not in ANALYSIS_TYPES:
-        return None
-    if analysis_type in {"logical_inconsistency", "spelling_anomaly"}:
-        return None
+        return None, "invalid_item"
+    model_analysis_type = str(item.get("analysis_type", "")).strip().lower()
+    if model_analysis_type not in ANALYSIS_TYPES:
+        return None, "unknown_analysis_type"
+    if model_analysis_type == "spelling_anomaly":
+        return None, "spelling_anomaly"
+    analysis_type = model_analysis_type
+    remapped_from: str | None = None
+    if model_analysis_type == "logical_inconsistency":
+        mapped = _remap_logical_inconsistency(item)
+        if not mapped:
+            return None, "logical_inconsistency_unmapped"
+        remapped_from = model_analysis_type
+        analysis_type = mapped
     if analysis_type == "font_mismatch" and not (
         is_field_scoped_font_mismatch(item) or is_localized_row_chrome(item)
     ):
-        return None
+        return None, "font_mismatch_not_localized"
 
     observation = str(item.get("observation", "")).strip()
     why = str(item.get("why_suspicious", "")).strip()
     if not observation or not why:
-        return None
+        return None, "missing_observation_or_why"
 
     try:
         model_confidence = float(item.get("confidence", 0))
@@ -2460,7 +2624,7 @@ def _finding_from_analysis(
         model_confidence = 0.0
     model_confidence = max(0.0, min(100.0, model_confidence))
     if model_confidence < settings.contextual_min_confidence:
-        return None
+        return None, "low_confidence"
 
     severity = SEVERITY_CAP.get(str(item.get("severity", "low")).lower(), "low")
     # Same discount as claim verification: an unconfirmed model observation cannot
@@ -2483,12 +2647,12 @@ def _finding_from_analysis(
         "analysis_type": analysis_type,
     }
     if is_header_or_arrears_noise(draft):
-        return None
+        return None, "header_or_arrears_noise"
     source_name = str(source_file) if source_file is not None else ""
     if is_recorded_instrument_math_noise(draft, text=text, source=source_name):
-        return None
+        return None, "recorded_instrument_math_noise"
     if is_recorded_instrument_date_noise(draft, text=text, source=source_name):
-        return None
+        return None, "recorded_instrument_date_noise"
 
     label = ANALYSIS_TITLES[analysis_type]
     title = str(item.get("title", "")).strip()[:120] or label
@@ -2500,28 +2664,36 @@ def _finding_from_analysis(
     fid_seed = f"{analysis_type}|{title}|{page_no}|{quoted}"
     fid = f"ctx-ai-{hashlib.sha1(fid_seed.encode('utf-8')).hexdigest()[:10]}"
 
-    return finding(
-        fid=fid,
-        category="contextual",
-        severity=severity,
-        title=f"{label}: {title}" if not title.lower().startswith(label.lower()) else title,
-        explanation=explanation,
-        why_suspicious=why,
-        confidence=confidence,
-        page=page_no,
-        evidence={
-            "analysis_type": analysis_type,
-            "quoted_evidence": quoted or None,
-            "model": result.get("model"),
-            "model_confidence": model_confidence,
-            "model_severity": str(item.get("severity", "")).lower() or None,
-            "file_sent": result.get("file_sent"),
-            "ai_generated": True,
-        },
-        recommended_action=(
-            "Treat this as a research lead only. Confirm the cited page and content by eye, and "
-            "compare against the deterministic findings from the image, text, and PDF modules."
+    evidence: dict[str, Any] = {
+        "analysis_type": analysis_type,
+        "quoted_evidence": quoted or None,
+        "model": result.get("model"),
+        "model_confidence": model_confidence,
+        "model_severity": str(item.get("severity", "")).lower() or None,
+        "file_sent": result.get("file_sent"),
+        "ai_generated": True,
+    }
+    if remapped_from:
+        evidence["model_analysis_type"] = remapped_from
+        evidence["remapped_from"] = remapped_from
+
+    return (
+        finding(
+            fid=fid,
+            category="contextual",
+            severity=severity,
+            title=f"{label}: {title}" if not title.lower().startswith(label.lower()) else title,
+            explanation=explanation,
+            why_suspicious=why,
+            confidence=confidence,
+            page=page_no,
+            evidence=evidence,
+            recommended_action=(
+                "Treat this as a research lead only. Confirm the cited page and content by eye, and "
+                "compare against the deterministic findings from the image, text, and PDF modules."
+            ),
         ),
+        None,
     )
 
 

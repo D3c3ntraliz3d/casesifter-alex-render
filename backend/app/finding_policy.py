@@ -290,7 +290,8 @@ STATEMENT_FORGERY_HOOK_RE = re.compile(
     r"account\s*(?:number|no\.?)|amount\s*due|previous\s*balance|"
     r"mortgage\s+statement|billing\s+statement|account\s+statement|"
     r"bank\s+statement|utility\s+(?:bill|statement)|telecom|"
-    r"\bverizon\b|\bcitibank\b|national\s+grid|con\s*edison|wells\s+fargo|"
+    r"retirement\s+statement|"
+    r"\bverizon\b|\bcitibank\b|\bcigna\b|national\s+grid|con\s*edison|wells\s+fargo|"
     r"keyspan|pseg"
     r")"
 )
@@ -300,8 +301,9 @@ CONSUMER_STATEMENT_MATH_RE = re.compile(
     r"(?i)("
     r"account\s*(?:number|no\.?)|amount\s*due|statement\s*date|"
     r"previous\s*balance|opening\s+balance|closing\s+balance|ending\s+balance|"
-    r"bank\s+statement|utility\s+(?:bill|statement)|telecom|"
-    r"\bcitibank\b|\bverizon\b|national\s+grid|con\s*edison|keyspan"
+    r"year[\s-]?to[\s-]?date|\bytd\b|period\s+(?:and\s+)?(?:ytd|performance)|"
+    r"bank\s+statement|utility\s+(?:bill|statement)|telecom|retirement\s+statement|"
+    r"\bcitibank\b|\bverizon\b|\bcigna\b|national\s+grid|con\s*edison|keyspan"
     r")"
 )
 LOAN_MATH_NOISE_RE = re.compile(
@@ -589,7 +591,19 @@ def _statement_body_survives_header(item: Finding | dict) -> bool:
     analysis = _analysis_type(item)
     if analysis == "line_self_contradiction":
         return True
-    if isinstance(item, Finding) and "payment date cannot belong" in (item.title or "").lower():
+    title = ""
+    evidence: dict = {}
+    if isinstance(item, Finding):
+        title = (item.title or "").lower()
+        evidence = item.evidence or {}
+    else:
+        title = str(item.get("title") or "").lower()
+        nested = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
+        evidence = nested or item
+    if "payment date cannot belong" in title:
+        return True
+    # Deterministic statement-date conflicts already skip stamp dates as anchors.
+    if analysis == "date_inconsistency" and evidence.get("deterministic"):
         return True
     if analysis != "historical_impossibility":
         return False

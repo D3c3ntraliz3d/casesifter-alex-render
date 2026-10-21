@@ -33,7 +33,7 @@ from app.engines.statement_body import (
     find_statement_math_errors,
     with_page_breaks,
 )
-from app.engines.statement_dates import find_statement_date_conflicts
+from app.engines.statement_dates import find_statement_date_conflicts, harvest_labeled_dates
 from app.engines.template_fabrication import find_template_leftovers, review_print_scan_ela
 from app.finding_policy import triage_findings
 from app.impact_judge import apply_case_impact_judge
@@ -266,6 +266,8 @@ def run_local_stage(
             source=display_name or source.name,
             doc_kind=doc_kind,
         )
+        # Deterministic OCR date index (page + char offset; bbox reserved when OCR supplies it).
+        labeled_dates = harvest_labeled_dates(paged_text)[:120]
         # Real module row so the Dates light is not invented client-side.
         # Findings live only on this module (not also in local_findings).
         statement_dates = ModuleResult(
@@ -278,6 +280,7 @@ def run_local_stage(
                 else "No statement-date conflicts."
             ),
             findings=list(date_findings),
+            extras={"labeled_dates": labeled_dates, "labeled_date_count": len(labeled_dates)},
         )
         local_findings.extend(
             find_issuer_market_anachronisms(

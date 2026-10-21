@@ -1574,6 +1574,40 @@ export async function getMatterDocumentReport(matterId, documentId) {
   return readJson(res);
 }
 
+/**
+ * Check that a retained PDF is actually readable (not just flagged has_source).
+ * Sends Range bytes=0-7; if the server ignores Range, the full object may download
+ * — call only on explicit Troubleshoot, not in bulk.
+ */
+export async function verifyMatterDocumentSource(matterId, documentId) {
+  const res = await analysisFetch(
+    `/api/v1/matters/${encodeURIComponent(matterId)}/documents/${encodeURIComponent(documentId)}/file`,
+    { headers: { Range: "bytes=0-7" } }
+  );
+  if (res.status === 200 || res.status === 206) {
+    const buf = new Uint8Array(await res.arrayBuffer());
+    const head = String.fromCharCode(...buf.slice(0, Math.min(4, buf.length)));
+    return {
+      ok: true,
+      status: res.status,
+      is_pdf: head === "%PDF",
+      bytes_checked: buf.length,
+    };
+  }
+  let detail = null;
+  try {
+    const body = await readJson(res);
+    detail = body?.detail || body?.message || null;
+  } catch {
+    detail = null;
+  }
+  return {
+    ok: false,
+    status: res.status,
+    detail: detail || "Source file is not available on the server.",
+  };
+}
+
 /** Start async recompute; polls until complete. onProgress({status,percent,message,...}). */
 export async function recomputeMatterFacts(matterId, { onProgress } = {}) {
   const res = await analysisFetch(`/api/v1/matters/${matterId}/recompute-facts`, {

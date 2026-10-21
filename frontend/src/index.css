@@ -1467,6 +1467,71 @@ table.data.docs .doc-actions .btn {
   .case-tile-actions { opacity: 1; }
 }
 
+.troubleshoot-panel {
+  position: sticky;
+  bottom: 12px;
+  z-index: 20;
+  margin: 12px 0 4px;
+  padding: 14px 16px 16px;
+  max-width: 520px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--panel) 92%, var(--bg));
+  box-shadow: 0 8px 28px rgba(15, 23, 32, 0.08);
+}
+.troubleshoot-panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.troubleshoot-panel-head h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--navy);
+}
+.troubleshoot-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+.troubleshoot-list li {
+  display: grid;
+  grid-template-columns: 9.5rem 1fr;
+  gap: 2px 12px;
+  padding: 6px 0;
+  border-top: 1px solid rgba(15, 23, 32, 0.06);
+}
+.troubleshoot-list li .footnote {
+  grid-column: 2;
+  margin: 0;
+}
+.troubleshoot-label {
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.troubleshoot-value {
+  font-size: 14px;
+  color: var(--text);
+}
+.troubleshoot-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+.troubleshoot-actions .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .disclaimer, .footnote { font-size: 12px; color: var(--muted); line-height: 1.45; }
 .error { color: var(--red); background: var(--red-bg); padding: 8px 10px; border-radius: 8px; }
 .actions { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0 0; }

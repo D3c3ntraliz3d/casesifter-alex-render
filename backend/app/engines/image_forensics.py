@@ -515,7 +515,15 @@ def _solid_overlay_finding(
             "analysis_type": "graphic_manipulation",
             "heatmap": f"/api/jobs/{job_id}/artifacts/{name}",
             "overlay_frac": round(frac, 4),
-            "overlay_box_px": [bw, bh],
+            # Full page-space box so page_shots can crop + red-circle (not size-only).
+            "bbox": [
+                round((xi + x) / w, 4),
+                round((yi + y) / h, 4),
+                round((xi + x + bw) / w, 4),
+                round((yi + y + bh) / h, 4),
+            ],
+            "overlay_box": [xi + x, yi + y, bw, bh],
+            "overlay_box_px": [xi + x, yi + y, bw, bh],
             "print_scan_review": True,
             "content_hook": True,
         },

@@ -106,6 +106,65 @@ def test_attach_bbox_highlight_when_coords_exist(tmp_path):
     assert max(img.size) <= 900
 
 
+def test_attach_annotated_from_overlay_box_px(tmp_path):
+    """Solid-overlay forensics stores page-space [x,y,w,h] — must become annotated_region."""
+    from app.models import AuditTrail, Finding, Report
+    from app.report.page_shots import attach_finding_page_shots
+
+    pdf = tmp_path / "ex.pdf"
+    _tiny_pdf(pdf, pages=1)
+    job_id = uuid.uuid4().hex
+    report = Report(
+        job_id=job_id,
+        risk_level="red",
+        risk_score=80,
+        ai_review="complete",
+        executive_summary="Solid overlay fixture.",
+        recommended_actions=[],
+        findings=[
+            Finding(
+                id="ov1",
+                category="image",
+                severity="critical",
+                confidence=78,
+                title="Solid white overlay covering content on page-1",
+                explanation="White slab over body print.",
+                why_suspicious="Paste / whiteout before scan.",
+                page=1,
+                evidence={
+                    "analysis_type": "graphic_manipulation",
+                    # Pixel box relative to a ~612x792 rendered page (scale 1.35 ≈ 826x1069).
+                    "overlay_box_px": [80, 220, 520, 90],
+                    "print_scan_review": True,
+                    "content_hook": True,
+                },
+            )
+        ],
+        top_findings=[],
+        timeline=[],
+        page_dimensions=[],
+        fonts=[],
+        comparison={},
+        modules=[],
+        audit=AuditTrail(
+            scanned_at=datetime.now(timezone.utc),
+            analysis_version="test",
+            modules_run=["smoke"],
+            submitted_by="page-shots",
+            filename="overlay.pdf",
+            file_size_bytes=100,
+            file_type="application/pdf",
+            sha256="d" * 64,
+        ),
+        artifact_urls=[],
+    )
+    out = attach_finding_page_shots(report, pdf)
+    ev = out.findings[0].evidence
+    assert ev.get("page_shot_kind") == "annotated_region"
+    assert ev.get("page_shot_bbox")
+    assert ev.get("page_shot", "").startswith("data:image/jpeg;base64,")
+
+
 def test_export_pdf_embeds_page_shot(tmp_path):
     from app.report.generator import render_pdf_bytes
     from app.report.page_shots import attach_finding_page_shots

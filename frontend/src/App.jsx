@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Archive, ChevronDown, Download, FolderOpen, Image as ImageIcon, MessageSquare, RefreshCw, RotateCcw, Search, ShieldAlert, Trash2, Upload, X } from "lucide-react";
+import { Archive, ChevronDown, CircleHelp, Download, FolderOpen, Image as ImageIcon, MessageSquare, RefreshCw, RotateCcw, Search, ShieldAlert, Trash2, Upload, X } from "lucide-react";
 import {
   archiveCase,
   askCaseChat,
@@ -69,6 +69,7 @@ import {
   setMatterFindingFeedback,
   unarchiveCase,
   uploadCaseDocument,
+  verifyMatterDocumentSource,
 } from "./api";
 import { BrandMark } from "./BrandMark.jsx";
 import { sha256OfFile } from "./localFiles.js";
@@ -2068,6 +2069,11 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
   const [cacheBannerDismissed, setCacheBannerDismissed] = useState(false);
   const [locatingFiles, setLocatingFiles] = useState(false);
   const [locateNote, setLocateNote] = useState("");
+  const [troubleshootDocId, setTroubleshootDocId] = useState(null);
+  const [troubleshootProbe, setTroubleshootProbe] = useState(null);
+  const [troubleshootProbing, setTroubleshootProbing] = useState(false);
+  /** Doc ids whose has_source flag is true but /file cannot be read (orphaned key). */
+  const [brokenSourceIds, setBrokenSourceIds] = useState(() => new Set());
   const [exportingMatter, setExportingMatter] = useState(false);
   const [listIncompleteError, setListIncompleteError] = useState("");
   const inputRef = useRef(null);
@@ -3371,6 +3377,183 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
     return Boolean(cacheCoverage?.missingShas?.includes(sha));
   }
 
+  /** Calm diagnostics when source looks missing or the scan looks incomplete. */
+  function docNeedsTroubleshoot(doc) {
+    if (!isHostedAnalysis() || !doc || doc.pending_upload) return false;
+    if (brokenSourceIds.has(doc.id)) return true;
+    if (doc.source_missing || doc.has_source === false) return true;
+    if (doc.ai_review === "incomplete") return true;
+    const clearance = rowClearance(doc);
+    if (clearance === "failed" || clearance === "interrupted" || clearance === "incomplete") {
+      return true;
+    }
+    // Forensic exhibit finished with zero model calls — likely a thin/skipped pass.
+    if (
+      clearance === "complete" &&
+      doc.scan_profile === "forensic" &&
+      Number(doc.gemini_calls || 0) === 0
+    ) {
+      return true;
+    }
+    // Server claims a retained PDF, but this browser has no cache copy — worth
+    // verifying the object still exists (orphaned key / AccessDenied cases).
+    const sha = String(doc?.sha256 || "").toLowerCase();
+    if (
+      doc.has_source &&
+      !doc.source_missing &&
+      sha &&
+      cacheCoverage?.missingShas?.includes(sha)
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  function buildTroubleshootRows(doc, probe) {
+    const clearance = rowClearance(doc);
+    const sourceLabel =
+      doc.has_source && !doc.source_missing
+        ? "Marked present"
+        : doc.source_missing || doc.has_source === false
+          ? "Not on server"
+          : "Unknown";
+    const rows = [
+      {
+        label: "Source on server",
+        value:
+          brokenSourceIds.has(doc.id) || (probe && !probe.ok)
+            ? "Marked present, but file missing"
+            : sourceLabel,
+        hint:
+          brokenSourceIds.has(doc.id) || (probe && !probe.ok)
+            ? "Re-upload this PDF so CaseSifter can keep a fresh copy."
+            : sourceLabel === "Not on server"
+              ? "Re-upload or Locate this PDF to scan again."
+              : "Retention keeps a small copy on the server when enabled.",
+      },
+      {
+        label: "Last scan",
+        value:
+          clearance === "complete"
+            ? "Finished"
+            : clearance === "incomplete"
+              ? "Finished with gaps"
+              : clearance === "failed" || clearance === "interrupted"
+                ? "Did not finish"
+                : clearance === "scanning"
+                  ? "In progress"
+                  : clearance || "—",
+        hint: formatScanError(doc) || undefined,
+      },
+      {
+        label: "Scan profile",
+        value: doc.scan_profile || "—",
+      },
+      {
+        label: "Model calls",
+        value:
+          doc.gemini_calls == null || doc.gemini_calls === ""
+            ? "—"
+            : String(doc.gemini_calls),
+        hint:
+          Number(doc.gemini_calls || 0) === 0 && clearance === "complete"
+            ? "This pass may have skipped the deeper AI review."
+            : undefined,
+      },
+    ];
+    if (probe) {
+      rows.push({
+        label: "File check",
+        value: probe.ok
+          ? probe.is_pdf
+            ? "Readable PDF"
+            : "File found"
+          : "Cannot open",
+        hint: probe.ok
+          ? undefined
+          : probe.detail || "The server flag says present, but the file is missing.",
+      });
+    }
+    return rows;
+  }
+
+  async function openTroubleshoot(doc) {
+    setTroubleshootDocId(doc.id);
+    setTroubleshootProbe(null);
+    if (!doc?.has_source || doc?.source_missing) return;
+    setTroubleshootProbing(true);
+    try {
+      const probe = await verifyMatterDocumentSource(caseData.id, doc.id);
+      setTroubleshootProbe(probe);
+      if (!probe.ok) {
+        setBrokenSourceIds((prev) => {
+          const next = new Set(prev);
+          next.add(doc.id);
+          return next;
+        });
+      }
+    } catch (err) {
+      setTroubleshootProbe({
+        ok: false,
+        status: 0,
+        detail: err?.message || "Could not check the source file.",
+      });
+      setBrokenSourceIds((prev) => {
+        const next = new Set(prev);
+        next.add(doc.id);
+        return next;
+      });
+    } finally {
+      setTroubleshootProbing(false);
+    }
+  }
+
+  const sourceProbeKey = useMemo(() => {
+    if (!isHostedAnalysis() || !caseData?.id) return "";
+    return (docs || [])
+      .filter((d) => d?.id && !d.pending_upload && d.has_source && !d.source_missing)
+      .slice(0, 12)
+      .map((d) => d.id)
+      .join(",");
+  }, [caseData?.id, docs]);
+
+  useEffect(() => {
+    setBrokenSourceIds(new Set());
+    setTroubleshootDocId(null);
+    setTroubleshootProbe(null);
+  }, [caseData?.id]);
+
+  // Soft-check a sample of "has_source" docs so orphaned S3 keys surface Troubleshoot
+  // without downloading full PDFs (Range bytes=0-7 only).
+  useEffect(() => {
+    if (!sourceProbeKey || caseData?.archived_at) return undefined;
+    const ids = sourceProbeKey.split(",").filter(Boolean);
+    if (!ids.length) return undefined;
+    let cancelled = false;
+    (async () => {
+      const found = [];
+      for (const id of ids) {
+        if (cancelled) return;
+        try {
+          const probe = await verifyMatterDocumentSource(caseData.id, id);
+          if (!probe.ok) found.push(id);
+        } catch {
+          found.push(id);
+        }
+        await new Promise((r) => setTimeout(r, 80));
+      }
+      if (cancelled || !found.length) return;
+      setBrokenSourceIds((prev) => {
+        const next = new Set(prev);
+        found.forEach((docId) => next.add(docId));
+        return next;
+      });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [sourceProbeKey, caseData?.id, caseData?.archived_at]);
+
   const missingCacheCount = cacheCoverage?.missing?.length || 0;
 
   async function refreshCacheCoverage() {
@@ -3847,6 +4030,22 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
             <button className="btn gold" type="button" disabled={busy} onClick={retryFailedUploads}>
               Retry failed
             </button>
+          </div>
+        )}
+        {!caseData.archived_at &&
+          isHostedAnalysis() &&
+          (brokenSourceIds.size > 0 ||
+            docs.some((d) => d.source_missing || d.has_source === false)) && (
+          <div className="banner scan-backlog warn">
+            <div>
+              <strong>Some exhibit files need attention</strong>
+              <p className="footnote" style={{ margin: "4px 0 0" }}>
+                {brokenSourceIds.size > 0
+                  ? "A few are marked present but the PDF is not actually on the server. "
+                  : "Some originals are not kept on the server. "}
+                Use Troubleshoot on a row for a calm check, then re-upload if needed.
+              </p>
+            </div>
           </div>
         )}
         {!caseData.archived_at && waitingDocs.length > 0 && (
@@ -4440,6 +4639,16 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
                         Locate
                       </button>
                     ) : null}
+                    {docNeedsTroubleshoot(doc) && !scanningNow && !pendingOnly ? (
+                      <button
+                        className="btn secondary"
+                        type="button"
+                        title="See why this file may need attention"
+                        onClick={() => openTroubleshoot(doc)}
+                      >
+                        <CircleHelp size={14} aria-hidden /> Troubleshoot
+                      </button>
+                    ) : null}
                     {hasReport &&
                       !scanningNow &&
                       !pendingOnly &&
@@ -4498,6 +4707,93 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
         </>
         )}
       </div>
+
+      {troubleshootDocId ? (() => {
+        const tdoc = docs.find((d) => d.id === troubleshootDocId);
+        if (!tdoc) return null;
+        const rows = buildTroubleshootRows(tdoc, troubleshootProbe);
+        const needsUpload =
+          tdoc.source_missing ||
+          tdoc.has_source === false ||
+          (troubleshootProbe && !troubleshootProbe.ok);
+        return (
+          <div className="troubleshoot-panel" role="dialog" aria-labelledby="troubleshoot-title">
+            <div className="troubleshoot-panel-head">
+              <div>
+                <h3 id="troubleshoot-title">File check</h3>
+                <p className="footnote">
+                  {(tdoc.display_name || tdoc.original_filename || "This exhibit").slice(0, 120)}
+                </p>
+              </div>
+              <button
+                type="button"
+                className="btn secondary"
+                aria-label="Close"
+                onClick={() => {
+                  setTroubleshootDocId(null);
+                  setTroubleshootProbe(null);
+                }}
+              >
+                <X size={14} aria-hidden />
+              </button>
+            </div>
+            <ul className="troubleshoot-list">
+              {rows.map((row) => (
+                <li key={row.label}>
+                  <span className="troubleshoot-label">{row.label}</span>
+                  <span className="troubleshoot-value">{row.value}</span>
+                  {row.hint ? <span className="footnote">{row.hint}</span> : null}
+                </li>
+              ))}
+              {troubleshootProbing ? (
+                <li>
+                  <span className="troubleshoot-label">File check</span>
+                  <span className="troubleshoot-value">Checking…</span>
+                </li>
+              ) : null}
+            </ul>
+            <div className="troubleshoot-actions">
+              {needsUpload ? (
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => {
+                    setTroubleshootDocId(null);
+                    inputRef.current?.click();
+                  }}
+                >
+                  Re-upload PDF
+                </button>
+              ) : null}
+              {docNeedsLocate(tdoc) ? (
+                <button
+                  type="button"
+                  className="btn secondary"
+                  disabled={locatingFiles}
+                  onClick={() => {
+                    locateOneDoc(tdoc);
+                  }}
+                >
+                  Locate on this computer
+                </button>
+              ) : null}
+              {!needsUpload && !docNeedsLocate(tdoc) ? (
+                <button
+                  type="button"
+                  className="btn secondary"
+                  disabled={Boolean(busy)}
+                  onClick={() => {
+                    setTroubleshootDocId(null);
+                    rescan(tdoc);
+                  }}
+                >
+                  Re-scan
+                </button>
+              ) : null}
+            </div>
+          </div>
+        );
+      })() : null}
 
       <details className="case-chat-panel">
         <summary>
