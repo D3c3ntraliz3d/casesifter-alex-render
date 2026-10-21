@@ -2050,6 +2050,8 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
     issue: "",
   });
   const [uploadNote, setUploadNote] = useState("");
+  /** One calm banner when a multi-file upload batch finishes (not per-file, not scan-done). */
+  const [uploadBatchNotice, setUploadBatchNotice] = useState(null);
   const [indexMismatchNote, setIndexMismatchNote] = useState("");
   const [scanBacklogError, setScanBacklogError] = useState("");
   const [selectedDocs, setSelectedDocs] = useState(() => new Set());
@@ -2397,7 +2399,40 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
   useEffect(() => {
     setCacheBannerDismissed(false);
     setLocateNote("");
+    setUploadBatchNotice(null);
   }, [caseData.id]);
+
+  function notifyUploadBatchComplete({ uploaded = 0, failed = 0, skipped = 0, scansQueued = false } = {}) {
+    // Single notice for the whole drop/select batch — never toast per file.
+    const parts = [];
+    if (uploaded > 0) {
+      parts.push(
+        `${uploaded} document${uploaded === 1 ? "" : "s"} uploaded`
+      );
+    }
+    if (failed > 0) {
+      parts.push(`${failed} failed`);
+    }
+    if (skipped > 0 && uploaded === 0 && failed === 0) {
+      parts.push(
+        `Nothing new — ${skipped} already on this matter`
+      );
+    } else if (skipped > 0) {
+      parts.push(`${skipped} already on this matter`);
+    }
+    if (!parts.length) return;
+    const title = parts.join(", ");
+    const detail = scansQueued
+      ? "File transfer finished. Analysis runs in the background — you can keep working on this matter."
+      : uploaded > 0
+        ? "Files are on this matter. Use Scan if a row is still waiting."
+        : "Use Re-scan on an existing row if you meant to run analysis again.";
+    setUploadBatchNotice({
+      tone: failed > 0 && uploaded === 0 ? "warn" : failed > 0 ? "warn" : "ok",
+      title,
+      detail,
+    });
+  }
 
   useEffect(() => {
     if (!isHostedAnalysis() || !docs.length) {
@@ -3001,6 +3036,7 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
       try {
         onError("");
         setScanBacklogError("");
+        setUploadBatchNotice(null);
         const added = await pickDesktopDocuments(caseData.id);
         const picked = Array.isArray(added) ? added : [];
         if (!picked.length) {
@@ -3008,6 +3044,10 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
           setBusy(false);
           return;
         }
+        notifyUploadBatchComplete({
+          uploaded: picked.length,
+          scansQueued: true,
+        });
         setUploadNote(
           `Saved ${picked.length} file${picked.length === 1 ? "" : "s"} on this PC. Analysis started (2 at a time)…`
         );
@@ -3064,6 +3104,7 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
     if (isHostedAnalysis()) {
       setBusy(true);
       setFailedBatch([]);
+      setUploadBatchNotice(null);
       // Pin matter id for the whole batch — do not read caseData.id mid-poll
       // (refresh can replace the object and drop uploads onto a stale id).
       const matterId = caseData.id;
@@ -3185,24 +3226,22 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
         }
         setBusy(false);
         setFailedBatch(queueFailed.map((f) => f.file));
+        notifyUploadBatchComplete({
+          uploaded: pending.length,
+          failed: queueFailed.length,
+          skipped: skippedDupes,
+          scansQueued: pending.length > 0,
+        });
         const dupeNote = skippedDupes
           ? ` Skipped ${skippedDupes} duplicate file${skippedDupes === 1 ? "" : "s"} (already on this matter — use Re-scan).`
           : "";
-        if (queueFailed.length) {
+        if (queueFailed.length && !pending.length) {
           onError(
-            pending.length
-              ? `Queued ${pending.length}. Upload failed: ${queueFailed
-                  .map((f) => `${f.file.name}: ${f.error}`)
-                  .join(" · ")}`
-              : `None of ${valid.length} files uploaded. ${queueFailed
-                  .map((f) => `${f.file.name}: ${f.error}`)
-                  .join(" · ")}`
+            `None of ${valid.length} files uploaded. ${queueFailed
+              .map((f) => `${f.file.name}: ${f.error}`)
+              .join(" · ")}`
           );
-          setUploadNote(
-            pending.length
-              ? `Queued ${pending.length} — scanning in the background. ${queueFailed.length} need Retry failed.${dupeNote}`
-              : `Upload failed.${dupeNote}`
-          );
+          setUploadNote(`Upload failed.${dupeNote}`);
         } else if (!pending.length && skippedDupes) {
           onError("");
           setUploadNote(
@@ -3211,7 +3250,9 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
         } else {
           onError("");
           setUploadNote(
-            `Queued ${pending.length} file${pending.length === 1 ? "" : "s"} — scanning in the background. Stay on this matter.${dupeNote}`
+            pending.length
+              ? `Upload complete — ${pending.length} scanning in the background.${dupeNote}`
+              : ""
           );
         }
       } finally {
@@ -3221,6 +3262,7 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
       return;
     }
 
+    setUploadBatchNotice(null);
     const failed = [];
     const scanIssues = [];
     let added = 0;
@@ -3246,23 +3288,29 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
     } catch {
       // Keep going even if the case refresh drops.
     }
+    notifyUploadBatchComplete({
+      uploaded: added,
+      failed: failed.length,
+      scansQueued: queued > 0,
+    });
     const problems = [...failed, ...scanIssues];
-    if (problems.length) {
-      onError(
-        added
-          ? `Added ${added} of ${valid.length}. Issues: ${problems.join(" · ")}`
-          : `None of ${valid.length} files were added. ${problems.join(" · ")}`
-      );
+    if (failed.length && !added) {
+      onError(`None of ${valid.length} files were added. ${failed.join(" · ")}`);
     } else {
       onError("");
     }
     setUploadNote(
       added
         ? queued
-          ? `Added ${added} file${added === 1 ? "" : "s"}. ${queued} scan${queued === 1 ? "" : "s"} running in the background.`
-          : `Added ${added} file${added === 1 ? "" : "s"}. Use Scan if a file stayed on uploaded.`
+          ? `Upload complete — ${queued} scan${queued === 1 ? "" : "s"} running in the background.`
+          : `Upload complete. Use Scan if a file stayed on uploaded.`
         : ""
     );
+    if (problems.length && added) {
+      setUploadNote((prev) =>
+        `${prev} Issues: ${problems.slice(0, 2).join(" · ")}${problems.length > 2 ? "…" : ""}`.trim()
+      );
+    }
     if (inputRef.current) inputRef.current.value = "";
   }
 
@@ -3746,6 +3794,29 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
         )}
         {uploadNote && <p className="footnote">{uploadNote}</p>}
         {locateNote && <p className="footnote">{locateNote}</p>}
+        {uploadBatchNotice && !caseData.archived_at && (
+          <div
+            className={`banner scan-backlog${uploadBatchNotice.tone === "warn" ? " warn" : " ok"}`}
+            role="status"
+            aria-live="polite"
+          >
+            <div>
+              <strong>{uploadBatchNotice.title}</strong>
+              {uploadBatchNotice.detail ? (
+                <p className="footnote" style={{ margin: "4px 0 0" }}>
+                  {uploadBatchNotice.detail}
+                </p>
+              ) : null}
+            </div>
+            <button
+              className="btn secondary"
+              type="button"
+              onClick={() => setUploadBatchNotice(null)}
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
         {indexMismatchNote && !caseData.archived_at && (
           <div className="banner scan-backlog warn" role="status">
             <div>

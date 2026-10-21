@@ -358,6 +358,11 @@ h1, h2, h3, .serif {
   border-color: var(--line);
   border-left-color: #c48a2e;
 }
+.banner.scan-backlog.ok {
+  background: #f5faf8;
+  border-color: var(--line);
+  border-left-color: var(--teal, #2a7a66);
+}
 .banner.scan-backlog strong {
   display: block;
   font-size: 13px;
