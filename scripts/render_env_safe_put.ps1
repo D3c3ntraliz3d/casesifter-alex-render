@@ -92,7 +92,7 @@ else {
 
 $current = @(Get-AllEnvVars $ServiceId)
 if ($current.Count -eq 0) {
-  throw "GET returned 0 env vars for $ServiceId — refusing PUT (would wipe). Check service id / pagination."
+  throw "GET returned 0 env vars for $ServiceId - refusing PUT (would wipe). Check service id / pagination."
 }
 
 $beforeKeys = @($current | ForEach-Object { $_.key } | Sort-Object -Unique)

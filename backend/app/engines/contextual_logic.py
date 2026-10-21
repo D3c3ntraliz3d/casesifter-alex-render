@@ -503,6 +503,22 @@ def _run(
     *,
     scan_profile: str = "forensic",
 ) -> tuple[list[Finding], dict[str, Any]]:
+    from app.gemini_tasks import exhibit_models_for_profile, gemini_model_lane
+
+    # Exhibits (forensic) → best TASK_* models; pleadings/packaging → GEMINI_LIGHT_*.
+    with gemini_model_lane(exhibit=exhibit_models_for_profile(scan_profile)):
+        return _run_with_model_lane(
+            text, doc_meta, source_file, scan_profile=scan_profile
+        )
+
+
+def _run_with_model_lane(
+    text: str,
+    doc_meta: dict[str, Any],
+    source_file: Path | None,
+    *,
+    scan_profile: str = "forensic",
+) -> tuple[list[Finding], dict[str, Any]]:
     court_filing = scan_profile == PROFILE_COURT_FILING
     filename = str((doc_meta or {}).get("filename") or "")
     doc_kind = str((doc_meta or {}).get("doc_kind") or "") or None
@@ -533,6 +549,8 @@ def _run(
         "document_analysis": "disabled",
         "provider": None,
         "scan_profile": scan_profile,
+        # forensic → exhibit (TASK_* best); court_filing → light (GEMINI_LIGHT_*).
+        "gemini_model_lane": "light" if court_filing else "exhibit",
         "gemini_usage": {
             "prompt_tokens": 0,
             "candidates_tokens": 0,

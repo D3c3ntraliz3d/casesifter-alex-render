@@ -588,14 +588,18 @@ def run_gemini_stage(
             percent=93,
             message="Checking claims against hard evidence in this case…",
         )
-        gotchas, gotcha_log = find_gotchas(
-            case_id=case_id,
-            document_id=document_id,
-            display_name=name,
-            doc_kind=doc_kind,
-            text=full_text,
-            current_findings=findings,
-        )
+        from app.gemini_tasks import exhibit_models_for_profile, gemini_model_lane
+
+        # Pleadings / packaging → light Gemini; exhibits → best TASK_* matrix.
+        with gemini_model_lane(exhibit=exhibit_models_for_profile(profile)):
+            gotchas, gotcha_log = find_gotchas(
+                case_id=case_id,
+                document_id=document_id,
+                display_name=name,
+                doc_kind=doc_kind,
+                text=full_text,
+                current_findings=findings,
+            )
         findings.extend(gotchas)
         timing_bits = []
         mm = (contextual.extras or {}).get("multimodal_ms")

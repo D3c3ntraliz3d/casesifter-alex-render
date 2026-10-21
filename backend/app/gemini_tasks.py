@@ -1,10 +1,17 @@
 """Per-task Gemini model config (extract / entity / contra / visual).
 
+Two lanes (selected from scan profile):
+
+- **Exhibit / forensic** — ``TASK_*`` primary/backup/thinking (best available).
+- **Non-exhibit / court_filing** — ``GEMINI_LIGHT_*`` (cheapest/lightest).
+
 Env overrides (examples)::
 
-    TASK_A_EXTRACT_PRIMARY=gemini-3.6-flash
-    TASK_A_EXTRACT_BACKUP=gemini-3.5-flash-lite
-    TASK_A_EXTRACT_THINKING_LEVEL=minimal
+    TASK_D_VISUAL_PRIMARY=gemini-3.8-flash
+    TASK_D_VISUAL_THINKING_LEVEL=medium
+    GEMINI_LIGHT_PRIMARY=gemini-3.5-flash-lite
+    GEMINI_LIGHT_BACKUP=gemini-3.5-flash-lite
+    GEMINI_LIGHT_THINKING_LEVEL=minimal
     GEMINI_SERVICE_TIER=standard   # or priority (Task A only)
 """
 
@@ -13,7 +20,11 @@ from __future__ import annotations
 import logging
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
+from typing import Iterator
+
 from app.config import gemini_model_is_valid, settings
 
 logger = logging.getLogger(__name__)
@@ -34,6 +45,10 @@ VALID_SERVICE_TIERS = frozenset({"standard", "priority", "flex"})
 # models.get probe
 _MODELS_GET_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}"
 
+# Default True so startup probes / chat / callers without a scan profile keep
+# the exhibit (best) matrix. Pipeline + contextual_logic set False for court_filing.
+_exhibit_models: ContextVar[bool] = ContextVar("gemini_exhibit_models", default=True)
+
 
 @dataclass(frozen=True)
 class GeminiTaskConfig:
@@ -41,6 +56,26 @@ class GeminiTaskConfig:
     primary: str
     backup: str
     thinking_level: str
+    lane: str = "exhibit"  # exhibit | light
+
+
+def exhibit_models_for_profile(scan_profile: str | None) -> bool:
+    """True when the scan lane should burn best models (forensic exhibits)."""
+    return (scan_profile or "").strip().lower() != "court_filing"
+
+
+def current_exhibit_models() -> bool:
+    return bool(_exhibit_models.get())
+
+
+@contextmanager
+def gemini_model_lane(*, exhibit: bool) -> Iterator[None]:
+    """Bind best vs light model matrix for the current scan / AI call stack."""
+    token = _exhibit_models.set(bool(exhibit))
+    try:
+        yield
+    finally:
+        _exhibit_models.reset(token)
 
 
 def _level(raw: str | None, default: str) -> str:
@@ -85,6 +120,7 @@ def _task(
     primary: str,
     backup: str,
     thinking_level: str,
+    lane: str,
 ) -> GeminiTaskConfig:
     # Validate against both primary and backup — either may receive the level.
     thinking_level_for_model(primary, thinking_level)
@@ -94,19 +130,36 @@ def _task(
         primary=primary,
         backup=backup,
         thinking_level=thinking_level,
+        lane=lane,
     )
 
 
-def task_config(task: str) -> GeminiTaskConfig:
+def task_config(task: str, *, exhibit: bool | None = None) -> GeminiTaskConfig:
+    """Return primary/backup/thinking for a task.
+
+    ``exhibit=True`` (default / forensic profile) uses ``TASK_*`` best models.
+    ``exhibit=False`` (court_filing / non-exhibit) uses ``GEMINI_LIGHT_*``.
+    When ``exhibit`` is omitted, the active ``gemini_model_lane`` context is used.
+    """
     key = (task or "").strip().lower()
     if key not in VALID_TASKS:
         raise ValueError(f"unknown gemini task={task!r}")
+    use_exhibit = current_exhibit_models() if exhibit is None else bool(exhibit)
+    if not use_exhibit:
+        return _task(
+            key,
+            primary=_model(settings.gemini_light_primary, label="GEMINI_LIGHT_PRIMARY"),
+            backup=_model(settings.gemini_light_backup, label="GEMINI_LIGHT_BACKUP"),
+            thinking_level=_level(settings.gemini_light_thinking_level, "minimal"),
+            lane="light",
+        )
     if key == TASK_A_EXTRACT:
         return _task(
             key,
             primary=_model(settings.task_a_extract_primary, label="TASK_A_EXTRACT_PRIMARY"),
             backup=_model(settings.task_a_extract_backup, label="TASK_A_EXTRACT_BACKUP"),
             thinking_level=_level(settings.task_a_extract_thinking_level, "minimal"),
+            lane="exhibit",
         )
     if key == TASK_B_ENTITY:
         return _task(
@@ -114,6 +167,7 @@ def task_config(task: str) -> GeminiTaskConfig:
             primary=_model(settings.task_b_entity_primary, label="TASK_B_ENTITY_PRIMARY"),
             backup=_model(settings.task_b_entity_backup, label="TASK_B_ENTITY_BACKUP"),
             thinking_level=_level(settings.task_b_entity_thinking_level, "minimal"),
+            lane="exhibit",
         )
     if key == TASK_C_CONTRA:
         return _task(
@@ -121,26 +175,29 @@ def task_config(task: str) -> GeminiTaskConfig:
             primary=_model(settings.task_c_contra_primary, label="TASK_C_CONTRA_PRIMARY"),
             backup=_model(settings.task_c_contra_backup, label="TASK_C_CONTRA_BACKUP"),
             thinking_level=_level(settings.task_c_contra_thinking_level, "minimal"),
+            lane="exhibit",
         )
     return _task(
         key,
         primary=_model(settings.task_d_visual_primary, label="TASK_D_VISUAL_PRIMARY"),
         backup=_model(settings.task_d_visual_backup, label="TASK_D_VISUAL_BACKUP"),
         thinking_level=_level(settings.task_d_visual_thinking_level, "minimal"),
+        lane="exhibit",
     )
 
 
-def all_task_configs() -> list[GeminiTaskConfig]:
-    return [task_config(t) for t in sorted(VALID_TASKS)]
+def all_task_configs(*, exhibit: bool = True) -> list[GeminiTaskConfig]:
+    return [task_config(t, exhibit=exhibit) for t in sorted(VALID_TASKS)]
 
 
 def configured_model_ids() -> list[str]:
-    """Unique primary + backup model ids across all tasks."""
+    """Unique primary + backup model ids across exhibit and light lanes."""
     seen: list[str] = []
-    for cfg in all_task_configs():
-        for mid in (cfg.primary, cfg.backup):
-            if mid not in seen:
-                seen.append(mid)
+    for exhibit in (True, False):
+        for cfg in all_task_configs(exhibit=exhibit):
+            for mid in (cfg.primary, cfg.backup):
+                if mid not in seen:
+                    seen.append(mid)
     return seen
 
 
@@ -155,7 +212,10 @@ def service_tier_for_task(task: str) -> str:
 
     JSON body uses snake_case ``service_tier``. Omitted = standard.
     Priority / flex testing is gated to Task A only (scans stay on generateContent, not Batch).
+    Light (non-exhibit) lane never requests priority — keep pleadings cheap.
     """
+    if not current_exhibit_models():
+        return ""
     raw = (settings.gemini_service_tier or "standard").strip().lower()
     if raw not in VALID_SERVICE_TIERS:
         raise ValueError(
@@ -181,11 +241,12 @@ def validate_gemini_task_settings() -> list[str]:
             )
     except Exception as exc:
         errors.append(str(exc))
-    for task in sorted(VALID_TASKS):
-        try:
-            task_config(task)
-        except ValueError as exc:
-            errors.append(str(exc))
+    for exhibit in (True, False):
+        for task in sorted(VALID_TASKS):
+            try:
+                task_config(task, exhibit=exhibit)
+            except ValueError as exc:
+                errors.append(str(exc))
     return errors
 
 
@@ -204,7 +265,7 @@ def probe_configured_models(*, timeout_s: float = 15.0) -> dict[str, bool]:
         else:
             logger.error(
                 "GEMINI MODEL MISSING OR UNREACHABLE: models.get failed for %s — "
-                "fix TASK_* primary/backup env or Google model availability",
+                "fix TASK_* / GEMINI_LIGHT_* env or Google model availability",
                 model,
             )
     return results
@@ -239,17 +300,19 @@ def startup_validate_and_probe() -> None:
         for err in errors:
             logger.error("GEMINI TASK CONFIG INVALID: %s", err)
     else:
-        for cfg in all_task_configs():
-            logger.info(
-                "gemini task=%s primary=%s backup=%s thinking_level=%s",
-                cfg.task,
-                cfg.primary,
-                cfg.backup,
-                cfg.thinking_level,
-            )
+        for exhibit, label in ((True, "exhibit"), (False, "light")):
+            for cfg in all_task_configs(exhibit=exhibit):
+                logger.info(
+                    "gemini lane=%s task=%s primary=%s backup=%s thinking_level=%s",
+                    label,
+                    cfg.task,
+                    cfg.primary,
+                    cfg.backup,
+                    cfg.thinking_level,
+                )
         tier = (settings.gemini_service_tier or "standard").strip().lower()
         logger.info(
-            "gemini service_tier=%s (applied to Task A extract only; omit=standard)",
+            "gemini service_tier=%s (exhibit Task A only; light lane omits priority)",
             tier,
         )
     if (settings.gemini_api_key or "").strip():

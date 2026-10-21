@@ -57,7 +57,7 @@ services:
         value: "true"
       - key: OCR_MAX_PAGES
         value: "40"
-      # Per-task Gemini models (no gemini-2.0-flash). Match Render dashboard.
+      # Exhibit lane = TASK_* (best). Non-exhibit = GEMINI_LIGHT_* (cheapest).
       - key: TASK_A_EXTRACT_PRIMARY
         value: "gemini-3.6-flash"
       - key: TASK_A_EXTRACT_BACKUP
@@ -65,22 +65,28 @@ services:
       - key: TASK_A_EXTRACT_THINKING_LEVEL
         value: "minimal"
       - key: TASK_B_ENTITY_PRIMARY
-        value: "gemini-3.6-flash"
+        value: "gemini-3.8-flash"
       - key: TASK_B_ENTITY_BACKUP
-        value: "gemini-3.5-flash-lite"
+        value: "gemini-3.6-flash"
       - key: TASK_B_ENTITY_THINKING_LEVEL
-        value: "minimal"
+        value: "medium"
       - key: TASK_C_CONTRA_PRIMARY
-        value: "gemini-3.6-flash"
+        value: "gemini-3.8-flash"
       - key: TASK_C_CONTRA_BACKUP
-        value: "gemini-3.5-flash-lite"
-      - key: TASK_C_CONTRA_THINKING_LEVEL
-        value: "minimal"
-      - key: TASK_D_VISUAL_PRIMARY
         value: "gemini-3.6-flash"
+      - key: TASK_C_CONTRA_THINKING_LEVEL
+        value: "high"
+      - key: TASK_D_VISUAL_PRIMARY
+        value: "gemini-3.8-flash"
       - key: TASK_D_VISUAL_BACKUP
         value: "gemini-3.5-flash-lite"
       - key: TASK_D_VISUAL_THINKING_LEVEL
+        value: "medium"
+      - key: GEMINI_LIGHT_PRIMARY
+        value: "gemini-3.5-flash-lite"
+      - key: GEMINI_LIGHT_BACKUP
+        value: "gemini-3.5-flash-lite"
+      - key: GEMINI_LIGHT_THINKING_LEVEL
         value: "minimal"
       - key: GEMINI_SERVICE_TIER
         value: "standard"
@@ -200,7 +206,7 @@ services:
       # Pipeline settings (same values as the analysis service).
       - key: GEMINI_API_KEY
         sync: false
-      # Per-task Gemini models (no gemini-2.0-flash). Same as casesifter-analysis.
+      # Exhibit lane = TASK_* (best). Non-exhibit = GEMINI_LIGHT_* (cheapest).
       - key: TASK_A_EXTRACT_PRIMARY
         value: "gemini-3.6-flash"
       - key: TASK_A_EXTRACT_BACKUP
@@ -208,22 +214,28 @@ services:
       - key: TASK_A_EXTRACT_THINKING_LEVEL
         value: "minimal"
       - key: TASK_B_ENTITY_PRIMARY
-        value: "gemini-3.6-flash"
+        value: "gemini-3.8-flash"
       - key: TASK_B_ENTITY_BACKUP
-        value: "gemini-3.5-flash-lite"
+        value: "gemini-3.6-flash"
       - key: TASK_B_ENTITY_THINKING_LEVEL
-        value: "minimal"
+        value: "medium"
       - key: TASK_C_CONTRA_PRIMARY
-        value: "gemini-3.6-flash"
+        value: "gemini-3.8-flash"
       - key: TASK_C_CONTRA_BACKUP
-        value: "gemini-3.5-flash-lite"
-      - key: TASK_C_CONTRA_THINKING_LEVEL
-        value: "minimal"
-      - key: TASK_D_VISUAL_PRIMARY
         value: "gemini-3.6-flash"
+      - key: TASK_C_CONTRA_THINKING_LEVEL
+        value: "high"
+      - key: TASK_D_VISUAL_PRIMARY
+        value: "gemini-3.8-flash"
       - key: TASK_D_VISUAL_BACKUP
         value: "gemini-3.5-flash-lite"
       - key: TASK_D_VISUAL_THINKING_LEVEL
+        value: "medium"
+      - key: GEMINI_LIGHT_PRIMARY
+        value: "gemini-3.5-flash-lite"
+      - key: GEMINI_LIGHT_BACKUP
+        value: "gemini-3.5-flash-lite"
+      - key: GEMINI_LIGHT_THINKING_LEVEL
         value: "minimal"
       - key: GEMINI_SERVICE_TIER
         value: "standard"
