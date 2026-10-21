@@ -1423,7 +1423,13 @@ def aggregate_fact_conflicts(snapshots: list[dict[str, Any]]) -> list[dict[str, 
                 },
             )
             if not any(doc.get("document_id") == doc_id for doc in bucket["documents"]):
-                bucket["documents"].append({"document_id": doc_id, "display_name": name})
+                doc_ref = {"document_id": doc_id, "display_name": name}
+                if fact.get("page") is not None:
+                    try:
+                        doc_ref["page"] = int(fact["page"])
+                    except (TypeError, ValueError):
+                        pass
+                bucket["documents"].append(doc_ref)
         if len(variants) < 2:
             continue
         flagged = False

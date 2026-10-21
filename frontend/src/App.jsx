@@ -589,6 +589,7 @@ export default function App() {
   const [caseId, setCaseId] = useState(() => bootRoute.matterId || null);
   const [caseData, setCaseData] = useState(null);
   const [selectedDocId, setSelectedDocId] = useState(() => bootRoute.docId || null);
+  const [reportFocusPage, setReportFocusPage] = useState(null);
   const [job, setJob] = useState(null);
   const [tab, setTab] = useState("summary");
   const [error, setError] = useState("");
@@ -1059,8 +1060,10 @@ export default function App() {
     if (!doc?.id) return;
     const historyMode = opts.history === false ? "none" : opts.history === "replace" ? "replace" : "push";
     const matter = caseId || caseData?.id;
+    const focusPage = normalizePageNum(opts.page);
     setSelectedDocId(doc.id);
-    setTab("summary");
+    setReportFocusPage(focusPage);
+    setTab(focusPage != null ? "source" : "summary");
     if (isDesktopApp()) {
       const report = await getDesktopReport(matter, doc.id);
       if (!report) {
@@ -1579,6 +1582,7 @@ export default function App() {
                 || job.filename
               }
               documents={caseData?.documents || []}
+              initialPage={reportFocusPage}
               onOpenReport={openDocumentReport}
               onError={setError}
             />
@@ -4602,6 +4606,34 @@ function pickBoardField(item, ...keys) {
   return "";
 }
 
+/** 1-based PDF page, or null when the finding has no real page anchor. */
+function normalizePageNum(raw) {
+  if (raw == null || raw === "") return null;
+  const n = Math.max(1, Number(raw) || 0);
+  return n || null;
+}
+
+function findingRefs(item) {
+  const ev = item?.evidence && typeof item.evidence === "object" ? item.evidence : {};
+  return Array.isArray(ev.refs) ? ev.refs.filter((r) => r && typeof r === "object") : [];
+}
+
+/** Prefer a ref matching documentId; else top-level / evidence page. Never invents a page. */
+function resolveFindingPage(item, documentId = null) {
+  const ev = item?.evidence && typeof item.evidence === "object" ? item.evidence : {};
+  const refs = findingRefs(item);
+  if (documentId) {
+    const match = refs.find(
+      (r) => String(r.document_id || "") === String(documentId) && r.page != null && r.page !== "",
+    );
+    if (match) return normalizePageNum(match.page);
+  }
+  const fromRef = refs.find((r) => r.page != null && r.page !== "");
+  return normalizePageNum(
+    item?.page ?? ev.page ?? ev.evidence_page ?? fromRef?.page,
+  );
+}
+
 function relatedDocs(item, documents) {
   const fromApi = item.related_documents || [];
   if (fromApi.length) {
@@ -4911,6 +4943,47 @@ function CaseGotchaBoard({
     );
   }
 
+  function openSourceAtPage(doc, page) {
+    if (!doc || typeof onOpenReport !== "function") return;
+    const p = normalizePageNum(page);
+    onOpenReport(doc, p != null ? { page: p } : {});
+  }
+
+  function pageFromVariants(item, documentId) {
+    for (const variant of item?.variants || []) {
+      for (const doc of variant.documents || []) {
+        if (String(doc.document_id || "") === String(documentId)) {
+          const p = normalizePageNum(doc.page);
+          if (p != null) return p;
+        }
+      }
+    }
+    return null;
+  }
+
+  function sourceOpenButtons(item, sources) {
+    return sources.map((doc) => {
+      const id = doc.id || doc.document_id;
+      const live = documents.find((d) => d.id === id);
+      if (!live) return null;
+      const page = resolveFindingPage(item, id)
+        || pageFromVariants(item, id)
+        || normalizePageNum(doc.page);
+      const name = live.display_name || live.original_filename || "document";
+      return (
+        <button
+          key={id}
+          className="btn gold"
+          type="button"
+          onClick={() => openSourceAtPage(live, page)}
+          title={page != null ? `Open source at page ${page}` : "Open scan report"}
+        >
+          {page != null ? `Open ${name} · p.${page}` : `Open ${name}`}
+        </button>
+      );
+    });
+  }
+
   function renderRowDetail(row) {
     const { item, kind, tainted } = row;
     const sources = relatedDocs(item, documents);
@@ -4930,9 +5003,9 @@ function CaseGotchaBoard({
     const factNamed = pickBoardField(item, "fact_named");
     const whySuspicious = pickBoardField(item, "why_suspicious");
     const selfUndercut = Boolean(item.self_undercut || item.evidence?.self_undercut);
-    const pageRaw = item.page ?? item.evidence?.page ?? item.evidence?.evidence_page;
-    const pageNum = pageRaw != null && pageRaw !== ""
-      ? Math.max(1, Number(pageRaw) || 0) || null
+    const pageNum = resolveFindingPage(item);
+    const primarySource = sources[0]
+      ? documents.find((d) => d.id === (sources[0].id || sources[0].document_id))
       : null;
 
     const whyLine = attorneyWhy
@@ -4948,7 +5021,12 @@ function CaseGotchaBoard({
               <strong>{variant.display}:</strong>
               {variant.quote ? ` “${variant.quote}”` : ""}
               {" — "}
-              {(variant.documents || []).map((doc) => doc.display_name).join("; ")}
+              {(variant.documents || []).map((doc) => {
+                const p = normalizePageNum(doc.page);
+                return p != null
+                  ? `${doc.display_name} (p.${p})`
+                  : doc.display_name;
+              }).join("; ")}
             </p>
           ))}
           {(item.attorney_why || bodyFallback) && (
@@ -4958,16 +5036,7 @@ function CaseGotchaBoard({
             <p className="footnote">Open the scan report for details on this interrupt.</p>
           )}
           <div className="gotcha-row-actions">
-            {sources.map((doc) => {
-              const id = doc.id || doc.document_id;
-              const live = documents.find((d) => d.id === id);
-              if (!live) return null;
-              return (
-                <button key={id} className="btn gold" type="button" onClick={() => onOpenReport(live)}>
-                  Open {live.display_name || live.original_filename}
-                </button>
-              );
-            })}
+            {sourceOpenButtons(item, sources)}
             {renderFeedbackActions(row)}
           </div>
         </>
@@ -5002,23 +5071,33 @@ function CaseGotchaBoard({
           <p className="footnote">This party’s own record appears to undercut their claim.</p>
         ) : null}
         {pageNum != null ? (
-          <p className="footnote">Page {pageNum}</p>
+          <p className="footnote">
+            {primarySource ? (
+              <button
+                type="button"
+                className="linkish"
+                onClick={() => openSourceAtPage(primarySource, pageNum)}
+                title={`Open source at page ${pageNum}`}
+              >
+                Jump to page {pageNum}
+              </button>
+            ) : (
+              <>Page {pageNum}</>
+            )}
+          </p>
+        ) : (
+          <p className="footnote">Page not recorded for this interrupt</p>
+        )}
+        {showWhy ? (
+          <p className="gotcha-why">
+            <strong>Why it matters:</strong> {whyLine}
+          </p>
         ) : null}
-        {showWhy ? <p className="gotcha-why">{whyLine}</p> : null}
         {!claimQuote && !evidenceQuote && !bodyText && !showWhy ? (
           <p className="footnote">Open the scan report for details on this interrupt.</p>
         ) : null}
         <div className="gotcha-row-actions">
-          {sources.map((doc) => {
-            const id = doc.id || doc.document_id;
-            const live = documents.find((d) => d.id === id);
-            if (!live) return null;
-            return (
-              <button key={id} className="btn gold" type="button" onClick={() => onOpenReport(live)}>
-                Open {live.display_name || live.original_filename}
-              </button>
-            );
-          })}
+          {sourceOpenButtons(item, sources)}
           {renderFeedbackActions(row)}
         </div>
       </>
@@ -7219,6 +7298,7 @@ function ReportViewer({
   documentId,
   documentName,
   documents = [],
+  initialPage = null,
   onOpenReport,
   onError,
 }) {
@@ -7243,6 +7323,7 @@ function ReportViewer({
   const [locating, setLocating] = useState(false);
   const [exporting, setExporting] = useState("");
   const [showFullSummary, setShowFullSummary] = useState(false);
+  const [previewPage, setPreviewPage] = useState(() => normalizePageNum(initialPage));
   const moreMenuRef = useRef(null);
   const blobUrlRef = useRef(null);
   const topScanFindings = (report.top_findings || []).filter(
@@ -7281,11 +7362,25 @@ function ReportViewer({
   }, [documentId, job?.job_id]);
 
   useEffect(() => {
+    const page = normalizePageNum(initialPage);
+    setPreviewPage(page);
+    if (page != null) setTab("source");
+  }, [documentId, initialPage, setTab]);
+
+  function jumpToSourcePage(page) {
+    const p = normalizePageNum(page);
+    if (p == null) return;
+    setPreviewPage(p);
+    setTab("source");
+  }
+
+  useEffect(() => {
     let cancelled = false;
     (async () => {
       if (!docSha) {
         setSourceMissing(true);
         rememberBlobUrl(null);
+        setSourceLoading(false);
         return;
       }
       setSourceLoading(true);
@@ -7394,6 +7489,13 @@ function ReportViewer({
   return (
     <>
       <div className="card report-chrome">
+        <div className="report-brand">
+          <div className="seal report-seal" aria-hidden="true">CS</div>
+          <div>
+            <p className="report-brand-name">CaseSifter</p>
+            <p className="report-brand-tag">Find what matters in the record.</p>
+          </div>
+        </div>
         <div className="report-header">
           <div>
             <p className="kicker">Authenticity report</p>
@@ -7679,13 +7781,24 @@ function ReportViewer({
               ) : (
                 <ol className="report-scan-list">
                   {topScanFindings.slice(0, 5).map((item) => {
-                    const pageNum = item.page != null ? Math.max(1, Number(item.page) || 1) : null;
+                    const pageNum = resolveFindingPage(item);
                     return (
                       <li key={item.id}>
                         <span className={`sev ${item.severity}`}>{item.severity}</span>
                         <span className="report-scan-title">{item.title}</span>
                         {pageNum != null ? (
-                          <span className="footnote">p.{pageNum}</span>
+                          !sourceMissing && fileUrl ? (
+                            <button
+                              type="button"
+                              className="linkish report-scan-page"
+                              onClick={() => jumpToSourcePage(pageNum)}
+                              title={`Jump to page ${pageNum} in source`}
+                            >
+                              p.{pageNum}
+                            </button>
+                          ) : (
+                            <span className="footnote">p.{pageNum}</span>
+                          )
                         ) : null}
                       </li>
                     );
@@ -7794,7 +7907,14 @@ function ReportViewer({
                   {locateNote ? <p className="footnote" style={{ marginTop: 8 }}>{locateNote}</p> : null}
                 </div>
               ) : fileUrl ? (
-                <DocumentPreview url={fileUrl} isPdf={isPdf} isImage={isImage} isText={isText} name={documentName || ""} />
+                <DocumentPreview
+                  url={fileUrl}
+                  isPdf={isPdf}
+                  isImage={isImage}
+                  isText={isText}
+                  name={documentName || ""}
+                  page={previewPage}
+                />
               ) : (
                 <p className="empty-copy">
                   Findings are available. Link a local file with Locate to preview
@@ -7820,6 +7940,9 @@ function ReportViewer({
                     docKind={docKind}
                     siblings={visibleFindings}
                     caseId={caseId}
+                    docSha={docSha}
+                    canJumpToSource={!sourceMissing && Boolean(fileUrl)}
+                    onJumpToSourcePage={jumpToSourcePage}
                   />
                 ))}
               </div>
@@ -7849,6 +7972,9 @@ function ReportViewer({
                 docKind={docKind}
                 findings={visibleFindings}
                 reviewIncomplete={reviewDidNotComplete(report)}
+                docSha={docSha}
+                canJumpToSource={!sourceMissing && Boolean(fileUrl)}
+                onJumpToSourcePage={jumpToSourcePage}
               />
             </div>
           )}
@@ -8021,13 +8147,16 @@ function ReportViewer({
   );
 }
 
-function DocumentPreview({ url, isPdf, isImage, isText, name }) {
+function DocumentPreview({ url, isPdf, isImage, isText, name, page = null }) {
   if (isPdf) {
+    const pageNum = normalizePageNum(page);
+    const hash = pageNum != null ? `page=${pageNum}&view=FitH` : "view=FitH";
     return (
       <iframe
+        key={`${url}#${hash}`}
         className="doc-frame"
         title="Source document"
-        src={`${url}#view=FitH`}
+        src={`${url}#${hash}`}
       />
     );
   }
@@ -8108,7 +8237,15 @@ function resolveTaintedCopy(item, siblings = []) {
   };
 }
 
-function ReportFindingsList({ caseId, docKind, findings, reviewIncomplete = false }) {
+function ReportFindingsList({
+  caseId,
+  docKind,
+  findings,
+  reviewIncomplete = false,
+  docSha = null,
+  canJumpToSource = false,
+  onJumpToSourcePage = null,
+}) {
   const [showIgnored, setShowIgnored] = useState(false);
   const [rows, setRows] = useState(findings || []);
 
@@ -8155,6 +8292,9 @@ function ReportFindingsList({ caseId, docKind, findings, reviewIncomplete = fals
           docKind={docKind}
           siblings={rows}
           caseId={caseId}
+          docSha={docSha}
+          canJumpToSource={canJumpToSource}
+          onJumpToSourcePage={onJumpToSourcePage}
           onFeedbackChange={(nextItem) => {
             setRows((prev) =>
               prev.map((f) => (f.id === nextItem.id ? { ...f, ...nextItem } : f)),
@@ -8178,7 +8318,16 @@ function ReportFindingsList({ caseId, docKind, findings, reviewIncomplete = fals
   );
 }
 
-function FindingCard({ item, docKind, siblings = [], caseId = null, onFeedbackChange = null }) {
+function FindingCard({
+  item,
+  docKind,
+  siblings = [],
+  caseId = null,
+  onFeedbackChange = null,
+  docSha = null,
+  canJumpToSource = false,
+  onJumpToSourcePage = null,
+}) {
   // Hosted analysis deletes vault artifacts; only show inline/data heatmaps.
   const rawHeat = item.evidence?.heatmap;
   const heat = (() => {
@@ -8196,8 +8345,22 @@ function FindingCard({ item, docKind, siblings = [], caseId = null, onFeedbackCh
   const [linkNote, setLinkNote] = useState("");
   const tainted = gotcha && item.evidence?.tainted_support;
   const taintedCopy = tainted ? resolveTaintedCopy(item, siblings) : null;
-  const refs = item.evidence?.refs || [];
-  const pageNum = item.page != null ? Math.max(1, Number(item.page) || 1) : null;
+  const refs = findingRefs(item);
+  const pageNum = resolveFindingPage(item);
+  const claimQuote = item.evidence?.claim_quote || item.claim_quote || "";
+  const claimSource = item.evidence?.claim_source || item.claim_source || "";
+  const evidenceQuote = item.evidence?.evidence_quote
+    || item.evidence?.quoted_evidence
+    || item.evidence_quote
+    || "";
+  const evidenceSource = item.evidence?.evidence_source || item.evidence_source || "";
+  const evidenceLabel = item.evidence?.evidence_label || item.evidence_label || "Evidence";
+  const whyMatter = item.evidence?.attorney_why
+    || item.attorney_why
+    || item.evidence?.materiality_reason
+    || item.materiality_reason
+    || "";
+  const fingerprint = item.evidence?.sha256 || docSha || null;
   const ignored = userFb?.status === "false_positive";
   const confirmed = userFb?.status === "confirmed";
   const showJudgment = Boolean(caseId) && (gotcha || caseHit || item.severity !== "info");
@@ -8208,31 +8371,50 @@ function FindingCard({ item, docKind, siblings = [], caseId = null, onFeedbackCh
 
   async function openRef(ref, pageOverride) {
     setLinkNote("");
-    const page = pageOverride ?? ref.page ?? item.page ?? 1;
+    const page = normalizePageNum(pageOverride ?? ref?.page ?? item.page);
+    const sha = ref?.sha256 || fingerprint;
+    if (canJumpToSource && page != null && typeof onJumpToSourcePage === "function") {
+      // Same-document cite: stay in the report Source tab at that page.
+      const refDoc = ref?.document_id;
+      if (!refDoc || !item.evidence?.document_id || String(refDoc) === String(item.evidence.document_id)) {
+        onJumpToSourcePage(page);
+        return;
+      }
+    }
+    if (!sha) {
+      setLinkNote(
+        page != null
+          ? "Page is known, but the source file is not available on this computer."
+          : "No local file fingerprint for this cite.",
+      );
+      return;
+    }
     try {
       const { openLocalDocumentAtPage } = await import("./localFiles.js");
       await openLocalDocumentAtPage({
-        sha256: ref.sha256 || item.evidence?.sha256,
-        page,
-        displayName: ref.display_name || item.evidence?.display_name,
+        sha256: sha,
+        page: page || 1,
+        displayName: ref?.display_name || item.evidence?.display_name,
       });
     } catch (err) {
       setLinkNote(err.message || "Could not open local file.");
     }
   }
 
-  async function openPageCite(e, page) {
+  function openPageCite(e, page) {
     e.preventDefault();
-    const ref = refs[0] || {
-      sha256: item.evidence?.sha256,
-      display_name: item.evidence?.display_name,
-      page,
-    };
-    if (!ref.sha256 && !item.evidence?.sha256) {
-      setLinkNote("No local file fingerprint for this page cite.");
+    const p = normalizePageNum(page);
+    if (p == null) return;
+    if (canJumpToSource && typeof onJumpToSourcePage === "function") {
+      onJumpToSourcePage(p);
       return;
     }
-    await openRef({ ...ref, sha256: ref.sha256 || item.evidence?.sha256 }, page);
+    const ref = refs[0] || {
+      sha256: fingerprint,
+      display_name: item.evidence?.display_name,
+      page: p,
+    };
+    openRef({ ...ref, sha256: ref.sha256 || fingerprint }, p);
   }
 
   async function applyUserFeedback(status) {
@@ -8290,45 +8472,67 @@ function FindingCard({ item, docKind, siblings = [], caseId = null, onFeedbackCh
         {pageNum != null ? (
           <>
             {" · "}
-            <a
-              className="linkish"
-              href={`#page=${pageNum}`}
-              onClick={(e) => openPageCite(e, pageNum)}
-              title={`Open local file at page ${pageNum}`}
-            >
-              page {pageNum}
-            </a>
+            {(canJumpToSource || fingerprint) ? (
+              <a
+                className="linkish"
+                href={`#page=${pageNum}`}
+                onClick={(e) => openPageCite(e, pageNum)}
+                title={
+                  canJumpToSource
+                    ? `Jump to page ${pageNum} in source viewer`
+                    : `Open local file at page ${pageNum}`
+                }
+              >
+                page {pageNum}
+              </a>
+            ) : (
+              <span title="Source file not available to open">page {pageNum}</span>
+            )}
           </>
-        ) : null}
+        ) : (
+          <> · page not recorded</>
+        )}
       </p>
       {caseHit && item.evidence?.prior_display_name && (
         <p className="footnote">Prior file: {item.evidence.prior_display_name}</p>
       )}
       {tainted ? (
         <p>{taintedCopy.detail}</p>
-      ) : gotcha && item.evidence?.claim_quote ? (
+      ) : claimQuote || evidenceQuote ? (
         <>
-          <p className="gotcha-quote">
-            <strong>Claim:</strong> “{item.evidence.claim_quote}”
-            {item.evidence.claim_source ? ` — ${item.evidence.claim_source}` : ""}
-          </p>
-          <p className="gotcha-quote">
-            <strong>{item.evidence.evidence_label || "Evidence"}:</strong>{" "}
-            “{item.evidence.evidence_quote}”
-            {item.evidence.evidence_source ? ` — ${item.evidence.evidence_source}` : ""}
-          </p>
-          {item.evidence.self_undercut && (
+          {claimQuote ? (
+            <p className="gotcha-quote">
+              <strong>Claim:</strong> “{claimQuote}”
+              {claimSource ? ` — ${claimSource}` : ""}
+            </p>
+          ) : null}
+          {evidenceQuote ? (
+            <p className="gotcha-quote">
+              <strong>{evidenceLabel}:</strong> “{evidenceQuote}”
+              {evidenceSource ? ` — ${evidenceSource}` : ""}
+            </p>
+          ) : null}
+          {item.evidence?.self_undercut && (
             <p className="footnote">This party’s own record appears to undercut their claim.</p>
           )}
+          {item.explanation && !claimQuote ? <p>{item.explanation}</p> : null}
         </>
       ) : (
         <p>{item.explanation}</p>
       )}
       {refs.length > 0 && (
         <p className="footnote">
-          Open local file:{" "}
+          Source cites:{" "}
           {refs.map((ref, i) => {
-            const p = ref.page != null ? Math.max(1, Number(ref.page) || 1) : pageNum;
+            const p = normalizePageNum(ref.page) ?? pageNum;
+            const label = (ref.display_name || "document").slice(0, 40);
+            if (p == null && !ref.sha256 && !fingerprint && !canJumpToSource) {
+              return (
+                <span key={`${ref.document_id || label}-${i}`} style={{ marginRight: 8 }}>
+                  {label} (page not recorded)
+                </span>
+              );
+            }
             return (
               <a
                 key={`${ref.sha256 || ref.document_id}-${i}`}
@@ -8339,17 +8543,22 @@ function FindingCard({ item, docKind, siblings = [], caseId = null, onFeedbackCh
                   openRef(ref, p);
                 }}
                 style={{ marginRight: 8 }}
-                title={p != null ? `Open at page ${p}` : "Open local file"}
+                title={p != null ? `Open at page ${p}` : "Open document (page not recorded)"}
               >
-                {(ref.display_name || "document").slice(0, 40)}
-                {p != null ? ` p.${p}` : ""}
+                {label}
+                {p != null ? ` p.${p}` : " (page not recorded)"}
               </a>
             );
           })}
         </p>
       )}
       {linkNote && <p className="footnote" style={{ color: "var(--danger, #b33)" }}>{linkNote}</p>}
-      <p className="why">{tainted ? taintedCopy.why : item.why_suspicious}</p>
+      {(tainted ? taintedCopy.why : (whyMatter || item.why_suspicious)) ? (
+        <p className="why">
+          <strong>Why it matters:</strong>{" "}
+          {tainted ? taintedCopy.why : (whyMatter || item.why_suspicious)}
+        </p>
+      ) : null}
       {aiLead && (
         <p className="ai-lead footnote">
           AI-assisted lead — verify independently before relying on it.
@@ -8447,6 +8656,17 @@ function FindingCard({ item, docKind, siblings = [], caseId = null, onFeedbackCh
         </div>
       )}
       <div className="conf"><span style={{ width: `${item.confidence}%` }} /></div>
+      {typeof item.evidence?.page_shot === "string" && item.evidence.page_shot.startsWith("data:image") ? (
+        <figure className="finding-page-shot">
+          <img src={item.evidence.page_shot} alt={`Page ${item.evidence.page_shot_page || pageNum || ""} screenshot`} />
+          <figcaption className="footnote">
+            {item.evidence.page_shot_kind === "bbox_highlight"
+              ? "Highlighted region from recorded coordinates"
+              : "Zoomed page crop"}
+            {item.evidence.page_shot_page != null ? ` · p.${item.evidence.page_shot_page}` : ""}
+          </figcaption>
+        </figure>
+      ) : null}
       {heat && <img className="heatmap" src={heat} alt="Forensic overlay" />}
     </article>
   );

@@ -43,15 +43,24 @@ CATEGORY_LABEL = {
 }
 
 
-def render_html(report: Report) -> str:
+def render_html(report: Report, source: Path | None = None) -> str:
     template = env.get_template("report.html")
+    prepared = prepare_report_for_export(report, source=source)
     return template.render(
-        report=_embed_heatmaps(report),
-        risk_label=risk_banner(report.risk_level, report.findings),
+        report=prepared,
+        risk_label=risk_banner(prepared.risk_level, prepared.findings),
         category_label=CATEGORY_LABEL,
         generated=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         version=__version__,
     )
+
+
+def prepare_report_for_export(report: Report, source: Path | None = None) -> Report:
+    """Inline heatmaps + attach page screenshots when the source is still available."""
+    from app.report.page_shots import attach_finding_page_shots
+
+    prepared = attach_finding_page_shots(report, source)
+    return _embed_heatmaps(prepared)
 
 
 def _embed_heatmaps(report: Report) -> Report:
@@ -61,6 +70,8 @@ def _embed_heatmaps(report: Report) -> Report:
             heat = (item.evidence or {}).get("heatmap")
             if not heat:
                 continue
+            if isinstance(heat, str) and heat.startswith("data:image"):
+                continue
             name = str(heat).rsplit("/", 1)[-1]
             path = artifact_dir(report.job_id) / name
             if path.exists():
@@ -69,102 +80,271 @@ def _embed_heatmaps(report: Report) -> Report:
     return clone
 
 
-def render_pdf_bytes(report: Report) -> bytes:
+def render_pdf_bytes(report: Report, source: Path | None = None) -> bytes:
     """Render PDF into memory (hosted durable export; no disk report required)."""
     buf = io.BytesIO()
-    _build_pdf(report, buf)
+    _build_pdf(prepare_report_for_export(report, source=source), buf)
     return buf.getvalue()
 
 
-def render_pdf(report: Report) -> Path:
+def render_pdf(report: Report, source: Path | None = None) -> Path:
     out = job_dir(report.job_id) / "report.pdf"
-    _build_pdf(report, str(out))
+    _build_pdf(prepare_report_for_export(report, source=source), str(out))
     return out
+
+
+def _evidence_image_flowable(src: str | None, job_id: str, *, max_h: float = 3.4 * inch):
+    """Build a ReportLab image from a data URL or job artifact path."""
+    if not src or not isinstance(src, str):
+        return None
+    try:
+        from PIL import Image as PILImage
+
+        from app.report.page_shots import decode_data_url_image
+
+        if src.startswith("data:image"):
+            image = decode_data_url_image(src)
+            if image is None:
+                return None
+            # ReportLab's platypus Image wants a path or a file-like with .name.
+            buf = io.BytesIO()
+            image.save(buf, format="JPEG", quality=72, optimize=True)
+            buf.seek(0)
+            buf.name = "page_shot.jpg"
+            aspect = image.height / max(image.width, 1)
+            width = 5.8 * inch
+            height = min(max_h, width * aspect)
+            return RLImage(buf, width=width, height=height)
+
+        name = src.rsplit("/", 1)[-1]
+        path = artifact_dir(job_id) / name
+        if not path.exists():
+            return None
+        with PILImage.open(path) as im:
+            aspect = im.height / max(im.width, 1)
+        width = 5.8 * inch
+        height = min(max_h, width * aspect)
+        return RLImage(str(path), width=width, height=height)
+    except Exception:
+        return None
+
+
+# Brand tokens shared with the CaseSifter web app / marketing mark.
+_NAVY = colors.HexColor("#14324a")
+_ACCENT = colors.HexColor("#0e7c7b")
+_INK = colors.HexColor("#0f1720")
+_MUTED = colors.HexColor("#5b6675")
+_LINE = colors.HexColor("#e3e8ef")
+_SOFT = colors.HexColor("#f3f6fa")
+
+
+def _brand_masthead(styles) -> Table:
+    """CS seal + CaseSifter wordmark — print-safe solid navy (no decorative gradient)."""
+    seal = Table(
+        [[Paragraph("<font color='white'><b>CS</b></font>", styles["SealText"])]],
+        colWidths=[0.48 * inch],
+        rowHeights=[0.48 * inch],
+    )
+    seal.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, -1), _NAVY),
+                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                ("TOPPADDING", (0, 0), (-1, -1), 0),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+            ]
+        )
+    )
+    wordmark = [
+        Paragraph("CaseSifter", styles["BrandName"]),
+        Paragraph("Find what matters in the record.", styles["BrandTag"]),
+    ]
+    mast = Table([[seal, wordmark]], colWidths=[0.58 * inch, 5.9 * inch])
+    mast.setStyle(
+        TableStyle(
+            [
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("LEFTPADDING", (0, 0), (0, 0), 0),
+                ("RIGHTPADDING", (0, 0), (0, 0), 8),
+                ("LEFTPADDING", (1, 0), (1, 0), 4),
+                ("BACKGROUND", (0, 0), (-1, -1), colors.white),
+                ("BOX", (0, 0), (-1, -1), 0.6, _LINE),
+                ("TOPPADDING", (0, 0), (-1, -1), 10),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+                ("LEFTPADDING", (0, 0), (-1, -1), 12),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+            ]
+        )
+    )
+    return mast
+
+
+def _finding_accent(severity: str) -> colors.Color:
+    if severity in {"critical", "high"}:
+        return colors.HexColor("#b42318")
+    if severity == "medium":
+        return colors.HexColor("#9a6b12")
+    return _ACCENT
 
 
 def _build_pdf(report: Report, destination: str | io.BytesIO) -> None:
     styles = getSampleStyleSheet()
     styles.add(
         ParagraphStyle(
+            name="BrandName",
+            fontName="Helvetica-Bold",
+            fontSize=16,
+            leading=19,
+            textColor=_NAVY,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            name="BrandTag",
+            fontName="Helvetica",
+            fontSize=9,
+            leading=11,
+            textColor=_MUTED,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            name="SealText",
+            fontName="Helvetica-Bold",
+            fontSize=11,
+            leading=13,
+            alignment=1,
+            textColor=colors.white,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            name="Kicker",
+            fontName="Helvetica-Bold",
+            fontSize=8,
+            leading=10,
+            textColor=_ACCENT,
+            spaceBefore=2,
+            spaceAfter=2,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
             name="CoverTitle",
-            fontName="Times-Bold",
-            fontSize=18,
-            leading=22,
-            textColor=colors.HexColor("#1a365d"),
-            spaceAfter=6,
+            fontName="Helvetica-Bold",
+            fontSize=15,
+            leading=19,
+            textColor=_NAVY,
+            spaceAfter=4,
         )
     )
     styles.add(
         ParagraphStyle(
             name="Section",
-            fontName="Times-Bold",
-            fontSize=13,
-            leading=16,
-            textColor=colors.HexColor("#1a365d"),
-            spaceBefore=14,
-            spaceAfter=6,
+            fontName="Helvetica-Bold",
+            fontSize=12,
+            leading=15,
+            textColor=_NAVY,
+            spaceBefore=16,
+            spaceAfter=8,
         )
     )
     styles.add(
         ParagraphStyle(
             name="Body",
-            fontName="Times-Roman",
+            fontName="Helvetica",
             fontSize=10,
             leading=13,
-            textColor=colors.HexColor("#1a202c"),
+            textColor=_INK,
         )
     )
     styles.add(
         ParagraphStyle(
             name="Small",
-            fontName="Times-Roman",
+            fontName="Helvetica",
             fontSize=8,
             leading=11,
-            textColor=colors.HexColor("#4a5568"),
+            textColor=_MUTED,
         )
     )
     styles.add(
         ParagraphStyle(
             name="FindingTitle",
-            fontName="Times-Bold",
+            fontName="Helvetica-Bold",
             fontSize=11,
             leading=14,
-            textColor=colors.HexColor("#1a365d"),
-            spaceBefore=8,
+            textColor=_NAVY,
+            spaceBefore=0,
+            spaceAfter=4,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            name="Quote",
+            fontName="Helvetica",
+            fontSize=9,
+            leading=12,
+            textColor=_INK,
+            leftIndent=4,
+            spaceBefore=2,
+            spaceAfter=2,
         )
     )
 
+    risk_bg = {
+        "green": colors.HexColor("#e5f6ec"),
+        "yellow": colors.HexColor("#fbf0d6"),
+        "red": colors.HexColor("#fdeceb"),
+        "incomplete": colors.HexColor("#e7eef6"),
+    }.get(report.risk_level, colors.HexColor("#e7eef6"))
     risk_color = {
-        "green": colors.HexColor("#276749"),
-        "yellow": colors.HexColor("#b7791f"),
-        "red": colors.HexColor("#c53030"),
-        "incomplete": colors.HexColor("#14324a"),
-    }.get(report.risk_level, colors.HexColor("#14324a"))
+        "green": colors.HexColor("#1f7a4d"),
+        "yellow": colors.HexColor("#9a6b12"),
+        "red": colors.HexColor("#b42318"),
+        "incomplete": _NAVY,
+    }.get(report.risk_level, _NAVY)
 
     story = []
-    story.append(Paragraph("CaseSifter — Authenticity Report", styles["CoverTitle"]))
-    story.append(Paragraph(report.audit.filename, styles["Body"]))
+    story.append(_brand_masthead(styles))
+    story.append(Spacer(1, 14))
+    story.append(Paragraph("AUTHENTICITY REPORT", styles["Kicker"]))
+    story.append(Paragraph(report.audit.filename, styles["CoverTitle"]))
+    story.append(Paragraph(
+        f"Software v{__version__} · SHA-256 {report.audit.sha256}",
+        styles["Small"],
+    ))
     story.append(Spacer(1, 8))
     badge = Table(
         [[Paragraph(
-            f"<b>{risk_banner(report.risk_level, report.findings)}</b>  (score {report.risk_score}/100)",
-            styles["Body"],
+            f"<b>{risk_banner(report.risk_level, report.findings)}</b>"
+            f"&nbsp;&nbsp;·&nbsp;&nbsp;{report.risk_score}/100",
+            ParagraphStyle(
+                "RiskBadge",
+                parent=styles["Body"],
+                textColor=risk_color,
+                fontName="Helvetica-Bold",
+                fontSize=10,
+            ),
         )]],
         colWidths=[6.5 * inch],
     )
     badge.setStyle(
         TableStyle(
             [
-                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#edf2f7")),
-                ("TEXTCOLOR", (0, 0), (-1, -1), risk_color),
-                ("LEFTPADDING", (0, 0), (-1, -1), 10),
-                ("TOPPADDING", (0, 0), (-1, -1), 8),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+                ("BACKGROUND", (0, 0), (-1, -1), risk_bg),
+                ("LEFTPADDING", (0, 0), (-1, -1), 12),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+                ("TOPPADDING", (0, 0), (-1, -1), 9),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 9),
+                ("BOX", (0, 0), (-1, -1), 0.5, _LINE),
             ]
         )
     )
     story.append(badge)
-    story.append(Spacer(1, 10))
+    story.append(Spacer(1, 8))
     story.append(Paragraph("Executive summary", styles["Section"]))
     story.append(Paragraph(report.executive_summary, styles["Body"]))
 
@@ -191,31 +371,79 @@ def _build_pdf(report: Report, destination: str | io.BytesIO) -> None:
         if item.severity == "info":
             continue
         cat = CATEGORY_LABEL.get(item.category, item.category)
-        page = f" — page {item.page}" if item.page else ""
-        story.append(
+        page = f"source page {item.page}" if item.page else "page not recorded"
+        block: list = [
+            Paragraph(item.title, styles["FindingTitle"]),
             Paragraph(
-                f"{item.title}{page}  ({cat}, {item.severity}, {item.confidence:.0f}% confidence)",
-                styles["FindingTitle"],
+                f"{cat} · {item.severity} · {item.confidence:.0f}% confidence · {page}",
+                styles["Small"],
+            ),
+        ]
+        ev = item.evidence or {}
+        claim_q = ev.get("claim_quote")
+        evidence_q = ev.get("evidence_quote") or ev.get("quoted_evidence")
+        if claim_q:
+            src = ev.get("claim_source") or ""
+            block.append(
+                Paragraph(
+                    f"<b>Claim:</b> “{claim_q}”" + (f" — {src}" if src else ""),
+                    styles["Quote"],
+                )
+            )
+        if evidence_q:
+            label = ev.get("evidence_label") or "Evidence"
+            src = ev.get("evidence_source") or ""
+            block.append(
+                Paragraph(
+                    f"<b>{label}:</b> “{evidence_q}”" + (f" — {src}" if src else ""),
+                    styles["Quote"],
+                )
+            )
+        if item.explanation:
+            block.append(Paragraph(item.explanation, styles["Body"]))
+        if item.why_suspicious:
+            block.append(
+                Paragraph(
+                    f"<b>Why it matters:</b> {item.why_suspicious}",
+                    styles["Small"],
+                )
+            )
+        page_shot = ev.get("page_shot")
+        shot_kind = ev.get("page_shot_kind") or ""
+        if page_shot:
+            kind_note = (
+                "Highlighted region (from recorded coordinates)."
+                if shot_kind == "bbox_highlight"
+                else "Zoomed page crop — coordinates were not recorded for a tighter highlight."
+            )
+            block.append(Paragraph(f"<b>Exhibit screenshot:</b> {kind_note}", styles["Small"]))
+            flow = _evidence_image_flowable(page_shot, report.job_id, max_h=3.4 * inch)
+            if flow is not None:
+                block.append(Spacer(1, 4))
+                block.append(flow)
+        heatmap = ev.get("heatmap")
+        if heatmap:
+            flow = _evidence_image_flowable(heatmap, report.job_id, max_h=3.0 * inch)
+            if flow is not None:
+                block.append(Paragraph("<b>Forensic overlay</b>", styles["Small"]))
+                block.append(flow)
+
+        card = Table([[block]], colWidths=[6.5 * inch])
+        card.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, -1), colors.white),
+                    ("BOX", (0, 0), (-1, -1), 0.6, _LINE),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 12),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+                    ("TOPPADDING", (0, 0), (-1, -1), 10),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+                    ("LINEBEFORE", (0, 0), (0, 0), 3.2, _finding_accent(str(item.severity))),
+                ]
             )
         )
-        story.append(Paragraph(item.explanation, styles["Body"]))
-        story.append(Paragraph(f"<i>Why this is flagged:</i> {item.why_suspicious}", styles["Small"]))
-        heatmap = (item.evidence or {}).get("heatmap")
-        if heatmap:
-            name = str(heatmap).rsplit("/", 1)[-1]
-            img_path = artifact_dir(report.job_id) / name
-            if img_path.exists():
-                story.append(Spacer(1, 4))
-                try:
-                    from PIL import Image as PILImage
-
-                    with PILImage.open(img_path) as im:
-                        aspect = im.height / max(im.width, 1)
-                    width = 5.8 * inch
-                    height = min(4.2 * inch, width * aspect)
-                    story.append(RLImage(str(img_path), width=width, height=height))
-                except Exception:
-                    pass
+        story.append(card)
+        story.append(Spacer(1, 8))
 
     if report.timeline:
         story.append(Paragraph("Timeline", styles["Section"]))
@@ -246,16 +474,24 @@ def _build_pdf(report: Report, destination: str | io.BytesIO) -> None:
                     dim.orientation or "",
                 ]
             )
-        table = Table(rows, colWidths=[0.7 * inch, 0.9 * inch, 0.9 * inch, 0.9 * inch, 0.9 * inch, 0.7 * inch, 0.9 * inch])
+        table = Table(
+            rows,
+            colWidths=[0.7 * inch, 0.9 * inch, 0.9 * inch, 0.9 * inch, 0.9 * inch, 0.7 * inch, 0.9 * inch],
+        )
         table.setStyle(
             TableStyle(
                 [
-                    ("FONTNAME", (0, 0), (-1, 0), "Times-Bold"),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
                     ("FONTSIZE", (0, 0), (-1, -1), 8),
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#edf2f7")),
-                    ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#cbd5e0")),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 4),
-                    ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), _MUTED),
+                    ("BACKGROUND", (0, 0), (-1, 0), _SOFT),
+                    ("LINEBELOW", (0, 0), (-1, -2), 0.4, _LINE),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                    ("TOPPADDING", (0, 0), (-1, -1), 5),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                    ("BOX", (0, 0), (-1, -1), 0.5, _LINE),
                 ]
             )
         )
@@ -278,11 +514,11 @@ def _build_pdf(report: Report, destination: str | io.BytesIO) -> None:
     doc = SimpleDocTemplate(
         destination,
         pagesize=letter,
-        title=f"Exhibit scan — {report.audit.filename}",
-        leftMargin=0.75 * inch,
-        rightMargin=0.75 * inch,
-        topMargin=0.7 * inch,
-        bottomMargin=0.7 * inch,
+        title=f"CaseSifter — {report.audit.filename}",
+        leftMargin=0.7 * inch,
+        rightMargin=0.7 * inch,
+        topMargin=0.65 * inch,
+        bottomMargin=0.65 * inch,
     )
     doc.build(story)
 

@@ -785,11 +785,15 @@ def _persist_pipeline_result(
             break
     page_count = len(report.page_dimensions or []) or None
     finding_dicts = [f.model_dump(mode="json") for f in (report.findings or [])]
-    # Inline heatmaps before durable encrypt — disk artifacts are deleted after persist.
+    # Inline heatmaps + page screenshots before durable encrypt — source/artifacts
+    # are deleted after persist, so the export PDF must already carry the crops.
     try:
-        from app.report.generator import _embed_heatmaps
+        from app.report.generator import prepare_report_for_export
 
-        report_dict = _embed_heatmaps(report).model_dump(mode="json")
+        src_for_shots = source if source.exists() else None
+        report_dict = prepare_report_for_export(report, source=src_for_shots).model_dump(
+            mode="json"
+        )
     except Exception:
         report_dict = report.model_dump(mode="json")
     try:

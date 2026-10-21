@@ -749,20 +749,37 @@ h1, h2, h3, .serif {
 }
 
 .finding {
-  border: 1px solid rgba(15, 23, 32, 0.06);
-  padding: 10px 12px;
-  margin-bottom: 6px;
-  background: white;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  background: var(--surface-solid);
   border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-sm);
 }
+.finding.gotcha-card { border-left-color: var(--accent); }
 .finding header { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
-.finding h3 { margin: 0; font-size: 0.92rem; color: var(--navy); line-height: 1.3; }
-.finding > p { margin: 6px 0 0; font-size: 13px; line-height: 1.4; }
+.finding h3 {
+  margin: 0;
+  font-family: var(--display);
+  font-size: 1rem;
+  font-weight: 550;
+  color: var(--navy);
+  line-height: 1.3;
+  letter-spacing: -0.015em;
+}
+.finding > p { margin: 6px 0 0; font-size: 13px; line-height: 1.45; }
 .sev { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 700; }
 .sev.critical, .sev.high { color: var(--red); }
 .sev.medium { color: var(--yellow); }
 .sev.low, .sev.info { color: var(--muted); }
-.why { color: var(--muted); font-style: italic; }
+.why {
+  color: var(--ink);
+  font-style: normal;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.why strong { color: var(--navy); font-weight: 650; }
 .ai-lead {
   margin: 6px 0 0;
   font-style: normal;
@@ -1890,9 +1907,12 @@ table.data td.row-actions { width: 1%; text-align: right; }
   text-decoration: underline;
 }
 .gotcha-quote {
-  margin: 4px 0;
-  font-size: 12px;
-  line-height: 1.4;
+  margin: 6px 0;
+  padding: 8px 10px;
+  background: color-mix(in srgb, var(--navy) 4%, #fff);
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.45;
 }
 .gotcha-quote strong { color: var(--navy); }
 .gotcha-why {
@@ -1907,6 +1927,38 @@ table.data td.row-actions { width: 1%; text-align: right; }
 }
 
 .report-layout { display: block; }
+.report-chrome {
+  padding-top: 14px;
+}
+.report-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+.report-seal {
+  width: 44px;
+  height: 44px;
+  border-radius: 14px;
+  font-size: 15px;
+}
+.report-brand-name {
+  margin: 0;
+  font-family: var(--display);
+  font-size: 1.2rem;
+  font-weight: 600;
+  color: var(--navy);
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+}
+.report-brand-tag {
+  margin: 2px 0 0;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted);
+}
 .report-chrome .actions,
 .report-header .actions,
 .report-header .report-actions { margin-top: 0; }
@@ -1918,9 +1970,15 @@ table.data td.row-actions { width: 1%; text-align: right; }
   justify-content: space-between;
   gap: var(--space-2);
 }
+.report-header .kicker {
+  color: var(--accent-ink);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
 .report-header h2 {
-  margin: 2px 0 4px;
-  font-size: clamp(1.2rem, 2vw, 1.45rem);
+  margin: 2px 0 6px;
+  font-size: clamp(1.25rem, 2.2vw, 1.55rem);
+  letter-spacing: -0.02em;
 }
 .report-actions {
   display: flex;
@@ -2020,6 +2078,26 @@ table.data td.row-actions { width: 1%; text-align: right; }
 .report-scan-list .sev {
   flex: 0 0 auto;
   min-width: 4.5rem;
+}
+.finding-page-shot {
+  margin: 10px 0 0;
+  padding: 0;
+}
+.finding-page-shot img {
+  display: block;
+  max-width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.finding-page-shot figcaption {
+  margin-top: 4px;
+}
+.report-scan-page {
+  flex-shrink: 0;
+  font-size: 12px;
+  padding: 0;
+  border: 0;
+  background: transparent;
 }
 .report-scan-title {
   flex: 1 1 12rem;

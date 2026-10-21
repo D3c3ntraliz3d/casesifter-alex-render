@@ -839,7 +839,15 @@ def run_gemini_stage(
         artifact_urls=artifact_urls,
     )
 
-    html = render_html(report)
+    # Crop/highlight page screenshots onto findings while the source bytes exist.
+    try:
+        from app.report.page_shots import attach_finding_page_shots
+
+        report = attach_finding_page_shots(report, source)
+    except Exception:
+        logger.exception("page_shots attach failed job=%s", job_id)
+
+    html = render_html(report, source=source)
     (job_dir(job_id) / "report.html").write_text(html, encoding="utf-8")
     update_job(
         job_id,
@@ -848,7 +856,7 @@ def run_gemini_stage(
         message="Report HTML written…",
     )
     try:
-        render_pdf(report)
+        render_pdf(report, source=source)
     except Exception:
         pass
 
