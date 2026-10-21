@@ -2020,6 +2020,8 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
   const [selectedDocs, setSelectedDocs] = useState(() => new Set());
   const [stampById, setStampById] = useState({});
   const [liveScan, setLiveScan] = useState({});
+  // Per-row Cancel must stay clickable while global busy locks checkboxes.
+  const [cancellingIds, setCancellingIds] = useState(() => new Set());
   // Hosted uploads create a job before a matter document row exists. Keep
   // placeholders so Documents is not empty while the footnote tracks progress.
   const [pendingDocs, setPendingDocs] = useState(() => loadPendingDocs(caseData?.id));
@@ -2702,10 +2704,27 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
     }
   }
 
+  /** Prefer the live/armed job — doc.scan_job_id can still be the prior complete job. */
+  function resolveCancelJobId(doc) {
+    if (!doc?.id) return null;
+    const live = liveScan[doc.id];
+    if (live?.jobId) return live.jobId;
+    const docJob = doc.scan_job_id || null;
+    if (!docJob) return null;
+    // Armed rescan still showing the previous job id until noteJob runs.
+    if (live?.armed && live.previousJobId && docJob === live.previousJobId) return null;
+    return docJob;
+  }
+
   async function cancelScanForDoc(doc) {
-    const jobId = doc?.scan_job_id || liveScan[doc?.id]?.jobId;
+    const jobId = resolveCancelJobId(doc);
     if (!jobId || !isHostedAnalysis()) return;
     onError("");
+    setCancellingIds((prev) => {
+      const next = new Set(prev);
+      next.add(doc.id);
+      return next;
+    });
     setLiveScan((prev) => {
       const cur = prev[doc.id];
       if (!cur) {
@@ -2744,6 +2763,13 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
       } catch {
         /* keep optimistic cancelled row */
       }
+    } finally {
+      setCancellingIds((prev) => {
+        if (!prev.has(doc.id)) return prev;
+        const next = new Set(prev);
+        next.delete(doc.id);
+        return next;
+      });
     }
   }
 
@@ -2753,11 +2779,7 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
       (d) => selectedDocs.has(d.id) && (isScanInProgress(d) || Boolean(d.pending_upload))
     );
     const jobIds = [
-      ...new Set(
-        targets
-          .map((d) => d.scan_job_id || liveScan[d.id]?.jobId)
-          .filter(Boolean)
-      ),
+      ...new Set(targets.map((d) => resolveCancelJobId(d)).filter(Boolean)),
     ];
     if (!jobIds.length) {
       onError("No pending or running scans in the selection.");
@@ -2767,7 +2789,7 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
     setBusy(true);
     try {
       for (const doc of targets) {
-        const jobId = doc.scan_job_id || liveScan[doc.id]?.jobId;
+        const jobId = resolveCancelJobId(doc);
         if (!jobId) continue;
         setLiveScan((prev) => {
           const cur = prev[doc.id];
@@ -4194,6 +4216,8 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
               const fullName = doc.original_filename || doc.display_name || "";
               const pendingOnly = Boolean(doc.pending_upload);
               const inProgress = isScanInProgress(doc) || pendingOnly;
+              const cancelJobId = inProgress && isHostedAnalysis() ? resolveCancelJobId(doc) : null;
+              const cancelling = cancellingIds.has(doc.id);
               const clearance = rowClearance(doc);
               const scannedAt = inProgress
                 ? null
@@ -4409,17 +4433,19 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
                         Report
                       </button>
                     )}
-                    {inProgress &&
-                      isHostedAnalysis() &&
-                      (doc.scan_job_id || liveScan[doc.id]?.jobId) && (
+                    {inProgress && isHostedAnalysis() && (
                       <button
                         className="btn secondary"
                         type="button"
-                        title="Cancel this pending or running scan"
-                        disabled={busy}
+                        title={
+                          cancelJobId
+                            ? "Cancel this pending or running scan"
+                            : "Scan is starting — Cancel will enable when the job is queued"
+                        }
+                        disabled={cancelling || !cancelJobId}
                         onClick={() => cancelScanForDoc(doc)}
                       >
-                        Cancel
+                        {cancelling ? "Cancelling…" : "Cancel"}
                       </button>
                     )}
                     {docNeedsLocate(doc) && !inProgress && !pendingOnly ? (

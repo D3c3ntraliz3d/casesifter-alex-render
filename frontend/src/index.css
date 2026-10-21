@@ -829,7 +829,7 @@ table.data.docs col.col-risk { width: 6.5rem; }
 table.data.docs col.col-status { width: 8.5rem; }
 table.data.docs col.col-signals { width: 11rem; }
 table.data.docs col.col-meta { width: 16.5rem; }
-table.data.docs col.col-actions { width: 8.5rem; }
+table.data.docs col.col-actions { width: 9.5rem; }
 table.data.docs.crm-docs th,
 table.data.docs.crm-docs td {
   padding: 8px 10px;
