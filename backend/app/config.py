@@ -113,9 +113,20 @@ class Settings(BaseSettings):
     ocr_max_pages: int = 40
     ocr_sparse_char_threshold: int = 80
 
-    # Persistent per-matter fact memory (no PDF retention).
-    # SOURCE_FILE_RETENTION=immediate keeps current delete-after-run behavior.
+    # Persistent per-matter fact memory.
+    # SOURCE_FILE_RETENTION=immediate → delete PDF after scan (legacy).
+    # SOURCE_FILE_RETENTION=s3|keep|retain → keep tiny source PDFs in object storage
+    # under firms/{firm}/matters/{matter}/sources/{sha256}.pdf for re-scan/preview.
     source_file_retention: str = "immediate"
+
+    @property
+    def keep_source_in_blob(self) -> bool:
+        return (self.source_file_retention or "immediate").strip().lower() in {
+            "s3",
+            "keep",
+            "retain",
+            "blob",
+        }
     persist_facts: bool = True  # global default; per-firm firms.persist_facts can opt out
     # Case-wide "fact conflict" cards (same fact, different values across or inside
     # documents). Off by default: they were mostly false positives (recording vs.

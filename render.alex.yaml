@@ -44,7 +44,7 @@ services:
       - key: EPHEMERAL_TTL_HOURS
         value: "6"
       - key: SOURCE_FILE_RETENTION
-        value: immediate
+        value: s3
       - key: PERSIST_FACTS
         value: "true"
       - key: DATABASE_URL

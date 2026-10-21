@@ -1033,8 +1033,10 @@ class FactMemoryStore:
             "status": "complete",
             "scan_job_id": doc.last_job_id,
             "has_report": bool(doc.report_enc),
-            "has_source": bool(doc.source_enc) and not doc.source_missing,
-            "source_missing": bool(doc.source_missing) or not doc.source_enc,
+            "has_source": (bool(doc.source_blob_key) or bool(doc.source_enc))
+            and not bool(doc.source_missing),
+            "source_missing": bool(doc.source_missing)
+            or not (doc.source_blob_key or doc.source_enc),
             "mime_type": doc.mime_type,
             "source_size": doc.source_size,
             "risk_level": risk_level,
@@ -1454,11 +1456,16 @@ class FactMemoryStore:
         source_bytes: bytes | None = None,
         mime_type: str | None = None,
         source_size: int | None = None,
+        source_blob_key: str | None = None,
         extraction_status: str | None = None,
         extraction_error: str | None = None,
         extraction_retry_done: bool = False,
     ) -> dict[str, Any]:
-        """Persist facts, findings, and exhibit metadata. Exhibit bytes are not stored."""
+        """Persist facts, findings, and exhibit metadata.
+
+        Exhibit bytes may live in object storage when ``source_blob_key`` is set
+        (SOURCE_FILE_RETENTION=s3/keep). They are not stored in Postgres.
+        """
         byte_length = None
         if source_size is not None:
             try:
@@ -1467,6 +1474,7 @@ class FactMemoryStore:
                 byte_length = None
             if byte_length is not None and byte_length < 0:
                 byte_length = None
+        blob_key = (source_blob_key or "").strip() or None
         with self.session() as s:
             firm = s.get(Firm, firm_id)
             if not firm:
@@ -1557,6 +1565,11 @@ class FactMemoryStore:
             doc.last_job_id = job_id
             if byte_length is not None:
                 doc.source_size = byte_length
+            if blob_key:
+                doc.source_blob_key = blob_key
+                doc.source_missing = False
+            if mime_type:
+                doc.mime_type = mime_type
             if report is not None:
                 doc.report_enc = enc.encrypt_json(fernet, report)
 
@@ -2691,6 +2704,34 @@ class FactMemoryStore:
             "updated_at": row.updated_at.isoformat() if row.updated_at else None,
         }
 
+    def get_document_source_blob_key(
+        self, firm_id: str, matter_id: str, document_id: str
+    ) -> dict[str, Any] | None:
+        """Return durable S3 key metadata for a matter document, or None."""
+        with self.session() as s:
+            doc = s.execute(
+                select(Document).where(
+                    Document.id == document_id,
+                    Document.matter_id == matter_id,
+                    Document.firm_id == firm_id,
+                )
+            ).scalar_one_or_none()
+            if not doc:
+                return None
+            key = (doc.source_blob_key or "").strip()
+            if not key or doc.source_missing:
+                return None
+            fernet = self._fernet(s, firm_id)
+            return {
+                "document_id": doc.id,
+                "sha256": doc.sha256,
+                "source_blob_key": key,
+                "source_size": doc.source_size,
+                "mime_type": doc.mime_type or "application/pdf",
+                "original_filename": enc.decrypt_text(fernet, doc.original_filename_enc),
+                "display_name": enc.decrypt_text(fernet, doc.display_name_enc),
+            }
+
 
 def _attach_source(
     doc: Document,
@@ -2699,7 +2740,10 @@ def _attach_source(
     source_bytes: bytes | None,
     mime_type: str | None,
 ) -> None:
-    """Exhibit bytes are not stored. Leave source_enc untouched."""
+    """Legacy no-op for DB ciphertext; durable bytes live in object storage."""
+    if doc.source_blob_key:
+        doc.source_missing = False
+        return
     if not doc.source_enc:
         doc.source_missing = True
 

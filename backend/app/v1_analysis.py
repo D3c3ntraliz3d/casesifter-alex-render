@@ -1,8 +1,9 @@
 """Public v1 analysis API for the thin desktop client (ephemeral jobs).
 
 When matter_id is supplied and the firm has persist_facts, priors are loaded from
-fact memory, compare_to_case runs, facts/findings are persisted, and the source
-PDF is deleted immediately. Report TTL is skipped for persist firms.
+fact memory, compare_to_case runs, and facts/findings are persisted. With
+SOURCE_FILE_RETENTION=immediate the PDF is dropped after scan; with s3/keep the
+tiny source is retained in object storage for re-scan/preview.
 """
 
 from __future__ import annotations
@@ -41,6 +42,19 @@ logger = logging.getLogger(__name__)
 # Short-lived cache: session bearer → entitlement probe (soft-launch browser auth).
 _SESSION_ENTITLEMENT_CACHE: dict[str, tuple[float, dict]] = {}
 _SESSION_CACHE_TTL_S = 45.0
+
+
+def _durable_source_key(
+    *, firm_id: str | None, matter_id: str | None, sha256: str | None
+) -> str | None:
+    if not settings.keep_source_in_blob or not firm_id or not matter_id or not sha256:
+        return None
+    try:
+        from app.blob_store import matter_source_key
+
+        return matter_source_key(firm_id, matter_id, sha256)
+    except ValueError:
+        return None
 
 
 def _resolve_upload_labels(
@@ -709,6 +723,7 @@ async def create_ephemeral_job(
         "firm_ctx": firm_ctx,
         "filed_date": filed_date,
         "persist": persist,
+        "sha256": digest,
     }
 
     def _kick() -> None:
@@ -818,6 +833,11 @@ def _persist_pipeline_result(
             user_id=firm_ctx.get("user_id"),
             report=report_dict,
             source_size=byte_length,
+            source_blob_key=_durable_source_key(
+                firm_id=firm_ctx.get("firm_id"),
+                matter_id=matter_id,
+                sha256=digest,
+            ),
             extraction_status=comparison.get("extraction_status"),
             extraction_error=comparison.get("extraction_error"),
             extraction_retry_done=bool(comparison.get("extraction_retry_done")),

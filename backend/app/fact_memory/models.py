@@ -104,12 +104,13 @@ class Document(Base):
     snapshot_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Full report JSON for reopen without job TTL (encrypted).
     report_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Unused. Left in place so existing databases do not need a column drop.
-    # Exhibit bytes are not stored. A one-shot migration nulls any leftover value.
+    # Unused DB ciphertext for exhibit bytes (cleared by migration). Prefer S3 key.
     source_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
     mime_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
     source_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
     source_missing: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Object-storage key when SOURCE_FILE_RETENTION keeps tiny PDFs in S3/R2.
+    source_blob_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_job_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     matter: Mapped["Matter"] = relationship(back_populates="documents")
@@ -429,6 +430,8 @@ def ensure_source_columns(engine) -> None:
         stmts.append(
             f"ALTER TABLE documents ADD COLUMN source_missing BOOLEAN DEFAULT {default_missing}"
         )
+    if "source_blob_key" not in have:
+        stmts.append("ALTER TABLE documents ADD COLUMN source_blob_key TEXT")
     if not stmts:
         return
     with engine.begin() as conn:

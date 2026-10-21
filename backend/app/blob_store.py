@@ -281,3 +281,13 @@ def job_meta_key(job_id: str) -> str:
 def job_cancel_key(job_id: str) -> str:
     """Worker-visible cancel marker (written by analysis cancel endpoint)."""
     return f"{job_bundle_prefix(job_id)}/cancel.flag"
+
+
+def matter_source_key(firm_id: str, matter_id: str, sha256: str) -> str:
+    """Durable exhibit bytes (when SOURCE_FILE_RETENTION=s3/keep)."""
+    firm = "".join(ch for ch in str(firm_id or "") if ch.isalnum() or ch in "-_")[:64] or "firm"
+    matter = "".join(ch for ch in str(matter_id or "") if ch.isalnum() or ch in "-_")[:64] or "matter"
+    digest = "".join(ch for ch in str(sha256 or "").lower() if ch in "0123456789abcdef")[:64]
+    if len(digest) < 32:
+        raise ValueError("sha256 required for durable source key")
+    return f"firms/{firm}/matters/{matter}/sources/{digest}.pdf"

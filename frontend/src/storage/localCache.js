@@ -234,6 +234,14 @@ export async function cacheCoverageForDocs(docs = []) {
   const missingShas = [];
   let cached = 0;
   for (const item of unique.values()) {
+    const doc = (docs || []).find(
+      (d) => String(d?.sha256 || "").toLowerCase() === item.sha256
+    );
+    // Server-retained PDF (S3/R2) counts as available — not a "missing" Locate nag.
+    if (doc?.has_source && !doc?.source_missing) {
+      cached += 1;
+      continue;
+    }
     const hit = await localCacheAdapter.hasFile(item.id, item.sha256).catch(() => false);
     if (hit) cached += 1;
     else {

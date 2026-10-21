@@ -3419,6 +3419,8 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
   function docNeedsLocate(doc) {
     const sha = String(doc?.sha256 || "").toLowerCase();
     if (!sha || !isHostedAnalysis()) return false;
+    // Retained in S3/R2 — no browser Locate required.
+    if (doc?.has_source && !doc?.source_missing) return false;
     return Boolean(cacheCoverage?.missingShas?.includes(sha));
   }
 
@@ -3994,9 +3996,10 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
           <div className="cache-quiet-note" role="status">
             <p>
               <strong>Nothing was deleted.</strong>{" "}
-              {missingCacheCount} PDF{missingCacheCount === 1 ? "" : "s"}{" "}
-              {missingCacheCount === 1 ? "isn’t" : "aren’t"} cached in this browser —
-              findings and risk stay on the server. Locate only if you need to re-scan.
+              {missingCacheCount} older PDF{missingCacheCount === 1 ? "" : "s"}{" "}
+              {missingCacheCount === 1 ? "isn’t" : "aren’t"} in this browser cache.
+              New uploads are kept in secure storage for re-scan. Findings stay on the
+              server — Locate only for legacy files.
             </p>
             <div className="cache-banner-actions">
               <button

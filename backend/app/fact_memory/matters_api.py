@@ -810,10 +810,38 @@ def get_document_report(
 def get_document_file(
     matter_id: str, document_id: str, auth: dict = Depends(_require_analysis_auth)
 ):
-    """Exhibit bytes are not stored. The browser cache or a future vault holds the file."""
-    raise HTTPException(
-        status_code=410,
-        detail="Exhibit files are not stored on the server.",
+    """Return retained exhibit bytes from object storage when SOURCE_FILE_RETENTION keeps them."""
+    from fastapi.responses import Response
+
+    from app.config import settings
+
+    ctx = _ctx(auth)
+    store = get_store()
+    meta = store.get_document_source_blob_key(ctx["firm_id"], matter_id, document_id)
+    if not meta:
+        raise HTTPException(
+            status_code=404 if settings.keep_source_in_blob else 410,
+            detail=(
+                "Source PDF is not retained on the server."
+                if settings.keep_source_in_blob
+                else "Exhibit files are not stored on the server."
+            ),
+        )
+    try:
+        from app.blob_store import get_blob_store
+
+        data = get_blob_store().get(meta["source_blob_key"])
+    except Exception as exc:
+        raise HTTPException(404, "Source PDF could not be read from storage.") from exc
+    name = meta.get("original_filename") or meta.get("display_name") or "document.pdf"
+    safe = "".join(ch if ch.isalnum() or ch in "._- " else "_" for ch in str(name))[:180]
+    return Response(
+        content=data,
+        media_type=meta.get("mime_type") or "application/pdf",
+        headers={
+            "Content-Disposition": f'inline; filename="{safe}"',
+            "Cache-Control": "private, max-age=60",
+        },
     )
 
 
@@ -828,6 +856,89 @@ def attach_document_file(
         status_code=410,
         detail="Exhibit files are not stored on the server.",
     )
+
+
+@matters_router.post("/{matter_id}/documents/{document_id}/rescan")
+def rescan_document_from_storage(
+    matter_id: str,
+    document_id: str,
+    auth: dict = Depends(_require_analysis_auth),
+):
+    """Re-queue analysis using the retained S3/R2 PDF (no browser cache required)."""
+    from app.config import settings
+
+    if not settings.keep_source_in_blob:
+        raise HTTPException(
+            410,
+            "Server-side re-scan requires SOURCE_FILE_RETENTION=s3 (or keep).",
+        )
+    ctx = _ctx(auth)
+    store = get_store()
+    meta = store.get_document_source_blob_key(ctx["firm_id"], matter_id, document_id)
+    if not meta:
+        raise HTTPException(404, "No retained PDF for this document. Locate or re-upload.")
+    try:
+        from app.blob_store import get_blob_store
+
+        data = get_blob_store().get(meta["source_blob_key"])
+    except Exception as exc:
+        raise HTTPException(404, "Retained PDF could not be read from storage.") from exc
+
+    import uuid
+    from pathlib import Path
+
+    from app.scan_dispatch import dispatch_ephemeral_job, retain_source_blob
+    from app.scan_executor import ensure_scan_executor
+    from app.storage import create_job, job_dir, update_job
+
+    name = Path(meta.get("original_filename") or meta.get("display_name") or "document.pdf").name
+    job_id = uuid.uuid4().hex
+    dest_dir = job_dir(job_id)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / name
+    dest.write_bytes(data)
+    create_job(job_id, name)
+    update_job(job_id, message="Queued for analysis (server re-scan).")
+    firm_ctx = {
+        "firm_id": ctx["firm_id"],
+        "user_id": ctx.get("user_id"),
+        "persist_facts": True,
+    }
+    retain_source_blob(
+        firm_id=ctx["firm_id"],
+        matter_id=matter_id,
+        sha256=meta["sha256"],
+        source_path=dest,
+    )
+    ensure_scan_executor()
+    dispatch_ephemeral_job(
+        {
+            "job_id": job_id,
+            "dest": str(dest),
+            "submitted_by": "web-app-server-rescan",
+            "display_name": meta.get("display_name"),
+            "doc_kind": None,
+            "prior_snapshots": [],
+            "matter_id": matter_id,
+            "firm_ctx": firm_ctx,
+            "filed_date": None,
+            "persist": True,
+            "sha256": meta["sha256"],
+        }
+    )
+    store.upsert_analysis_job(
+        job_id=job_id,
+        firm_id=ctx["firm_id"],
+        user_id=ctx.get("user_id"),
+        matter_id=matter_id,
+        document_id=document_id,
+        sha256=meta["sha256"],
+        status="queued",
+        message="Queued for analysis (server re-scan).",
+        original_filename=meta.get("original_filename"),
+        display_name=meta.get("display_name"),
+    )
+    return {"job_id": job_id, "status": "queued", "queued": True, "from_storage": True}
 
 
 @matters_router.patch("/{matter_id}/documents/{document_id}")

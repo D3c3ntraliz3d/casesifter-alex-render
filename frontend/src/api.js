@@ -1355,23 +1355,64 @@ export async function askCaseChat(caseId, question, { focusDocumentId, documents
   return readJson(res);
 }
 
-/** Hosted re-scan: submit cached bytes to /v1/jobs (PDFs are not on the server). */
+/** Hosted re-scan: prefer retained S3 source, else browser cache. */
 async function hostedRescanDocument(caseId, doc) {
   const sha = String(doc?.sha256 || "").toLowerCase();
   if (!sha) {
     throw new Error("This document has no hash. Use Locate or re-upload the file.");
   }
-  const { localCacheAdapter } = await import("./storage/localCache.js");
-  const blob = await localCacheAdapter.getFile(doc.id, sha);
-  if (!blob) {
-    throw new Error(
-      `“${doc.display_name || doc.original_filename || "File"}” is not cached on this computer. Use Locate or re-upload to re-scan.`
-    );
-  }
   const name =
     doc.original_filename ||
     doc.display_name ||
     `rescan-${sha.slice(0, 12)}.pdf`;
+
+  // Durable object storage (SOURCE_FILE_RETENTION=s3/keep) — no Locate needed.
+  if (doc.has_source && !doc.source_missing) {
+    try {
+      const res = await analysisFetch(
+        `/api/v1/matters/${encodeURIComponent(caseId)}/documents/${encodeURIComponent(doc.id)}/rescan`,
+        { method: "POST" }
+      );
+      if (res.ok) {
+        const job = await readJson(res);
+        return {
+          job_id: job.job_id,
+          status: job.status || "queued",
+          queued: true,
+          from_storage: true,
+        };
+      }
+    } catch {
+      /* fall through to file download / local cache */
+    }
+    try {
+      const fileRes = await analysisFetch(
+        `/api/v1/matters/${encodeURIComponent(caseId)}/documents/${encodeURIComponent(doc.id)}/file`
+      );
+      if (fileRes.ok) {
+        const blob = await fileRes.blob();
+        const file = new File([blob], name, { type: blob.type || "application/pdf" });
+        const job = await createAnalysisJob(file, {
+          matterId: caseId,
+          displayName: doc.display_name,
+          docKind: doc.doc_kind || doc.doc_type,
+          filedDate: doc.filed_date || doc.filedDate || undefined,
+          submittedBy: "web-app-rescan-s3",
+        });
+        return { job_id: job.job_id, status: job.status || "queued", queued: true };
+      }
+    } catch {
+      /* fall through */
+    }
+  }
+
+  const { localCacheAdapter } = await import("./storage/localCache.js");
+  const blob = await localCacheAdapter.getFile(doc.id, sha);
+  if (!blob) {
+    throw new Error(
+      `“${doc.display_name || doc.original_filename || "File"}” is not available for re-scan. Use Locate or re-upload.`
+    );
+  }
   const file = new File([blob], name, { type: blob.type || "application/pdf" });
   const job = await createAnalysisJob(file, {
     matterId: caseId,
