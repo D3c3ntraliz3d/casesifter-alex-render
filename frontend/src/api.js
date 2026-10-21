@@ -1404,14 +1404,21 @@ export async function scanDocument(caseId, documentId, docHint = null) {
   return readJson(res);
 }
 
-export async function rescanCase(caseId, { waitingOnly = false } = {}) {
+export async function rescanCase(caseId, { waitingOnly = false, documentIds = null } = {}) {
+  const idFilter =
+    Array.isArray(documentIds) && documentIds.length
+      ? new Set(documentIds.map((id) => String(id)))
+      : null;
   const cs = desktop();
   if (cs) {
     const data = await cs.getCase(caseId);
     let docs = data?.documents || [];
+    if (idFilter) {
+      docs = docs.filter((d) => idFilter.has(String(d.id)));
+    }
     if (waitingOnly) {
       docs = docs.filter((d) => d.status === "uploaded" || d.status === "failed");
-    } else {
+    } else if (!idFilter) {
       // Prefer waiting docs first so a stuck upload pile moves before full re-runs.
       docs = [
         ...docs.filter((d) => d.status === "uploaded" || d.status === "failed"),
@@ -1458,6 +1465,9 @@ export async function rescanCase(caseId, { waitingOnly = false } = {}) {
   if (isHostedAnalysis()) {
     const matter = await getCase(caseId);
     let docs = matter.documents || [];
+    if (idFilter) {
+      docs = docs.filter((d) => idFilter.has(String(d.id)));
+    }
     if (waitingOnly) {
       docs = docs.filter((d) => d.status === "uploaded" || d.status === "failed");
     }

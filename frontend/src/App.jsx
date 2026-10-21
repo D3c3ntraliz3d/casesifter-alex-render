@@ -604,6 +604,16 @@ export default function App() {
   const openDocumentReportRef = useRef(null);
   /** Last known signed-in entitlement — used so a control-plane blip does not wipe the vault. */
   const lastSignedInRef = useRef(null);
+  const caseIdRef = useRef(caseId);
+  const viewRef = useRef(view);
+  const refreshOpenMatterRef = useRef(null);
+  caseIdRef.current = caseId;
+  viewRef.current = view;
+  // Stable identity for CaseWorkspace polling — must not change when caseData updates.
+  const refreshOpenMatter = useMemo(
+    () => () => (refreshOpenMatterRef.current ? refreshOpenMatterRef.current() : Promise.resolve(null)),
+    []
+  );
 
   function navigateApp(route, { replace = false, history = true } = {}) {
     const next = {
@@ -675,7 +685,10 @@ export default function App() {
 
   async function refreshCase(id = caseId) {
     if (!id) return null;
-    const data = await getCase(id);
+    // Pin the matter we are refreshing. Polling must never clear the open matter
+    // or rewrite the route — only update row status in place.
+    const matterId = id;
+    const data = await getCase(matterId);
     // Never silently accept a truncated matter document list.
     if (
       data &&
@@ -688,6 +701,9 @@ export default function App() {
         `Document list incomplete (${got} of ${Number.isFinite(total) ? total : "?"}). Refresh and try again — files were not dropped.`
       );
     }
+    // Ignore late responses after the user left this matter.
+    if (caseIdRef.current && caseIdRef.current !== matterId) return data;
+    const scrollY = typeof window !== "undefined" ? window.scrollY : null;
     setCaseData(data);
     // A successful matter read means analysis is reachable. Drop a stale outage
     // banner left behind by an earlier failed fetch.
@@ -695,8 +711,18 @@ export default function App() {
       setAnalysisOffline(false);
       setError((prev) => (prev === ANALYSIS_OFFLINE_MESSAGE ? "" : prev));
     }
+    // Scan completion re-renders the list; keep the viewport where the user was.
+    if (scrollY != null && typeof window !== "undefined") {
+      requestAnimationFrame(() => {
+        if (caseIdRef.current === matterId) {
+          window.scrollTo(0, scrollY);
+        }
+      });
+    }
     return data;
   }
+
+  refreshOpenMatterRef.current = () => refreshCase(caseIdRef.current);
 
   async function refreshEntitlement() {
     try {
@@ -718,6 +744,25 @@ export default function App() {
       await refreshEntitlement();
     })();
   }, []);
+
+  // Keep /matters/:id in the address bar while a matter is open. A bare "/" here
+  // made full reloads land on the case list after a scan finished.
+  useEffect(() => {
+    if (view !== "case" && view !== "report") return;
+    if (!caseId) return;
+    if (applyingPopState.current) return;
+    const live = parseAppRoute();
+    const docOk = view !== "report" || live.docId === (selectedDocId || null);
+    if (live.matterId === caseId && live.view === view && docOk) return;
+    writeAppHref(
+      {
+        view,
+        matterId: caseId,
+        docId: view === "report" ? selectedDocId : null,
+      },
+      { replace: true }
+    );
+  }, [view, caseId, selectedDocId]);
 
   // Browser back/forward: restore view from the URL without clobbering history.
   useEffect(() => {
@@ -808,6 +853,9 @@ export default function App() {
     if (routeBootstrapped.current) return;
     routeBootstrapped.current = true;
 
+    // Prefer the URL over React view — a stale "boot"/"cases" view must not
+    // replaceState("/") while the address bar still points at a matter (that
+    // made a later reload land on the case list).
     const route = parseAppRoute();
     const fromNext = route.view === "account" ? parseNextTarget(route.next) : null;
     const target = fromNext || route;
@@ -836,12 +884,21 @@ export default function App() {
       }
       return;
     }
-    // Signed-in default for bare `/`: Cases. Never auto-open Admin.
-    if (view === "boot") {
-      goCases({ replace: true });
-    } else if (view === "cases") {
-      writeAppHref({ view: "cases" }, { replace: true });
+    // Already on a matter in React state (URL briefly bare): stay put and sync href.
+    if (caseIdRef.current && (viewRef.current === "case" || viewRef.current === "report")) {
+      const live = parseAppRoute();
+      writeAppHref(
+        {
+          view: viewRef.current,
+          matterId: caseIdRef.current,
+          docId: viewRef.current === "report" ? live.docId : null,
+        },
+        { replace: true }
+      );
+      return;
     }
+    // Signed-in default for bare `/`: Cases. Never auto-open Admin.
+    goCases({ replace: true });
   }, [entitlement?.hasSession, entitlement?.mode, entitlement?.cached]);
 
   // Post-signup: ?checkout=trial → start Stripe Checkout once when billing_state is none.
@@ -943,15 +1000,18 @@ export default function App() {
     setSelectedDocId(null);
     setJob(null);
     setTab("summary");
+    // Switch view before the network round-trip so a slow getCase cannot leave
+    // the case-list mounted (looks like a bounce home when a scan finishes).
+    setView("case");
+    if (historyMode !== "none" && !applyingPopState.current) {
+      writeAppHref({ view: "case", matterId: id, docId: null }, { replace: historyMode === "replace" });
+    }
     try {
       const data = await refreshCase(id);
+      if (caseIdRef.current !== id) return data;
       setCaseData(data);
-      setView("case");
       if (data?.storage_key_recovered && data?.message) {
         setError(String(data.message));
-      }
-      if (historyMode !== "none" && !applyingPopState.current) {
-        writeAppHref({ view: "case", matterId: id, docId: null }, { replace: historyMode === "replace" });
       }
       return data;
     } catch (err) {
@@ -1435,7 +1495,7 @@ export default function App() {
           busy={busy}
           entitlement={entitlement}
           onBack={() => goCases()}
-          onRefresh={() => refreshCase(caseData.id)}
+          onRefresh={refreshOpenMatter}
           onError={setError}
           onOpenReport={openDocumentReport}
           setBusy={setBusy}
@@ -3451,23 +3511,28 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
     }
   }
 
-  async function rescanAll() {
-    if (!docs.length) return;
-    const waitingOnly = waitingDocs.length > 0 && waitingDocs.length === docs.length;
-    const label = waitingOnly
-      ? `Scan all ${docs.length} waiting file${docs.length === 1 ? "" : "s"}? Scans run two at a time.`
-      : waitingDocs.length
-        ? `Rescan all ${docs.length} file${docs.length === 1 ? "" : "s"} (${waitingDocs.length} still waiting)? Scans run two at a time.`
-        : `Rescan all ${docs.length} file${docs.length === 1 ? "" : "s"} in this case? Scans run two at a time and may take a while.`;
+  async function rescanSelected() {
+    const targets = docs.filter((d) => selectedDocs.has(d.id));
+    if (!targets.length) {
+      onError("Select one or more files on this page, then Rescan selected.");
+      return;
+    }
+    const waitingSelected = targets.filter((d) => d.status === "uploaded" || d.status === "failed");
+    const label =
+      waitingSelected.length === targets.length
+        ? `Scan ${targets.length} selected waiting file${targets.length === 1 ? "" : "s"}? Scans run two at a time.`
+        : `Rescan ${targets.length} selected file${targets.length === 1 ? "" : "s"}? Scans run two at a time.`;
     const ok = window.confirm(label);
     if (!ok) return;
-    const targets = docs.slice();
     for (const doc of targets) armRescan(doc);
     setBusy(true);
     scanningRef.current = true;
     setScanBacklogError("");
     try {
-      const result = await rescanCase(caseData.id, { waitingOnly: false });
+      const result = await rescanCase(caseData.id, {
+        waitingOnly: false,
+        documentIds: targets.map((d) => d.id),
+      });
       const startedRows = Array.isArray(result.started) ? result.started : null;
       if (startedRows) {
         const ids = new Set(
@@ -3489,8 +3554,8 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
       const missing = result.missing || [];
       setUploadNote(
         result.status === "idle" && !missing.length
-          ? "Nothing to rescan right now."
-          : `Started rescan of ${result.queued || 0} file${(result.queued || 0) === 1 ? "" : "s"}` +
+          ? "Nothing to rescan in the selection."
+          : `Started rescan of ${result.queued || 0} selected file${(result.queued || 0) === 1 ? "" : "s"}` +
             (missing.length
               ? ` · ${missing.length} need Locate / re-upload: ${missing.slice(0, 5).join(", ")}${
                   missing.length > 5 ? ` +${missing.length - 5} more` : ""
@@ -3537,11 +3602,21 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
           <button className="text-link" type="button" onClick={() => { setBusy(false); onBack(); }}>← All cases</button>
           <div className="row-actions">
             {!caseData.archived_at && docs.length > 0 && (
-              <button className="btn secondary" type="button" disabled={busy} onClick={rescanAll}>
+              <button
+                className="btn secondary"
+                type="button"
+                disabled={busy || selectedDocs.size === 0}
+                title={
+                  selectedDocs.size === 0
+                    ? "Select files on this page to rescan"
+                    : `Rescan ${selectedDocs.size} selected file${selectedDocs.size === 1 ? "" : "s"}`
+                }
+                onClick={rescanSelected}
+              >
                 <RefreshCw size={14} />{" "}
-                {waitingDocs.length > 0 && waitingDocs.length === docs.length
-                  ? "Scan all waiting"
-                  : "Rescan all"}
+                {selectedDocs.size === 0
+                  ? "Rescan selected"
+                  : `Rescan selected (${selectedDocs.size})`}
               </button>
             )}
             {!caseData.archived_at &&
@@ -4558,7 +4633,8 @@ function CaseGotchaBoard({
 
   useEffect(() => {
     let cancelled = false;
-    setLoaded(false);
+    // Keep prior board visible while refreshing after a scan — flashing
+    // "Loading…" plus panel reset felt like leaving the matter.
     setLoadError(false);
     listCaseGotchas(caseId)
       .then((data) => {
@@ -4590,11 +4666,14 @@ function CaseGotchaBoard({
   }, [caseId, docKey]);
 
   useEffect(() => {
+    // Only reset board chrome when switching matters — not on every scan status flip
+    // (that reopened Case Impact and jerked the page toward the masthead).
     setShowAll(false);
     setShowIgnored(false);
     setOpenKey("");
     userToggledPanel.current = false;
-  }, [caseId, docKey]);
+    setPanelOpen(false);
+  }, [caseId]);
 
   const materialGotchas = dedupeBoardItems(
     gotchas.filter((item) => item.case_impact !== "noise" && item.severity !== "info"),
@@ -4624,9 +4703,9 @@ function CaseGotchaBoard({
 
   useEffect(() => {
     if (!loaded || userToggledPanel.current) return;
-    // Open by default when there are interrupts so partners see the product beat.
+    // Open once when interrupts first appear; do not re-toggle on each doc refresh.
     setPanelOpen(hasInterrupts);
-  }, [loaded, hasInterrupts, caseId, docKey]);
+  }, [loaded, hasInterrupts, caseId]);
 
   const summaryLabel = !loaded
     ? "Loading…"
