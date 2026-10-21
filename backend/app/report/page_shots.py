@@ -247,18 +247,19 @@ def _build_shot(
 ) -> tuple[Image.Image, str]:
     rgb = page.convert("RGB")
     w, h = rgb.size
-    label = f"Page {page_no}  ·  {_short(title, 72)}"
+    label = f"p.{page_no}  ·  {_short(title, 64)}"
     if bbox is not None:
         x0, y0, x1, y1 = bbox
-        # Pad around the real region so context is visible.
-        pad_x = max(24, int((x1 - x0) * 0.35))
-        pad_y = max(24, int((y1 - y0) * 0.45))
+        # Tight pad — enough context, no sparse white voids around the highlight.
+        bw, bh = x1 - x0, y1 - y0
+        pad_x = max(10, min(36, int(bw * 0.12)))
+        pad_y = max(10, min(40, int(bh * 0.18)))
         cx0 = max(0, x0 - pad_x)
         cy0 = max(0, y0 - pad_y)
         cx1 = min(w, x1 + pad_x)
         cy1 = min(h, y1 + pad_y)
-        # Prefer a readable crop height.
-        min_h = min(h, max(280, int(h * 0.28)))
+        # Only expand tiny boxes; never force a tall empty band.
+        min_h = min(h, max(96, int(bh * 1.35), int(h * 0.12)))
         if (cy1 - cy0) < min_h:
             mid = (cy0 + cy1) // 2
             cy0 = max(0, mid - min_h // 2)
@@ -266,19 +267,24 @@ def _build_shot(
             cy0 = max(0, cy1 - min_h)
         annotated = rgb.copy()
         draw = ImageDraw.Draw(annotated, "RGBA")
-        # Semi-transparent highlight fill + strong border — only on real bbox.
-        draw.rectangle([x0, y0, x1, y1], fill=(255, 214, 10, 55), outline=(200, 40, 40, 230), width=3)
+        # Readable teal wash + crisp border — hugs recorded coords only.
+        draw.rectangle(
+            [x0, y0, x1, y1],
+            fill=(14, 124, 123, 48),
+            outline=(180, 35, 24, 235),
+            width=max(2, min(3, max(1, int(min(bw, bh) * 0.04)))),
+        )
         crop = annotated.crop((cx0, cy0, cx1, cy1))
         return _with_callout(crop, label), "bbox_highlight"
 
     # Page-only: trim margins and take a zoomed content band (no fake highlight box).
-    mx, my = int(w * 0.03), int(h * 0.02)
+    mx, my = int(w * 0.04), int(h * 0.03)
     trimmed = rgb.crop((mx, my, w - mx, h - my))
     tw, th = trimmed.size
-    # Zoom into the upper-middle content band on tall pages.
+    # Zoom into the upper-middle content band on tall pages — shorter than before.
     if th > tw * 1.15:
-        band = int(th * 0.55)
-        top = int(th * 0.08)
+        band = int(th * 0.42)
+        top = int(th * 0.06)
         crop = trimmed.crop((0, top, tw, min(th, top + band)))
     else:
         crop = trimmed
@@ -288,14 +294,15 @@ def _build_shot(
 def _with_callout(image: Image.Image, label: str) -> Image.Image:
     img = image.convert("RGB")
     w, h = img.size
-    bar_h = max(28, min(44, int(h * 0.08)))
-    canvas = Image.new("RGB", (w, h + bar_h), (26, 54, 93))
+    # Slim navy label bar — hugs the crop instead of a tall banner.
+    bar_h = max(22, min(30, int(h * 0.055)))
+    canvas = Image.new("RGB", (w, h + bar_h), (20, 50, 74))
     canvas.paste(img, (0, bar_h))
     draw = ImageDraw.Draw(canvas)
     font = ImageFont.load_default()
-    draw.text((10, max(6, (bar_h - 12) // 2)), label, fill=(247, 250, 252), font=font)
-    # Thin accent under the bar.
-    draw.rectangle([0, bar_h - 2, w, bar_h], fill=(196, 154, 58))
+    draw.text((8, max(4, (bar_h - 11) // 2)), label, fill=(244, 255, 254), font=font)
+    # Teal accent hairline (brand, not gold chrome).
+    draw.rectangle([0, bar_h - 2, w, bar_h], fill=(14, 124, 123))
     return _fit_max_edge(canvas, _MAX_EDGE_PX)
 
 

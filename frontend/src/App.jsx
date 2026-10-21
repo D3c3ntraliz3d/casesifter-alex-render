@@ -5048,12 +5048,15 @@ function CaseGotchaBoard({
       ? (evidenceQuote || bodyFallback || "See the scan report for each flagged item.")
       : (!hasQuotes ? bodyFallback : "");
     const showWhy = whyLine && whyLine !== bodyText;
+    const hasPageShot = typeof item.evidence?.page_shot === "string"
+      && item.evidence.page_shot.startsWith("data:image");
+    const shotPage = item.evidence?.page_shot_page ?? pageNum;
 
     return (
       <>
         {claimQuote ? (
           <p className="gotcha-quote">
-            <strong>Claim:</strong> “{claimQuote}”
+            <strong>Claim</strong> “{claimQuote}”
             {claimSource ? ` — ${claimSource}` : ""}
           </p>
         ) : null}
@@ -5061,7 +5064,7 @@ function CaseGotchaBoard({
           <p className="gotcha-quote">{bodyText}</p>
         ) : evidenceQuote ? (
           <p className="gotcha-quote">
-            <strong>{evidenceLabel}:</strong> “{evidenceQuote}”
+            <strong>{evidenceLabel}</strong> “{evidenceQuote}”
             {evidenceSource ? ` — ${evidenceSource}` : ""}
           </p>
         ) : bodyText ? (
@@ -5070,8 +5073,13 @@ function CaseGotchaBoard({
         {selfUndercut ? (
           <p className="footnote">This party’s own record appears to undercut their claim.</p>
         ) : null}
+        {showWhy ? (
+          <p className="gotcha-why">
+            <strong>Why</strong> {whyLine}
+          </p>
+        ) : null}
         {pageNum != null ? (
-          <p className="footnote">
+          <p className="finding-meta">
             {primarySource ? (
               <button
                 type="button"
@@ -5079,19 +5087,28 @@ function CaseGotchaBoard({
                 onClick={() => openSourceAtPage(primarySource, pageNum)}
                 title={`Open source at page ${pageNum}`}
               >
-                Jump to page {pageNum}
+                Jump to p.{pageNum}
               </button>
             ) : (
-              <>Page {pageNum}</>
+              <span>p.{pageNum}</span>
             )}
           </p>
         ) : (
           <p className="footnote">Page not recorded for this interrupt</p>
         )}
-        {showWhy ? (
-          <p className="gotcha-why">
-            <strong>Why it matters:</strong> {whyLine}
-          </p>
+        {hasPageShot ? (
+          <figure className="finding-page-shot">
+            <figcaption>
+              {item.evidence.page_shot_kind === "bbox_highlight"
+                ? "Highlighted region"
+                : "Page crop"}
+              {shotPage != null ? ` · p.${shotPage}` : ""}
+            </figcaption>
+            <img
+              src={item.evidence.page_shot}
+              alt={`Page ${shotPage || ""} screenshot`}
+            />
+          </figure>
         ) : null}
         {!claimQuote && !evidenceQuote && !bodyText && !showWhy ? (
           <p className="footnote">Open the scan report for details on this interrupt.</p>
@@ -8457,6 +8474,10 @@ function FindingCard({
     }
   }
 
+  const hasPageShot = typeof item.evidence?.page_shot === "string"
+    && item.evidence.page_shot.startsWith("data:image");
+  const shotPage = item.evidence?.page_shot_page ?? pageNum;
+
   return (
     <article className={`finding${gotcha ? " gotcha-card" : ""}${ignored ? " finding-ignored" : ""}`}>
       <header>
@@ -8467,68 +8488,88 @@ function FindingCard({
           {item.severity} · {Math.round(item.confidence)}%
         </span>
       </header>
-      <p className="footnote">
-        {CATEGORY[item.category] || item.category}
+      <p className="finding-meta">
+        <span>{CATEGORY[item.category] || item.category}</span>
         {pageNum != null ? (
+          (canJumpToSource || fingerprint) ? (
+            <a
+              className="linkish"
+              href={`#page=${pageNum}`}
+              onClick={(e) => openPageCite(e, pageNum)}
+              title={
+                canJumpToSource
+                  ? `Jump to page ${pageNum} in source viewer`
+                  : `Open local file at page ${pageNum}`
+              }
+            >
+              Jump to p.{pageNum}
+            </a>
+          ) : (
+            <span title="Source file not available to open">p.{pageNum}</span>
+          )
+        ) : (
+          <span>Page not recorded</span>
+        )}
+        {caseHit && item.evidence?.prior_display_name ? (
+          <span>Prior: {item.evidence.prior_display_name}</span>
+        ) : null}
+      </p>
+      <div className="finding-stack">
+        {tainted ? (
+          <p className="gotcha-quote">{taintedCopy.detail}</p>
+        ) : claimQuote || evidenceQuote ? (
           <>
-            {" · "}
-            {(canJumpToSource || fingerprint) ? (
-              <a
-                className="linkish"
-                href={`#page=${pageNum}`}
-                onClick={(e) => openPageCite(e, pageNum)}
-                title={
-                  canJumpToSource
-                    ? `Jump to page ${pageNum} in source viewer`
-                    : `Open local file at page ${pageNum}`
-                }
-              >
-                page {pageNum}
-              </a>
-            ) : (
-              <span title="Source file not available to open">page {pageNum}</span>
+            {claimQuote ? (
+              <p className="gotcha-quote">
+                <strong>Claim</strong> “{claimQuote}”
+                {claimSource ? ` — ${claimSource}` : ""}
+              </p>
+            ) : null}
+            {evidenceQuote ? (
+              <p className="gotcha-quote">
+                <strong>{evidenceLabel}</strong> “{evidenceQuote}”
+                {evidenceSource ? ` — ${evidenceSource}` : ""}
+              </p>
+            ) : null}
+            {item.evidence?.self_undercut && (
+              <p className="footnote">This party’s own record appears to undercut their claim.</p>
             )}
+            {item.explanation && !claimQuote ? <p>{item.explanation}</p> : null}
           </>
         ) : (
-          <> · page not recorded</>
+          item.explanation ? <p>{item.explanation}</p> : null
         )}
-      </p>
-      {caseHit && item.evidence?.prior_display_name && (
-        <p className="footnote">Prior file: {item.evidence.prior_display_name}</p>
-      )}
-      {tainted ? (
-        <p>{taintedCopy.detail}</p>
-      ) : claimQuote || evidenceQuote ? (
-        <>
-          {claimQuote ? (
-            <p className="gotcha-quote">
-              <strong>Claim:</strong> “{claimQuote}”
-              {claimSource ? ` — ${claimSource}` : ""}
-            </p>
-          ) : null}
-          {evidenceQuote ? (
-            <p className="gotcha-quote">
-              <strong>{evidenceLabel}:</strong> “{evidenceQuote}”
-              {evidenceSource ? ` — ${evidenceSource}` : ""}
-            </p>
-          ) : null}
-          {item.evidence?.self_undercut && (
-            <p className="footnote">This party’s own record appears to undercut their claim.</p>
-          )}
-          {item.explanation && !claimQuote ? <p>{item.explanation}</p> : null}
-        </>
-      ) : (
-        <p>{item.explanation}</p>
-      )}
+        {(tainted ? taintedCopy.why : (whyMatter || item.why_suspicious)) ? (
+          <p className="why">
+            <strong>Why</strong>{" "}
+            {tainted ? taintedCopy.why : (whyMatter || item.why_suspicious)}
+          </p>
+        ) : null}
+      </div>
+      {hasPageShot ? (
+        <figure className="finding-page-shot">
+          <figcaption>
+            {item.evidence.page_shot_kind === "bbox_highlight"
+              ? "Highlighted region"
+              : "Page crop"}
+            {shotPage != null ? ` · p.${shotPage}` : ""}
+          </figcaption>
+          <img
+            src={item.evidence.page_shot}
+            alt={`Page ${shotPage || ""} screenshot`}
+          />
+        </figure>
+      ) : null}
+      {heat && <img className="heatmap" src={heat} alt="Forensic overlay" />}
       {refs.length > 0 && (
-        <p className="footnote">
-          Source cites:{" "}
+        <p className="finding-meta">
+          <span>Sources</span>
           {refs.map((ref, i) => {
             const p = normalizePageNum(ref.page) ?? pageNum;
             const label = (ref.display_name || "document").slice(0, 40);
             if (p == null && !ref.sha256 && !fingerprint && !canJumpToSource) {
               return (
-                <span key={`${ref.document_id || label}-${i}`} style={{ marginRight: 8 }}>
+                <span key={`${ref.document_id || label}-${i}`}>
                   {label} (page not recorded)
                 </span>
               );
@@ -8542,31 +8583,26 @@ function FindingCard({
                   e.preventDefault();
                   openRef(ref, p);
                 }}
-                style={{ marginRight: 8 }}
                 title={p != null ? `Open at page ${p}` : "Open document (page not recorded)"}
               >
                 {label}
-                {p != null ? ` p.${p}` : " (page not recorded)"}
+                {p != null ? ` p.${p}` : ""}
               </a>
             );
           })}
         </p>
       )}
       {linkNote && <p className="footnote" style={{ color: "var(--danger, #b33)" }}>{linkNote}</p>}
-      {(tainted ? taintedCopy.why : (whyMatter || item.why_suspicious)) ? (
-        <p className="why">
-          <strong>Why it matters:</strong>{" "}
-          {tainted ? taintedCopy.why : (whyMatter || item.why_suspicious)}
-        </p>
-      ) : null}
       {aiLead && (
         <p className="ai-lead footnote">
           AI-assisted lead — verify independently before relying on it.
         </p>
       )}
-      {item.recommended_action && <p><strong>Suggested next step:</strong> {item.recommended_action}</p>}
+      {item.recommended_action && (
+        <p className="why"><strong>Next</strong> {item.recommended_action}</p>
+      )}
       {showJudgment && (
-        <div className="actions finding-feedback-actions" style={{ marginTop: 8 }}>
+        <div className="actions finding-feedback-actions">
           {ignored ? (
             <button
               className="btn secondary"
@@ -8616,7 +8652,7 @@ function FindingCard({
         </div>
       )}
       {caseHit && !showJudgment && (
-        <div className="actions" style={{ marginTop: 8 }}>
+        <div className="actions">
           <span className="footnote">Was this case alert useful?</span>
           <button
             className="btn secondary"
@@ -8656,18 +8692,6 @@ function FindingCard({
         </div>
       )}
       <div className="conf"><span style={{ width: `${item.confidence}%` }} /></div>
-      {typeof item.evidence?.page_shot === "string" && item.evidence.page_shot.startsWith("data:image") ? (
-        <figure className="finding-page-shot">
-          <img src={item.evidence.page_shot} alt={`Page ${item.evidence.page_shot_page || pageNum || ""} screenshot`} />
-          <figcaption className="footnote">
-            {item.evidence.page_shot_kind === "bbox_highlight"
-              ? "Highlighted region from recorded coordinates"
-              : "Zoomed page crop"}
-            {item.evidence.page_shot_page != null ? ` · p.${item.evidence.page_shot_page}` : ""}
-          </figcaption>
-        </figure>
-      ) : null}
-      {heat && <img className="heatmap" src={heat} alt="Forensic overlay" />}
     </article>
   );
 }

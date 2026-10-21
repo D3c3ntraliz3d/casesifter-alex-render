@@ -167,15 +167,13 @@ def _brand_masthead(styles) -> Table:
         TableStyle(
             [
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ("LEFTPADDING", (0, 0), (0, 0), 0),
-                ("RIGHTPADDING", (0, 0), (0, 0), 8),
-                ("LEFTPADDING", (1, 0), (1, 0), 4),
                 ("BACKGROUND", (0, 0), (-1, -1), colors.white),
-                ("BOX", (0, 0), (-1, -1), 0.6, _LINE),
-                ("TOPPADDING", (0, 0), (-1, -1), 10),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
-                ("LEFTPADDING", (0, 0), (-1, -1), 12),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+                ("BOX", (0, 0), (-1, -1), 0.5, _LINE),
+                ("TOPPADDING", (0, 0), (-1, -1), 7),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+                ("LEFTPADDING", (0, 0), (-1, -1), 9),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 9),
+                ("RIGHTPADDING", (0, 0), (0, 0), 6),
             ]
         )
     )
@@ -245,19 +243,19 @@ def _build_pdf(report: Report, destination: str | io.BytesIO) -> None:
         ParagraphStyle(
             name="Section",
             fontName="Helvetica-Bold",
-            fontSize=12,
-            leading=15,
+            fontSize=11,
+            leading=14,
             textColor=_NAVY,
-            spaceBefore=16,
-            spaceAfter=8,
+            spaceBefore=12,
+            spaceAfter=5,
         )
     )
     styles.add(
         ParagraphStyle(
             name="Body",
             fontName="Helvetica",
-            fontSize=10,
-            leading=13,
+            fontSize=9.5,
+            leading=12,
             textColor=_INK,
         )
     )
@@ -266,7 +264,7 @@ def _build_pdf(report: Report, destination: str | io.BytesIO) -> None:
             name="Small",
             fontName="Helvetica",
             fontSize=8,
-            leading=11,
+            leading=10,
             textColor=_MUTED,
         )
     )
@@ -274,11 +272,11 @@ def _build_pdf(report: Report, destination: str | io.BytesIO) -> None:
         ParagraphStyle(
             name="FindingTitle",
             fontName="Helvetica-Bold",
-            fontSize=11,
-            leading=14,
+            fontSize=10.5,
+            leading=13,
             textColor=_NAVY,
             spaceBefore=0,
-            spaceAfter=4,
+            spaceAfter=2,
         )
     )
     styles.add(
@@ -286,11 +284,11 @@ def _build_pdf(report: Report, destination: str | io.BytesIO) -> None:
             name="Quote",
             fontName="Helvetica",
             fontSize=9,
-            leading=12,
+            leading=11,
             textColor=_INK,
-            leftIndent=4,
-            spaceBefore=2,
-            spaceAfter=2,
+            leftIndent=2,
+            spaceBefore=1,
+            spaceAfter=1,
         )
     )
 
@@ -309,14 +307,14 @@ def _build_pdf(report: Report, destination: str | io.BytesIO) -> None:
 
     story = []
     story.append(_brand_masthead(styles))
-    story.append(Spacer(1, 14))
+    story.append(Spacer(1, 10))
     story.append(Paragraph("AUTHENTICITY REPORT", styles["Kicker"]))
     story.append(Paragraph(report.audit.filename, styles["CoverTitle"]))
     story.append(Paragraph(
         f"Software v{__version__} · SHA-256 {report.audit.sha256}",
         styles["Small"],
     ))
-    story.append(Spacer(1, 8))
+    story.append(Spacer(1, 6))
     badge = Table(
         [[Paragraph(
             f"<b>{risk_banner(report.risk_level, report.findings)}</b>"
@@ -326,7 +324,7 @@ def _build_pdf(report: Report, destination: str | io.BytesIO) -> None:
                 parent=styles["Body"],
                 textColor=risk_color,
                 fontName="Helvetica-Bold",
-                fontSize=10,
+                fontSize=9.5,
             ),
         )]],
         colWidths=[6.5 * inch],
@@ -335,16 +333,16 @@ def _build_pdf(report: Report, destination: str | io.BytesIO) -> None:
         TableStyle(
             [
                 ("BACKGROUND", (0, 0), (-1, -1), risk_bg),
-                ("LEFTPADDING", (0, 0), (-1, -1), 12),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 12),
-                ("TOPPADDING", (0, 0), (-1, -1), 9),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 9),
+                ("LEFTPADDING", (0, 0), (-1, -1), 9),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 9),
+                ("TOPPADDING", (0, 0), (-1, -1), 6),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
                 ("BOX", (0, 0), (-1, -1), 0.5, _LINE),
             ]
         )
     )
     story.append(badge)
-    story.append(Spacer(1, 8))
+    story.append(Spacer(1, 4))
     story.append(Paragraph("Executive summary", styles["Section"]))
     story.append(Paragraph(report.executive_summary, styles["Body"]))
 
@@ -386,16 +384,16 @@ def _build_pdf(report: Report, destination: str | io.BytesIO) -> None:
             src = ev.get("claim_source") or ""
             block.append(
                 Paragraph(
-                    f"<b>Claim:</b> “{claim_q}”" + (f" — {src}" if src else ""),
+                    f"<b>CLAIM</b> “{claim_q}”" + (f" — {src}" if src else ""),
                     styles["Quote"],
                 )
             )
         if evidence_q:
-            label = ev.get("evidence_label") or "Evidence"
+            label = (ev.get("evidence_label") or "Evidence").upper()
             src = ev.get("evidence_source") or ""
             block.append(
                 Paragraph(
-                    f"<b>{label}:</b> “{evidence_q}”" + (f" — {src}" if src else ""),
+                    f"<b>{label}</b> “{evidence_q}”" + (f" — {src}" if src else ""),
                     styles["Quote"],
                 )
             )
@@ -404,7 +402,7 @@ def _build_pdf(report: Report, destination: str | io.BytesIO) -> None:
         if item.why_suspicious:
             block.append(
                 Paragraph(
-                    f"<b>Why it matters:</b> {item.why_suspicious}",
+                    f"<b>WHY</b> {item.why_suspicious}",
                     styles["Small"],
                 )
             )
@@ -412,20 +410,23 @@ def _build_pdf(report: Report, destination: str | io.BytesIO) -> None:
         shot_kind = ev.get("page_shot_kind") or ""
         if page_shot:
             kind_note = (
-                "Highlighted region (from recorded coordinates)."
+                "Highlighted region"
                 if shot_kind == "bbox_highlight"
-                else "Zoomed page crop — coordinates were not recorded for a tighter highlight."
+                else "Page crop"
             )
-            block.append(Paragraph(f"<b>Exhibit screenshot:</b> {kind_note}", styles["Small"]))
-            flow = _evidence_image_flowable(page_shot, report.job_id, max_h=3.4 * inch)
+            shot_page = ev.get("page_shot_page")
+            if shot_page:
+                kind_note = f"{kind_note} · p.{shot_page}"
+            block.append(Paragraph(f"<b>{kind_note}</b>", styles["Small"]))
+            flow = _evidence_image_flowable(page_shot, report.job_id, max_h=2.8 * inch)
             if flow is not None:
-                block.append(Spacer(1, 4))
+                block.append(Spacer(1, 2))
                 block.append(flow)
         heatmap = ev.get("heatmap")
         if heatmap:
-            flow = _evidence_image_flowable(heatmap, report.job_id, max_h=3.0 * inch)
+            flow = _evidence_image_flowable(heatmap, report.job_id, max_h=2.6 * inch)
             if flow is not None:
-                block.append(Paragraph("<b>Forensic overlay</b>", styles["Small"]))
+                block.append(Paragraph("<b>FORENSIC OVERLAY</b>", styles["Small"]))
                 block.append(flow)
 
         card = Table([[block]], colWidths=[6.5 * inch])
@@ -433,17 +434,17 @@ def _build_pdf(report: Report, destination: str | io.BytesIO) -> None:
             TableStyle(
                 [
                     ("BACKGROUND", (0, 0), (-1, -1), colors.white),
-                    ("BOX", (0, 0), (-1, -1), 0.6, _LINE),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 12),
-                    ("RIGHTPADDING", (0, 0), (-1, -1), 12),
-                    ("TOPPADDING", (0, 0), (-1, -1), 10),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
-                    ("LINEBEFORE", (0, 0), (0, 0), 3.2, _finding_accent(str(item.severity))),
+                    ("BOX", (0, 0), (-1, -1), 0.5, _LINE),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 9),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 9),
+                    ("TOPPADDING", (0, 0), (-1, -1), 7),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+                    ("LINEBEFORE", (0, 0), (0, 0), 2.8, _finding_accent(str(item.severity))),
                 ]
             )
         )
         story.append(card)
-        story.append(Spacer(1, 8))
+        story.append(Spacer(1, 6))
 
     if report.timeline:
         story.append(Paragraph("Timeline", styles["Section"]))
