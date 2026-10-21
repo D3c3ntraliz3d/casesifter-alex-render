@@ -2580,12 +2580,23 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
   }, [caseData.id, caseData.archived_at, onRefresh]);
   const docIdKey = docs.map((d) => d.id).join("\n");
   const waitingDocs = shownDocs.filter((d) => d.status === "uploaded" || d.status === "failed");
-  const pendingOrScanning = shownDocs.filter(
-    (d) =>
+  const pendingOrScanning = shownDocs.filter((d) => {
+    const st = String(d.status || "");
+    if (
+      st === "interrupted" ||
+      st === "failed" ||
+      st === "cancelled" ||
+      st === "canceled" ||
+      st === "complete"
+    ) {
+      return false;
+    }
+    return (
       Boolean(d.pending_upload) ||
       isScanInProgress(d) ||
-      ["uploaded", "queued", "waiting", "scanning", "running", "local_done"].includes(d.status)
-  );
+      ["uploaded", "queued", "waiting", "scanning", "running", "local_done"].includes(st)
+    );
+  });
   const docFiltersActive =
     Boolean(docFilters.risk) ||
     Boolean(docFilters.clearance) ||
@@ -4255,18 +4266,23 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
             {pageDocs.map((doc) => {
               const title = docListTitle(doc);
               const fullName = doc.original_filename || doc.display_name || "";
-              const pendingOnly = Boolean(doc.pending_upload);
-              const inProgress = isScanInProgress(doc) || pendingOnly;
-              const cancelJobId = inProgress && isHostedAnalysis() ? resolveCancelJobId(doc) : null;
+              // Don't keep "Uploading…" chrome after the server already settled the job.
+              const settledUpload = ["complete", "failed", "interrupted", "cancelled", "canceled"].includes(
+                String(doc.status || "")
+              );
+              const pendingOnly = Boolean(doc.pending_upload) && !settledUpload;
+              const scanningNow = isScanInProgress(doc) || pendingOnly;
+              const cancelJobId = scanningNow && isHostedAnalysis() ? resolveCancelJobId(doc) : null;
               const cancelling = cancellingIds.has(doc.id);
-              const clearance = rowClearance(doc);
-              const scannedAt = inProgress
+              const clearance = pendingOnly ? "scanning" : rowClearance(doc);
+              const scannedAt = scanningNow
                 ? null
                 : (doc.last_scanned_at || doc.scanned_at || stampById[doc.id] || null);
               const lights = checkLights(doc);
               const hasReport = Boolean(doc.has_report || doc.status === "complete");
-              const statusLabel =
-                clearance === "scanning"
+              const statusLabel = pendingOnly
+                ? "Uploading"
+                : clearance === "scanning"
                   ? "Scanning"
                   : clearance === "interrupted"
                     ? "Interrupted"
@@ -4279,10 +4295,10 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
                           : clearance === "complete"
                             ? "Complete"
                             : doc.status;
-              const riskLevel = !inProgress && !pendingOnly ? doc.risk_level : null;
+              const riskLevel = !scanningNow && !pendingOnly ? doc.risk_level : null;
               const riskBand =
                 riskLevel && ["red", "yellow", "incomplete"].includes(riskLevel) ? riskLevel : "";
-              const riskLabel = inProgress
+              const riskLabel = scanningNow
                 ? "—"
                 : clearance === "interrupted" || clearance === "failed"
                   ? "—"
@@ -4469,12 +4485,12 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
                 </td>
                 <td className="row-actions">
                   <div className="doc-actions">
-                    {hasReport && !inProgress && !pendingOnly && (
+                    {hasReport && !scanningNow && !pendingOnly && (
                       <button className="btn gold" type="button" onClick={() => onOpenReport(doc)}>
                         Report
                       </button>
                     )}
-                    {inProgress && isHostedAnalysis() && (
+                    {scanningNow && isHostedAnalysis() && (
                       <button
                         className="btn secondary"
                         type="button"
@@ -4489,7 +4505,7 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
                         {cancelling ? "Cancelling…" : "Cancel"}
                       </button>
                     )}
-                    {docNeedsLocate(doc) && !inProgress && !pendingOnly ? (
+                    {docNeedsLocate(doc) && !scanningNow && !pendingOnly ? (
                       <button
                         className="btn secondary"
                         type="button"
@@ -4501,7 +4517,7 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
                       </button>
                     ) : null}
                     {hasReport &&
-                      !inProgress &&
+                      !scanningNow &&
                       !pendingOnly &&
                       doc.ai_review === "incomplete" &&
                       !docNeedsLocate(doc) && (
@@ -4509,13 +4525,13 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
                         className="btn secondary"
                         type="button"
                         title="Visual model pass did not finish — re-run AI from the cached PDF (not a fraud finding)"
-                        disabled={Boolean(busy) && Boolean(inProgress)}
+                        disabled={Boolean(busy) && Boolean(scanningNow)}
                         onClick={() => rerunAi(doc)}
                       >
                         Re-run AI
                       </button>
                     )}
-                    {!inProgress &&
+                    {!scanningNow &&
                       !pendingOnly &&
                       !docNeedsLocate(doc) &&
                       (clearance === "failed" ||
@@ -4530,7 +4546,7 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
                         className="btn secondary"
                         type="button"
                         title="Re-scan from the cached PDF on this computer"
-                        disabled={Boolean(busy) && Boolean(inProgress)}
+                        disabled={Boolean(busy) && Boolean(scanningNow)}
                         onClick={() => rescan(doc)}
                       >
                         {clearance === "complete" ||

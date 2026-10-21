@@ -280,9 +280,7 @@ h1, h2, h3, .serif {
 .card.flush { padding: 0; overflow: hidden; }
 .card.case-hero {
   padding: var(--pad-card);
-  background:
-    linear-gradient(160deg, rgba(14, 124, 123, 0.05), transparent 42%),
-    var(--surface-solid);
+  background: var(--surface-solid);
 }
 .card.triage-card {
   padding: 10px 12px;
@@ -332,20 +330,27 @@ h1, h2, h3, .serif {
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
-  background: var(--navy-soft, #eef2f7);
-  border: 1px solid var(--line-strong, #c5d0de);
+  background: #fff;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
   border-radius: var(--radius-sm);
   padding: 8px 12px;
-  margin: 0 0 var(--space-3);
+  margin: 0 0 var(--space-2);
 }
 .banner.scan-backlog.warn {
-  background: #fff6e8;
-  border-color: #e8c48a;
+  background: #fff;
+  border-color: var(--line);
+  border-left-color: #c48a2e;
 }
 .banner.scan-backlog strong {
   display: block;
-  font-size: 14px;
+  font-size: 13px;
+  font-weight: 600;
   color: var(--navy);
+}
+.banner.scan-backlog .footnote {
+  color: var(--muted);
+  font-size: 12px;
 }
 .crumb-bar { margin-bottom: var(--space-2); }
 .text-link {
@@ -1057,8 +1062,14 @@ table.data.docs td.check-col input {
   height: 15px;
   accent-color: var(--accent);
 }
-table.data.docs tr.selected td {
-  background: var(--accent-soft);
+table.data.docs tbody tr td {
+  background: #fff;
+}
+table.data.docs tr.selected > td {
+  background: #f7fafb;
+}
+table.data.docs tr.selected > td:first-child {
+  box-shadow: inset 3px 0 0 var(--accent);
 }
 table.data.docs th,
 table.data.docs td {
@@ -1127,26 +1138,21 @@ table.data.docs .doc-check-dot.ok { background: var(--green); }
 table.data.docs .doc-check-dot.running { background: var(--yellow); }
 table.data.docs .doc-check-dot.warn { background: color-mix(in srgb, var(--yellow) 75%, #c47a00); }
 table.data.docs .doc-check-dot.failed { background: var(--red); }
-table.data.docs tr.risk-row.risk-red > td {
-  background: color-mix(in srgb, var(--red) 7%, transparent);
-}
+/* Risk: left rail only — no full-row color wash (reads cleaner for lawyers). */
 table.data.docs tr.risk-row.risk-red > td:first-child {
-  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--red) 55%, transparent);
-}
-table.data.docs tr.risk-row.risk-yellow > td {
-  background: color-mix(in srgb, var(--yellow) 9%, transparent);
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--red) 70%, transparent);
 }
 table.data.docs tr.risk-row.risk-yellow > td:first-child {
-  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--yellow) 50%, transparent);
-}
-table.data.docs tr.risk-row.risk-incomplete > td {
-  background: color-mix(in srgb, var(--navy) 5%, transparent);
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--yellow) 65%, transparent);
 }
 table.data.docs tr.risk-row.risk-incomplete > td:first-child {
-  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--navy) 28%, transparent);
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--navy) 35%, transparent);
 }
 table.data.docs tr.risk-row.selected > td {
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  background: #f7fafb;
+}
+table.data.docs tr.risk-row.selected > td:first-child {
+  box-shadow: inset 3px 0 0 var(--accent);
 }
 table.data.docs .doc-status-block {
   display: grid;
@@ -1256,13 +1262,13 @@ table.data.docs .doc-profile-tags li {
 }
 .doc-filter-bar {
   margin: 0 0 var(--space-2);
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--line);
+  padding: 0;
+  border: 0;
 }
 .doc-filter-groups {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px 12px;
+  gap: 6px 10px;
   align-items: flex-end;
 }
 .doc-filter-group {
@@ -2270,7 +2276,10 @@ table.data td.row-actions { width: 1%; text-align: right; }
 }
 .matter-docs .cache-banner {
   margin: 0 0 var(--space-2);
-  padding: 6px 10px;
+  padding: 8px 12px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-left: 3px solid #c48a2e;
 }
 .matter-docs .cache-banner-actions {
   display: flex;
