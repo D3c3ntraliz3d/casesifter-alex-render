@@ -3678,20 +3678,6 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
         <div className="toolbar tight">
           <button className="text-link" type="button" onClick={() => { setBusy(false); onBack(); }}>← All cases</button>
           <div className="row-actions">
-            {!caseData.archived_at &&
-              isHostedAnalysis() &&
-              missingCacheCount > 0 && (
-              <button
-                className="btn gold"
-                type="button"
-                disabled={busy || locatingFiles}
-                title="Match missing PDFs from a folder on this computer"
-                onClick={locateMissingOnMatter}
-              >
-                <FolderOpen size={14} />{" "}
-                {locatingFiles ? "Locating…" : `Locate ${missingCacheCount} file${missingCacheCount === 1 ? "" : "s"}`}
-              </button>
-            )}
             {isHostedAnalysis() && docs.length > 0 && (
               <button
                 className="btn secondary"
@@ -4005,73 +3991,31 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
           cacheCoverage.total > 0 &&
           missingCacheCount > 0 &&
           !cacheBannerDismissed && (
-          <div className="banner scan-backlog cache-banner warn" role="status">
-            <div>
-              <strong>
-                {missingCacheCount} filing{missingCacheCount === 1 ? "" : "s"} not on this
-                computer
-              </strong>
-              <p className="footnote" style={{ margin: "4px 0 0" }}>
-                Findings stay on the server. Source PDFs stay on the machine that
-                uploaded them — use Locate to match files here, or re-upload via Add
-                filings, before re-scan.
-              </p>
-              {cacheCoverage.missing.length > 0 && (
-                <details className="cache-missing-details">
-                  <summary>
-                    Show {Math.min(12, cacheCoverage.missing.length)} missing name
-                    {cacheCoverage.missing.length === 1 ? "" : "s"}
-                    {cacheCoverage.missing.length > 12
-                      ? ` (+${cacheCoverage.missing.length - 12} more)`
-                      : ""}
-                  </summary>
-                  <p className="footnote" style={{ margin: "6px 0 0" }}>
-                    {cacheCoverage.missing.slice(0, 12).join(", ")}
-                    {cacheCoverage.missing.length > 12
-                      ? ` +${cacheCoverage.missing.length - 12} more`
-                      : ""}
-                  </p>
-                </details>
-              )}
-            </div>
+          <div className="cache-quiet-note" role="status">
+            <p>
+              <strong>Nothing was deleted.</strong>{" "}
+              {missingCacheCount} PDF{missingCacheCount === 1 ? "" : "s"}{" "}
+              {missingCacheCount === 1 ? "isn’t" : "aren’t"} cached in this browser —
+              findings and risk stay on the server. Locate only if you need to re-scan.
+            </p>
             <div className="cache-banner-actions">
               <button
-                className="btn gold"
+                className="btn secondary"
                 type="button"
-                disabled={busy || locatingFiles}
+                disabled={busy || locatingFiles || Boolean(caseData.archived_at)}
                 onClick={locateMissingOnMatter}
               >
-                <FolderOpen size={14} /> {locatingFiles ? "Locating…" : "Locate files"}
+                <FolderOpen size={14} /> {locatingFiles ? "Locating…" : "Locate PDFs"}
               </button>
               <button
-                className="btn secondary"
-                type="button"
-                disabled={busy}
-                onClick={() => {
-                  if (isDesktopApp()) onUpload(null);
-                  else inputRef.current?.click();
-                }}
-              >
-                Re-upload
-              </button>
-              <button
-                className="btn secondary"
+                className="text-link"
                 type="button"
                 onClick={() => setCacheBannerDismissed(true)}
               >
-                Dismiss
+                Hide
               </button>
             </div>
           </div>
-        )}
-        {isHostedAnalysis() &&
-          cacheCoverage &&
-          cacheCoverage.total > 0 &&
-          missingCacheCount === 0 && (
-          <p className="footnote cache-ok-note">
-            Files on this computer: {cacheCoverage.cached} of {cacheCoverage.total} ready
-            for re-scan.
-          </p>
         )}
         {listIncompleteError ? (
           <div className="banner scan-backlog warn" role="alert">
@@ -4331,9 +4275,9 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
               ].filter(Boolean);
               const needsLocate = docNeedsLocate(doc);
               const statusHint = pendingOnly
-                ? "Provisional — waiting for server confirmation"
+                ? "Waiting for server confirmation"
                 : needsLocate
-                  ? "Source not on this computer — Locate or re-upload to re-scan"
+                  ? "PDF not cached here — findings kept. Locate to re-scan."
                   : clearance === "interrupted" || clearance === "failed"
                     ? formatScanError(doc) || "Scan did not finish"
                     : clearance === "incomplete"
@@ -4466,7 +4410,14 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
                     )}
                   </div>
                   {statusHint ? (
-                    <div className="doc-status-hint" title={statusHint}>
+                    <div
+                      className={`doc-status-hint${
+                        clearance === "interrupted" || clearance === "failed"
+                          ? " warn-hard"
+                          : ""
+                      }`}
+                      title={statusHint}
+                    >
                       {statusHint}
                     </div>
                   ) : null}
@@ -7876,7 +7827,7 @@ function ReportViewer({
         {!sourceLoading && sourceMissing ? (
           <div className="report-source-strip" role="status">
             <span className="footnote">
-              Source PDF not on this computer — findings still apply.
+              Source PDF isn’t cached in this browser — findings still apply.
             </span>
             <button
               className="btn secondary report-source-locate"
