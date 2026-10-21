@@ -210,6 +210,45 @@
       color: var(--muted);
       line-height: 1.2;
     }
+    /* HTML export: snips collapsed behind Image; PDF embed stays always-visible. */
+    details.shot-toggle {
+      margin: 2px 0 0;
+      border: 0;
+      padding: 0;
+    }
+    details.shot-toggle > summary {
+      list-style: none;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 5px 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #f7fafb;
+      color: var(--navy);
+      font-size: 12px;
+      font-weight: 600;
+      user-select: none;
+      width: fit-content;
+    }
+    details.shot-toggle > summary::-webkit-details-marker { display: none; }
+    details.shot-toggle > summary .meta {
+      color: var(--muted);
+      font-weight: 500;
+      font-size: 11px;
+    }
+    details.shot-toggle[open] > summary {
+      margin-bottom: 6px;
+      border-color: color-mix(in srgb, var(--accent) 35%, var(--line));
+      background: var(--accent-soft);
+      color: var(--accent);
+    }
+    details.shot-toggle .shot { margin: 0; }
+    @media print {
+      details.shot-toggle > summary { display: none; }
+      details.shot-toggle > .shot { display: flex !important; }
+    }
     img.evidence {
       max-width: 100%;
       width: 100%;
@@ -306,13 +345,22 @@
         <p class="why"><strong>Why</strong> {{ item.why_suspicious }}</p>
         {% endif %}
         {% if item.evidence and item.evidence.page_shot %}
-        <figure class="shot">
-          <figcaption>
-            {% if item.evidence.page_shot_kind == "bbox_highlight" %}Highlighted region{% else %}Page crop{% endif %}
-            {% if item.evidence.page_shot_page %} · p.{{ item.evidence.page_shot_page }}{% endif %}
-          </figcaption>
-          <img class="evidence" src="{{ item.evidence.page_shot }}" alt="Finding page screenshot" />
-        </figure>
+        <details class="shot-toggle">
+          <summary>
+            Image
+            <span class="meta">
+              {% if item.evidence.page_shot_kind == "bbox_highlight" %}Highlighted region{% else %}Page crop{% endif %}
+              {% if item.evidence.page_shot_page %} · p.{{ item.evidence.page_shot_page }}{% endif %}
+            </span>
+          </summary>
+          <figure class="shot">
+            <figcaption>
+              {% if item.evidence.page_shot_kind == "bbox_highlight" %}Highlighted region{% else %}Page crop{% endif %}
+              {% if item.evidence.page_shot_page %} · p.{{ item.evidence.page_shot_page }}{% endif %}
+            </figcaption>
+            <img class="evidence" src="{{ item.evidence.page_shot }}" alt="Finding page screenshot" />
+          </figure>
+        </details>
         {% endif %}
       </article>
       {% endfor %}
@@ -347,13 +395,22 @@
       <p class="why"><strong>Why</strong> {{ item.why_suspicious }}</p>
       {% endif %}
       {% if item.evidence and item.evidence.page_shot %}
-      <figure class="shot">
-        <figcaption>
-          {% if item.evidence.page_shot_kind == "bbox_highlight" %}Highlighted region{% else %}Page crop{% endif %}
-          {% if item.evidence.page_shot_page %} · p.{{ item.evidence.page_shot_page }}{% endif %}
-        </figcaption>
-        <img class="evidence" src="{{ item.evidence.page_shot }}" alt="Finding page screenshot" />
-      </figure>
+      <details class="shot-toggle">
+        <summary>
+          Image
+          <span class="meta">
+            {% if item.evidence.page_shot_kind == "bbox_highlight" %}Highlighted region{% else %}Page crop{% endif %}
+            {% if item.evidence.page_shot_page %} · p.{{ item.evidence.page_shot_page }}{% endif %}
+          </span>
+        </summary>
+        <figure class="shot">
+          <figcaption>
+            {% if item.evidence.page_shot_kind == "bbox_highlight" %}Highlighted region{% else %}Page crop{% endif %}
+            {% if item.evidence.page_shot_page %} · p.{{ item.evidence.page_shot_page }}{% endif %}
+          </figcaption>
+          <img class="evidence" src="{{ item.evidence.page_shot }}" alt="Finding page screenshot" />
+        </figure>
+      </details>
       {% endif %}
       {% if item.evidence and item.evidence.heatmap %}
       <p class="meta-line">Forensic overlay</p>

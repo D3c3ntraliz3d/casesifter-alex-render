@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Archive, ChevronDown, Download, FolderOpen, MessageSquare, RefreshCw, RotateCcw, Search, ShieldAlert, Trash2, Upload, X } from "lucide-react";
+import { Archive, ChevronDown, Download, FolderOpen, Image as ImageIcon, MessageSquare, RefreshCw, RotateCcw, Search, ShieldAlert, Trash2, Upload, X } from "lucide-react";
 import {
   archiveCase,
   askCaseChat,
@@ -5067,18 +5067,11 @@ function CaseGotchaBoard({
           <p className="footnote">Page not recorded for this interrupt</p>
         )}
         {hasPageShot ? (
-          <figure className="finding-page-shot">
-            <figcaption>
-              {item.evidence.page_shot_kind === "bbox_highlight"
-                ? "Highlighted region"
-                : "Page crop"}
-              {shotPage != null ? ` · p.${shotPage}` : ""}
-            </figcaption>
-            <img
-              src={item.evidence.page_shot}
-              alt={`Page ${shotPage || ""} screenshot`}
-            />
-          </figure>
+          <FindingPageShot
+            src={item.evidence.page_shot}
+            kind={item.evidence.page_shot_kind}
+            page={shotPage}
+          />
         ) : null}
         {!claimQuote && !evidenceQuote && !bodyText && !showWhy ? (
           <p className="footnote">Open the scan report for details on this interrupt.</p>
@@ -8305,6 +8298,43 @@ function ReportFindingsList({
   );
 }
 
+/** Page-shot snip behind a collapsible Image control (default collapsed). */
+function FindingPageShot({ src, kind, page }) {
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    setOpen(false);
+  }, [src]);
+  if (typeof src !== "string" || !src.startsWith("data:image")) return null;
+  const label = kind === "bbox_highlight" ? "Highlighted region" : "Page crop";
+  const pageBit = page != null ? ` · p.${page}` : "";
+  return (
+    <div className={`finding-page-shot-wrap${open ? " is-open" : ""}`}>
+      <button
+        type="button"
+        className={`finding-page-shot-toggle${open ? " on" : ""}`}
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <ImageIcon size={14} aria-hidden />
+        <span>{open ? "Hide image" : "Image"}</span>
+        <span className="finding-page-shot-toggle-meta">
+          {label}
+          {pageBit}
+        </span>
+      </button>
+      {open ? (
+        <figure className="finding-page-shot">
+          <figcaption>
+            {label}
+            {pageBit}
+          </figcaption>
+          <img src={src} alt={`Page ${page || ""} screenshot`} />
+        </figure>
+      ) : null}
+    </div>
+  );
+}
+
 function FindingCard({
   item,
   docKind,
@@ -8517,18 +8547,11 @@ function FindingCard({
         ) : null}
       </div>
       {hasPageShot ? (
-        <figure className="finding-page-shot">
-          <figcaption>
-            {item.evidence.page_shot_kind === "bbox_highlight"
-              ? "Highlighted region"
-              : "Page crop"}
-            {shotPage != null ? ` · p.${shotPage}` : ""}
-          </figcaption>
-          <img
-            src={item.evidence.page_shot}
-            alt={`Page ${shotPage || ""} screenshot`}
-          />
-        </figure>
+        <FindingPageShot
+          src={item.evidence.page_shot}
+          kind={item.evidence.page_shot_kind}
+          page={shotPage}
+        />
       ) : null}
       {heat && <img className="heatmap" src={heat} alt="Forensic overlay" />}
       {refs.length > 0 && (
