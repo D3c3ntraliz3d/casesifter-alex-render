@@ -78,14 +78,50 @@ def install_api_headers(app: FastAPI) -> None:
         return response
 
 
-def origin_blocked(origin: str, allowed: set[str], *, production: bool) -> bool:
-    """Cookie-authenticated unsafe requests must come from an allowed origin."""
+def _referer_origin(referer: str) -> str:
+    raw = (referer or "").strip()
+    if not raw:
+        return ""
+    try:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(raw)
+        if not parsed.scheme or not parsed.netloc:
+            return ""
+        return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+    except Exception:
+        return ""
+
+
+def origin_blocked(
+    origin: str,
+    allowed: set[str],
+    *,
+    production: bool,
+    referer: str = "",
+    sec_fetch_site: str = "",
+) -> bool:
+    """Cookie-authenticated unsafe requests must come from an allowed origin.
+
+    Same-origin SPA rewrites (Render static → analysis) sometimes omit or strip
+    Origin while still forwarding the session cookie. Treat empty Origin as OK
+    only when Sec-Fetch-Site is same-origin or Referer host is allowlisted.
+    A present but disallowed Origin always blocks.
+    """
     cleaned = (origin or "").rstrip("/")
-    if production:
-        return cleaned not in allowed
-    if not cleaned:
+    if cleaned in allowed:
         return False
-    return cleaned not in allowed
+    if cleaned:
+        return True
+    # Missing Origin
+    if not production:
+        return False
+    if (sec_fetch_site or "").strip().lower() == "same-origin":
+        return False
+    ref_origin = _referer_origin(referer)
+    if ref_origin and ref_origin in allowed:
+        return False
+    return True
 
 
 def csrf_block_response() -> JSONResponse:

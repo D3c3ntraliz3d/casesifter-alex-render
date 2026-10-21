@@ -29,12 +29,15 @@ _mode = settings.resolve_app_mode()
 _origins = settings.cors_origin_list()
 if _mode == "analysis" and ("*" in _origins or not _origins):
     # Analysis service must not reflect arbitrary origins.
+    # Include alex + john hosted apps so an empty CORS env does not strand either stack.
     _origins = [
         "https://app.casesifter.com",
         "https://www.casesifter.com",
         "https://casesifter.com",
         "https://casesifter-app.onrender.com",
         "https://casesifter-marketing.onrender.com",
+        "https://casesifter-alex-app.onrender.com",
+        "https://casesifter-alex-marketing.onrender.com",
         "http://127.0.0.1:5173",
         "http://localhost:5173",
     ]
@@ -63,6 +66,8 @@ async def _cookie_csrf(request: Request, call_next):
                 request.headers.get("origin") or "",
                 _ORIGIN_ALLOW,
                 production=_PRODUCTION,
+                referer=request.headers.get("referer") or "",
+                sec_fetch_site=request.headers.get("sec-fetch-site") or "",
             ):
                 return csrf_block_response()
     return await call_next(request)
