@@ -94,10 +94,11 @@ def test_cross_firm_job_status_report_delete_are_404(tmp_path, monkeypatch):
     # Firm A can see own job.
     assert client.get(f"/api/v1/jobs/{jid}", headers=ha).status_code == 200
 
-    # Firm B cannot status/report/delete A's job.
+    # Firm B cannot status/report/delete/cancel A's job.
     assert client.get(f"/api/v1/jobs/{jid}", headers=hb).status_code == 404
     assert client.get(f"/api/v1/jobs/{jid}/report", headers=hb).status_code == 404
     assert client.delete(f"/api/v1/jobs/{jid}", headers=hb).status_code == 404
+    assert client.post(f"/api/v1/jobs/{jid}/cancel", headers=hb).status_code == 404
 
     # A's job still present after B's delete attempt.
     assert client.get(f"/api/v1/jobs/{jid}", headers=ha).status_code == 200

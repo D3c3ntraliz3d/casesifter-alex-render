@@ -15,7 +15,7 @@ from app.models import JobProgress, JobStatus, Report
 _lock = threading.Lock()
 logger = logging.getLogger("uvicorn.error")
 
-TERMINAL_STATUSES = frozenset({"complete", "failed", "interrupted"})
+TERMINAL_STATUSES = frozenset({"complete", "failed", "interrupted", "cancelled"})
 # uuid4().hex — reject path segments like ".." or encoded traversal.
 JOB_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 # Encrypted-at-rest report.json marker (Fernet token follows).

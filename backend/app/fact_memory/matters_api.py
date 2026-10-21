@@ -475,6 +475,50 @@ def list_retryable_jobs(matter_id: str, auth: dict = Depends(_require_analysis_a
     return {"jobs": rows, "exhausted": exhausted}
 
 
+class CancelJobsBody(BaseModel):
+    """Optional job_id list; default cancels all queued/running jobs on the matter."""
+
+    job_ids: list[str] | None = None
+
+
+@matters_router.post("/{matter_id}/cancel-jobs")
+def cancel_matter_jobs(
+    matter_id: str,
+    body: CancelJobsBody | None = None,
+    auth: dict = Depends(_require_analysis_auth),
+):
+    """Cancel pending/running scans for a matter (firm-scoped)."""
+    ctx = _ctx(auth)
+    store = get_store()
+    if not store.get_matter(ctx["firm_id"], matter_id):
+        raise HTTPException(404, "Matter not found.")
+    from app.job_cancel import cancel_analysis_job
+
+    wanted = {
+        (jid or "").strip().lower()
+        for jid in ((body.job_ids if body else None) or [])
+        if (jid or "").strip()
+    }
+    active = [
+        row
+        for row in store.list_analysis_jobs_by_status(
+            ["queued", "running", "local_done"],
+            firm_id=ctx["firm_id"],
+        )
+        if row.get("matter_id") == matter_id
+    ]
+    results = []
+    for row in active:
+        jid = str(row.get("job_id") or "")
+        if wanted and jid.lower() not in wanted:
+            continue
+        try:
+            results.append(cancel_analysis_job(jid, firm_id=ctx["firm_id"]))
+        except (ValueError, PermissionError):
+            continue
+    return {"cancelled": len([r for r in results if r.get("cancelled")]), "jobs": results}
+
+
 @matters_router.post("/{matter_id}/recompute-facts")
 def recompute_matter_facts(matter_id: str, auth: dict = Depends(_require_analysis_auth)):
     """Start async recompute from stored text excerpts. Returns 202 + job_id."""

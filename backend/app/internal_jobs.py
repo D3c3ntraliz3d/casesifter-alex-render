@@ -142,8 +142,8 @@ async def worker_result(job_id: str, request: Request):
     except Exception as exc:
         raise HTTPException(400, "Invalid result payload.") from exc
 
-    if body.status not in {"complete", "failed"}:
-        raise HTTPException(400, "status must be complete or failed.")
+    if body.status not in {"complete", "failed", "cancelled"}:
+        raise HTTPException(400, "status must be complete, failed, or cancelled.")
 
     ownership = _resolve_job_ownership(job_id, body)
 
@@ -205,6 +205,15 @@ async def worker_result(job_id: str, request: Request):
                 doc_kind=body.doc_kind,
                 filed_date=body.filed_date,
             )
+    elif body.status == "cancelled":
+        update_job(
+            job_id,
+            status="cancelled",
+            stage="cancelled",
+            percent=100,
+            message=body.message or "Scan cancelled.",
+            error=body.error or "cancelled_by_user",
+        )
     else:
         update_job(
             job_id,

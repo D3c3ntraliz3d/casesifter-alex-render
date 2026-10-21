@@ -339,6 +339,38 @@ export async function getJob(jobId, { includeReport = false } = {}) {
   return readJson(res);
 }
 
+/** Cancel a queued or running hosted scan. Idempotent when already terminal. */
+export async function cancelJob(jobId) {
+  if (!jobId) throw new Error("Missing job id.");
+  const cs = desktop();
+  if (cs) {
+    throw new Error("Cancel is available for hosted analysis scans.");
+  }
+  if (!(ANALYSIS_SAME_ORIGIN || ANALYSIS_API_URL)) {
+    throw new Error("Cancel requires hosted analysis.");
+  }
+  const res = await analysisFetch(`/api/v1/jobs/${jobId}/cancel`, { method: "POST" });
+  return readJson(res);
+}
+
+/** Cancel pending/running scans on a matter (optional job_ids filter). */
+export async function cancelMatterJobs(matterId, jobIds = null) {
+  if (!matterId) throw new Error("Missing matter id.");
+  if (!isHostedAnalysis()) {
+    throw new Error("Cancel requires hosted analysis.");
+  }
+  const body =
+    Array.isArray(jobIds) && jobIds.length
+      ? { job_ids: jobIds.filter(Boolean) }
+      : {};
+  const res = await analysisFetch(`/api/v1/matters/${matterId}/cancel-jobs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return readJson(res);
+}
+
 /** Vault-only direct link (local APP_MODE=vault). Prefer downloadExportReport. */
 export function exportUrl(jobId, kind) {
   return apiUrl(`/api/jobs/${jobId}/export/${kind}`);

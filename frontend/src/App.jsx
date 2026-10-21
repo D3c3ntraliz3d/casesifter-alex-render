@@ -4,6 +4,8 @@ import {
   archiveCase,
   askCaseChat,
   ANALYSIS_OFFLINE_MESSAGE,
+  cancelJob,
+  cancelMatterJobs,
   checkAnalysisHealth,
   createAnalysisJob,
   createCase,
@@ -2109,7 +2111,13 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
           changed = true;
           continue;
         }
-        if (live.failed && (doc.status === "failed" || doc.scan_failed_open)) {
+        if (
+          live.failed &&
+          (doc.status === "failed" ||
+            doc.status === "cancelled" ||
+            doc.status === "canceled" ||
+            doc.scan_failed_open)
+        ) {
           delete next[doc.id];
           changed = true;
         }
@@ -2207,7 +2215,12 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
             }
             continue;
           }
-          if (status === "failed" || status === "interrupted") {
+          if (
+            status === "failed" ||
+            status === "interrupted" ||
+            status === "cancelled" ||
+            status === "canceled"
+          ) {
             setLiveScan((prev) => {
               const cur = prev[docId];
               if (!cur || cur.failed) return prev;
@@ -2629,6 +2642,94 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
     }
   }
 
+  async function cancelScanForDoc(doc) {
+    const jobId = doc?.scan_job_id || liveScan[doc?.id]?.jobId;
+    if (!jobId || !isHostedAnalysis()) return;
+    onError("");
+    setLiveScan((prev) => {
+      const cur = prev[doc.id];
+      if (!cur) {
+        return {
+          ...prev,
+          [doc.id]: {
+            armed: true,
+            jobId,
+            failed: true,
+            stage: "cancelled",
+          },
+        };
+      }
+      return { ...prev, [doc.id]: { ...cur, failed: true, stage: "cancelled" } };
+    });
+    setPendingDocs((prev) =>
+      prev.map((p) =>
+        p.scan_job_id === jobId || p.id === doc.id
+          ? {
+              ...p,
+              status: "cancelled",
+              scan_in_progress: false,
+              scan_failed_open: true,
+              last_error: "cancelled_by_user",
+            }
+          : p
+      )
+    );
+    try {
+      await cancelJob(jobId);
+      await onRefresh();
+    } catch (err) {
+      onError(err?.message || String(err) || "Cancel failed.");
+      try {
+        await onRefresh();
+      } catch {
+        /* keep optimistic cancelled row */
+      }
+    }
+  }
+
+  async function cancelSelectedScans() {
+    if (!isHostedAnalysis()) return;
+    const targets = docs.filter(
+      (d) => selectedDocs.has(d.id) && (isScanInProgress(d) || Boolean(d.pending_upload))
+    );
+    const jobIds = [
+      ...new Set(
+        targets
+          .map((d) => d.scan_job_id || liveScan[d.id]?.jobId)
+          .filter(Boolean)
+      ),
+    ];
+    if (!jobIds.length) {
+      onError("No pending or running scans in the selection.");
+      return;
+    }
+    onError("");
+    setBusy(true);
+    try {
+      for (const doc of targets) {
+        const jobId = doc.scan_job_id || liveScan[doc.id]?.jobId;
+        if (!jobId) continue;
+        setLiveScan((prev) => {
+          const cur = prev[doc.id];
+          if (!cur) {
+            return {
+              ...prev,
+              [doc.id]: { armed: true, jobId, failed: true, stage: "cancelled" },
+            };
+          }
+          return { ...prev, [doc.id]: { ...cur, failed: true, stage: "cancelled" } };
+        });
+      }
+      await cancelMatterJobs(caseData.id, jobIds);
+      setSelectedDocs(new Set());
+      await onRefresh();
+    } catch (err) {
+      onError(err?.message || String(err) || "Cancel failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function paceScanDocs(targetDocs, { notePrefix = "Analyzing" } = {}) {
     if (!targetDocs.length) return { queued: 0, failed: [] };
     const scanFailed = [];
@@ -2966,7 +3067,14 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
                 });
                 continue;
               }
-              if (progress.status === "complete" || progress.status === "failed") break;
+              if (
+                progress.status === "complete" ||
+                progress.status === "failed" ||
+                progress.status === "cancelled" ||
+                progress.status === "canceled"
+              ) {
+                break;
+              }
               const pos = progress.queue_position;
               const eta = progress.eta_seconds;
               const etaLabel =
@@ -3000,6 +3108,16 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
                 status: "scanning",
                 scan_in_progress: true,
                 stage: "persisting",
+              });
+            } else if (
+              progress?.status === "cancelled" ||
+              progress?.status === "canceled"
+            ) {
+              patchPending(item, {
+                status: "cancelled",
+                scan_in_progress: false,
+                scan_failed_open: true,
+                last_error: "cancelled_by_user",
               });
             } else {
               analysisFailed.push({
@@ -3950,6 +4068,22 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
             {selectedDocs.size > 0 && (
               <div className="bulk-actions">
                 <span className="footnote">{selectedDocs.size} selected</span>
+                {isHostedAnalysis() &&
+                  docs.some(
+                    (d) =>
+                      selectedDocs.has(d.id) &&
+                      (isScanInProgress(d) || Boolean(d.pending_upload))
+                  ) && (
+                    <button
+                      className="btn secondary"
+                      type="button"
+                      disabled={busy}
+                      onClick={cancelSelectedScans}
+                      title="Cancel pending or running scans for the selection"
+                    >
+                      <X size={14} /> Cancel scans
+                    </button>
+                  )}
                 <button className="btn secondary danger" type="button" disabled={busy} onClick={deleteSelectedDocuments}>
                   <Trash2 size={14} /> Delete
                 </button>
@@ -4002,13 +4136,15 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
                   ? "Scanning"
                   : clearance === "interrupted"
                     ? "Interrupted"
-                    : clearance === "incomplete"
-                      ? "Incomplete"
-                      : clearance === "failed"
-                        ? "Failed"
-                        : clearance === "complete"
-                          ? "Complete"
-                          : doc.status;
+                    : clearance === "cancelled"
+                      ? "Cancelled"
+                      : clearance === "incomplete"
+                        ? "Incomplete"
+                        : clearance === "failed"
+                          ? "Failed"
+                          : clearance === "complete"
+                            ? "Complete"
+                            : doc.status;
               const riskLevel = !inProgress && !pendingOnly ? doc.risk_level : null;
               const riskBand =
                 riskLevel && ["red", "yellow", "incomplete"].includes(riskLevel) ? riskLevel : "";
@@ -4204,6 +4340,19 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
                         Report
                       </button>
                     )}
+                    {inProgress &&
+                      isHostedAnalysis() &&
+                      (doc.scan_job_id || liveScan[doc.id]?.jobId) && (
+                      <button
+                        className="btn secondary"
+                        type="button"
+                        title="Cancel this pending or running scan"
+                        disabled={busy}
+                        onClick={() => cancelScanForDoc(doc)}
+                      >
+                        Cancel
+                      </button>
+                    )}
                     {docNeedsLocate(doc) && !inProgress && !pendingOnly ? (
                       <button
                         className="btn secondary"
@@ -4234,11 +4383,13 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
                       !pendingOnly &&
                       !docNeedsLocate(doc) &&
                       (clearance === "failed" ||
+                        clearance === "cancelled" ||
                         clearance === "interrupted" ||
                         clearance === "complete" ||
                         clearance === "incomplete" ||
                         doc.status === "uploaded" ||
-                        doc.status === "failed") && (
+                        doc.status === "failed" ||
+                        doc.status === "cancelled") && (
                       <button
                         className="btn secondary"
                         type="button"
@@ -7211,7 +7362,14 @@ function ReportViewer({
                         let progress = null;
                         for (let i = 0; i < 180; i += 1) {
                           progress = await getJob(newJobId, { includeReport: true });
-                          if (progress.status === "complete" || progress.status === "failed") break;
+                          if (
+                progress.status === "complete" ||
+                progress.status === "failed" ||
+                progress.status === "cancelled" ||
+                progress.status === "canceled"
+              ) {
+                break;
+              }
                           await new Promise((r) => setTimeout(r, 1000));
                         }
                         if (progress?.status === "failed") {

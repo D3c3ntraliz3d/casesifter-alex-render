@@ -276,3 +276,8 @@ def job_source_key(job_id: str, source_name: str) -> str:
 
 def job_meta_key(job_id: str) -> str:
     return f"{job_bundle_prefix(job_id)}/job.json"
+
+
+def job_cancel_key(job_id: str) -> str:
+    """Worker-visible cancel marker (written by analysis cancel endpoint)."""
+    return f"{job_bundle_prefix(job_id)}/cancel.flag"

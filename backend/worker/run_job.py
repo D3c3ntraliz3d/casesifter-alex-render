@@ -49,6 +49,23 @@ def process_queue_message(message: QueueMessage) -> None:
     source_path: Path | None = None
     terminal = False
     try:
+        from app.job_cancel import worker_cancel_requested
+
+        if worker_cancel_requested(job_id):
+            settings.data_dir = original_data_dir
+            post_result(
+                job_id,
+                {
+                    "status": "cancelled",
+                    "message": "Scan cancelled.",
+                    "error": "cancelled_by_user",
+                    "attempt": message.attempt,
+                    "persist": False,
+                },
+            )
+            terminal = True
+            return
+
         meta_raw = store.get(job_meta_key(job_id))
         meta = json.loads(meta_raw.decode("utf-8"))
         source_name = str(meta.get("source_name") or "document.pdf")
@@ -68,6 +85,24 @@ def process_queue_message(message: QueueMessage) -> None:
             message="Worker started local PDF/OCR…",
         )
 
+        if worker_cancel_requested(job_id):
+            post_result(
+                job_id,
+                {
+                    "status": "cancelled",
+                    "message": "Scan cancelled.",
+                    "error": "cancelled_by_user",
+                    "attempt": message_attempt(message_obj=message, meta=meta),
+                    "source_name": source_name,
+                    "display_name": meta.get("display_name"),
+                    "doc_kind": meta.get("doc_kind"),
+                    "filed_date": meta.get("filed_date"),
+                    "persist": bool(meta.get("persist")),
+                },
+            )
+            terminal = True
+            return
+
         settings.data_dir = work
         run_local_stage(
             job_id,
@@ -80,6 +115,23 @@ def process_queue_message(message: QueueMessage) -> None:
             prior_snapshots=meta.get("prior_snapshots") or [],
         )
         settings.data_dir = original_data_dir
+        if worker_cancel_requested(job_id):
+            post_result(
+                job_id,
+                {
+                    "status": "cancelled",
+                    "message": "Scan cancelled.",
+                    "error": "cancelled_by_user",
+                    "attempt": message_attempt(message_obj=message, meta=meta),
+                    "source_name": source_name,
+                    "display_name": meta.get("display_name"),
+                    "doc_kind": meta.get("doc_kind"),
+                    "filed_date": meta.get("filed_date"),
+                    "persist": bool(meta.get("persist")),
+                },
+            )
+            terminal = True
+            return
         post_progress(
             job_id,
             status="local_done",
@@ -101,7 +153,24 @@ def process_queue_message(message: QueueMessage) -> None:
         ai_review_reason = getattr(report, "ai_review_reason", None) if report is not None else None
         settings.data_dir = original_data_dir
 
-        # Prefer sticky failed from pipeline if present.
+        # Prefer sticky cancelled / failed from pipeline if present.
+        if status == "cancelled" or worker_cancel_requested(job_id):
+            post_result(
+                job_id,
+                {
+                    "status": "cancelled",
+                    "message": status_message if status == "cancelled" else "Scan cancelled.",
+                    "error": error or "cancelled_by_user",
+                    "attempt": message_attempt(message_obj=message, meta=meta),
+                    "source_name": source_name,
+                    "display_name": meta.get("display_name"),
+                    "doc_kind": meta.get("doc_kind"),
+                    "filed_date": meta.get("filed_date"),
+                    "persist": bool(meta.get("persist")),
+                },
+            )
+            terminal = True
+            return
         if status == "failed":
             if not _is_final_attempt(message, meta):
                 raise WorkerJobError(error or status_message or "pipeline_failed")
@@ -142,8 +211,31 @@ def process_queue_message(message: QueueMessage) -> None:
         )
         terminal = True
     except Exception as exc:
-        logger.exception("worker job failed job=%s", job_id[:8])
+        from app.gemini_cancel import CancelledError
+        from app.job_cancel import worker_cancel_requested as _cancel_requested
+
         settings.data_dir = original_data_dir
+        if isinstance(exc, CancelledError) or _cancel_requested(job_id):
+            try:
+                post_result(
+                    job_id,
+                    {
+                        "status": "cancelled",
+                        "message": "Scan cancelled.",
+                        "error": "cancelled_by_user",
+                        "attempt": message_attempt(message_obj=message, meta=meta),
+                        "source_name": meta.get("source_name"),
+                        "display_name": meta.get("display_name"),
+                        "doc_kind": meta.get("doc_kind"),
+                        "filed_date": meta.get("filed_date"),
+                        "persist": bool(meta.get("persist")),
+                    },
+                )
+                terminal = True
+            except Exception:
+                logger.exception("failed to POST cancel result job=%s", job_id[:8])
+            return
+        logger.exception("worker job failed job=%s", job_id[:8])
         if _is_final_attempt(message, meta):
             try:
                 post_result(

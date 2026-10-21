@@ -323,6 +323,14 @@ export function formatScanError(docOrError) {
   const raw = scanErrorRaw(docOrError);
   if (!raw) return "";
   const key = raw.toLowerCase();
+  if (
+    key === "cancelled_by_user" ||
+    key === "cancelled" ||
+    key === "canceled" ||
+    /^scan cancelled\.?$/i.test(raw)
+  ) {
+    return "Scan cancelled.";
+  }
   if (key === "interrupted_by_restart" || /instance restarted|job was interrupted/i.test(raw)) {
     return "Analysis server restarted mid-scan. Re-scan to finish — checks that already ran are shown below.";
   }
@@ -384,6 +392,13 @@ export function rowClearance(doc) {
   // Restart mid-scan: Interrupted (with or without module greens). Failed is
   // reserved for hard module/job crashes.
   if (isRestartInterrupt(doc) || doc.status === "interrupted") return "interrupted";
+  if (doc.status === "cancelled" || doc.status === "canceled") return "cancelled";
+  if (
+    doc.scan_failed_open &&
+    /cancelled_by_user|scan cancelled/i.test(scanErrorRaw(doc))
+  ) {
+    return "cancelled";
+  }
   if (doc.scan_failed_open || doc.status === "failed") return "failed";
   if (hasFailedCheck(doc) || doc.ai_review === "incomplete") return "incomplete";
   if (doc.status === "complete") return "complete";
@@ -452,13 +467,19 @@ export function documentRowView(doc, live) {
     (replaced && (doc.status === "failed" || doc.scan_failed_open)) ||
     (live.jobId && jobId === live.jobId && (doc.status === "failed" || doc.scan_failed_open));
   if (failedNow) {
+    const cancelled =
+      doc.status === "cancelled" ||
+      doc.status === "canceled" ||
+      live.stage === "cancelled" ||
+      /cancelled_by_user|scan cancelled/i.test(scanErrorRaw(doc));
     return {
       ...view,
-      status: "failed",
+      status: cancelled ? "cancelled" : "failed",
       scan_failed_open: true,
       scan_in_progress: false,
       rescan_armed: true,
       stage: live.stage || doc.stage || null,
+      ...(cancelled ? { last_error: "cancelled_by_user" } : {}),
     };
   }
   // Hosted list rows stay status "complete". Never copy that through while armed.

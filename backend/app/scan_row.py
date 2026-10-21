@@ -7,8 +7,9 @@ from typing import Any, Callable
 
 _ACTIVE = {"queued", "running", "local_done"}
 _FAILED = {"failed"}
+_CANCELLED = {"cancelled"}
 _INTERRUPTED = {"interrupted"}
-_TERMINAL_OPEN = _FAILED | _INTERRUPTED
+_TERMINAL_OPEN = _FAILED | _INTERRUPTED | _CANCELLED
 # Complete jobs without a document row yet (persist lag). Keep visible briefly.
 _UNATTACHED_COMPLETE_WINDOW = timedelta(hours=6)
 
@@ -89,6 +90,17 @@ def _apply_job_status(row: dict[str, Any], job: dict[str, Any], status: str) -> 
         row["ai_review"] = None
         row["ai_review_reason"] = None
         row["last_error"] = job.get("error") or job.get("message")
+        row["scan_job_id"] = job_id
+    elif status in _CANCELLED:
+        row["status"] = "cancelled"
+        row["stage"] = job.get("stage") or "cancelled"
+        row["scan_in_progress"] = False
+        row["scan_failed_open"] = True
+        row["risk_level"] = None
+        row["risk_score"] = None
+        row["ai_review"] = None
+        row["ai_review_reason"] = None
+        row["last_error"] = job.get("error") or job.get("message") or "cancelled_by_user"
         row["scan_job_id"] = job_id
     elif status == "complete":
         # Job finished but last_job_id still points at the old report, or

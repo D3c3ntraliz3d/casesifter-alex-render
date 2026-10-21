@@ -266,12 +266,30 @@ def execute_gemini_stage(payload: dict[str, Any]) -> dict[str, Any]:
             except Exception:
                 timing = None
         except CancelledError as exc:
-            # Stage waiter already sticky-failed; do not fight it.
+            # User cancel or stage timeout may already sticky-set status.
             progress = load_progress(job_id)
-            terminal_status = (progress.status if progress else None) or "failed"
-            terminal_message = (progress.message if progress else None) or "Gemini stage cancelled."
-            terminal_error = (progress.error if progress else None) or str(exc)
-            logger.info("gemini stage cancelled job=%s", job_id[:8])
+            prior = progress.status if progress else None
+            if prior == "cancelled":
+                terminal_status = "cancelled"
+                terminal_message = (progress.message if progress else None) or "Scan cancelled."
+                terminal_error = (progress.error if progress else None) or "cancelled_by_user"
+            elif prior in TERMINAL_STATUSES:
+                terminal_status = prior
+                terminal_message = (progress.message if progress else None) or "Gemini stage cancelled."
+                terminal_error = (progress.error if progress else None) or str(exc)
+            else:
+                terminal_status = "cancelled"
+                terminal_message = "Scan cancelled."
+                terminal_error = "cancelled_by_user"
+                update_job(
+                    job_id,
+                    status="cancelled",
+                    stage="cancelled",
+                    percent=100,
+                    message=terminal_message,
+                    error=terminal_error,
+                )
+            logger.info("gemini stage cancelled job=%s status=%s", job_id[:8], terminal_status)
         except Exception as exc:
             emit_scan_failed(job_id=job_id, stage="failed", error_message=str(exc))
             update_job(

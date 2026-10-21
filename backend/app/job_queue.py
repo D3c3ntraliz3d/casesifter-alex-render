@@ -71,6 +71,10 @@ class JobQueue(ABC):
         """Extend the claim on an in-flight message. Returns False if no longer held."""
         return True
 
+    def drop_ready(self, job_id: str) -> bool:
+        """Remove a not-yet-claimed job from the ready queue. False if missing/in-flight."""
+        return False
+
 
 class LocalJobQueue(JobQueue):
     """Directory queue under ``settings.queue_dir`` (ready / inflight / dead)."""
@@ -194,6 +198,23 @@ class LocalJobQueue(JobQueue):
         path.unlink(missing_ok=True)
         path.with_suffix(".claimed").unlink(missing_ok=True)
 
+    def drop_ready(self, job_id: str) -> bool:
+        """Drop a queued message that has not been claimed yet."""
+        jid = (job_id or "").strip()
+        if not jid:
+            return False
+        with self._lock:
+            inflight = self.inflight / f"{jid}.json"
+            if inflight.is_file():
+                return False
+            ready = self.ready / f"{jid}.json"
+            delay = self.ready / f"{jid}.delay"
+            if not ready.is_file() and not delay.is_file():
+                return False
+            ready.unlink(missing_ok=True)
+            delay.unlink(missing_ok=True)
+            return True
+
     def ready_count(self) -> int:
         now = time.time()
         n = 0
@@ -281,6 +302,15 @@ redis.call('HSET', dead, id, body)
 return 1
 """
 
+_DROP_READY_LUA = """
+local ready, inflight, msgs = KEYS[1], KEYS[2], KEYS[3]
+local id = ARGV[1]
+if redis.call('ZSCORE', inflight, id) then return 0 end
+local removed = redis.call('ZREM', ready, id)
+redis.call('HDEL', msgs, id)
+return removed
+"""
+
 
 class RedisJobQueue(JobQueue):
     """Shared queue for many worker instances (Render Key Value or any Redis).
@@ -312,6 +342,7 @@ class RedisJobQueue(JobQueue):
         self._complete = self.r.register_script(_COMPLETE_LUA)
         self._release = self.r.register_script(_RELEASE_LUA)
         self._fail = self.r.register_script(_FAIL_LUA)
+        self._drop_ready = self.r.register_script(_DROP_READY_LUA)
 
     def enqueue(self, message: QueueMessage) -> None:
         if not message.enqueued_at:
@@ -373,6 +404,17 @@ class RedisJobQueue(JobQueue):
         )
         if not ok:
             logger.warning("fail ignored — claim lost job=%s", message.job_id[:8])
+
+    def drop_ready(self, job_id: str) -> bool:
+        jid = (job_id or "").strip()
+        if not jid:
+            return False
+        return bool(
+            self._drop_ready(
+                keys=[self.k_ready, self.k_inflight, self.k_msgs],
+                args=[jid],
+            )
+        )
 
     def ready_count(self) -> int:
         return int(self.r.zcount(self.k_ready, "-inf", time.time()))

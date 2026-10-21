@@ -1053,6 +1053,21 @@ def export_ephemeral_report(job_id: str, kind: str, _auth: dict = Depends(_requi
     )
 
 
+@v1.post("/jobs/{job_id}/cancel")
+def cancel_ephemeral_job(job_id: str, _auth: dict = Depends(_require_analysis_auth)):
+    """Cancel a queued or running scan. Idempotent when already terminal."""
+    owned = require_job_owner(job_id, _auth)
+    firm_id = (owned.get("firm_ctx") or {}).get("firm_id")
+    from app.job_cancel import cancel_analysis_job
+
+    try:
+        return cancel_analysis_job(job_id, firm_id=firm_id)
+    except ValueError as exc:
+        raise HTTPException(404, "Unknown or expired job.") from exc
+    except PermissionError as exc:
+        raise HTTPException(404, "Unknown or expired job.") from exc
+
+
 @v1.delete("/jobs/{job_id}")
 def purge_ephemeral_job(job_id: str, _auth: dict = Depends(_require_analysis_auth)):
     require_job_owner(job_id, _auth)

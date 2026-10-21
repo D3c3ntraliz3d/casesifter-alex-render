@@ -74,6 +74,25 @@ def release_local_slot(owner_id: str) -> None:
             _ACTIVE_KIND = None
 
 
+def terminate_active_local_job(job_id: str) -> bool:
+    """Kill the exclusive local Process if it belongs to ``job_id``. Returns True if killed."""
+    global _ACTIVE_PROC, _ACTIVE_JOB, _ACTIVE_KIND
+    jid = (job_id or "").strip()
+    if not jid:
+        return False
+    with _LOCK:
+        if _ACTIVE_JOB != jid:
+            return False
+        proc = _ACTIVE_PROC
+        _ACTIVE_PROC = None
+        _ACTIVE_JOB = None
+        _ACTIVE_KIND = None
+    if proc is None or not proc.is_alive():
+        return False
+    _terminate(proc, jid)
+    return True
+
+
 def wait_memory_budget(job_id: str, *, reserve_gemini_ahead: bool = True) -> None:
     """Wait forever for memory budget (+ optional Gemini ahead). Never fail the job."""
     from app.gemini_executor import ahead_count, reserve_ahead
