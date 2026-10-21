@@ -34,7 +34,7 @@ services:
       - key: EPHEMERAL_TTL_HOURS
         value: "6"
       - key: SOURCE_FILE_RETENTION
-        value: immediate
+        value: s3
       - key: PERSIST_FACTS
         value: "true"
       # Internal Postgres URL — set in Dashboard (empty IP allow list; internal host only).
@@ -173,6 +173,9 @@ services:
         value: analysis
       - key: APP_ENV
         value: production
+      # Keep tiny matter PDFs in R2 for re-scan (same as analysis service).
+      - key: SOURCE_FILE_RETENTION
+        value: s3
       - key: SCAN_BACKEND
         value: worker
       - key: BLOB_BACKEND

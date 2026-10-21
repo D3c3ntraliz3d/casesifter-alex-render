@@ -38,8 +38,13 @@ def retain_source_blob(
     sha256: str | None,
     source_path: Path | None = None,
     source_bytes: bytes | None = None,
+    content_type: str | None = None,
 ) -> str | None:
-    """Copy exhibit bytes to the durable matter key when retention is enabled."""
+    """Copy exhibit bytes to the durable matter key when retention is enabled.
+
+    Returns the object key only after a successful put (and exists check).
+    Never invents a key for a missing object.
+    """
     if not settings.keep_source_in_blob:
         return None
     if not firm_id or not matter_id or not sha256:
@@ -49,14 +54,65 @@ def retain_source_blob(
     except ValueError:
         return None
     store = get_blob_store()
-    if source_path is not None and source_path.is_file():
-        with source_path.open("rb") as handle:
-            store.put(key, handle, content_type="application/pdf")
-    elif source_bytes is not None:
-        store.put(key, source_bytes, content_type="application/pdf")
-    else:
+    mime = (content_type or "").strip() or "application/pdf"
+    try:
+        if source_path is not None and source_path.is_file():
+            with source_path.open("rb") as handle:
+                store.put(key, handle, content_type=mime)
+        elif source_bytes is not None:
+            store.put(key, source_bytes, content_type=mime)
+        else:
+            return None
+        if not store.exists(key):
+            logger.warning("durable source put missing after write key=%s", key[:80])
+            return None
+    except Exception:
+        logger.exception(
+            "durable source retain failed firm=%s matter=%s",
+            str(firm_id)[:8],
+            str(matter_id)[:8],
+        )
         return None
+    logger.info(
+        "durable source retained firm=%s matter=%s bytes=%s",
+        str(firm_id)[:8],
+        str(matter_id)[:8],
+        (source_path.stat().st_size if source_path and source_path.is_file() else len(source_bytes or b"")),
+    )
     return key
+
+
+def resolve_retained_source_key(
+    *,
+    firm_id: str | None,
+    matter_id: str | None,
+    sha256: str | None,
+    preferred_key: str | None = None,
+) -> str | None:
+    """Return a durable key only when the object actually exists in blob storage."""
+    if not settings.keep_source_in_blob:
+        return None
+    store = get_blob_store()
+    candidates: list[str] = []
+    pref = (preferred_key or "").strip()
+    if pref:
+        candidates.append(pref)
+    if firm_id and matter_id and sha256:
+        try:
+            candidates.append(matter_source_key(firm_id, matter_id, sha256))
+        except ValueError:
+            pass
+    seen: set[str] = set()
+    for key in candidates:
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        try:
+            if store.exists(key):
+                return key
+        except Exception:
+            logger.debug("durable source exists check failed key=%s", key[:80], exc_info=True)
+    return None
 
 
 def _enqueue_worker_job(payload: dict[str, Any]) -> None:
@@ -68,12 +124,20 @@ def _enqueue_worker_job(payload: dict[str, Any]) -> None:
     firm_ctx = payload.get("firm_ctx") or {}
     source_name = dest.name
     sha256 = str(payload.get("sha256") or "").strip().lower()
-    durable_key = retain_source_blob(
+    # Prefer a key already written at upload time; re-put if missing.
+    durable_key = resolve_retained_source_key(
         firm_id=firm_ctx.get("firm_id"),
         matter_id=payload.get("matter_id"),
         sha256=sha256,
-        source_path=dest,
+        preferred_key=payload.get("source_blob_key"),
     )
+    if not durable_key:
+        durable_key = retain_source_blob(
+            firm_id=firm_ctx.get("firm_id"),
+            matter_id=payload.get("matter_id"),
+            sha256=sha256,
+            source_path=dest,
+        )
     meta = {
         "job_id": job_id,
         "firm_id": firm_ctx.get("firm_id"),

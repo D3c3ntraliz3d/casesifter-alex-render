@@ -45,16 +45,21 @@ _SESSION_CACHE_TTL_S = 45.0
 
 
 def _durable_source_key(
-    *, firm_id: str | None, matter_id: str | None, sha256: str | None
+    *,
+    firm_id: str | None,
+    matter_id: str | None,
+    sha256: str | None,
+    preferred_key: str | None = None,
 ) -> str | None:
-    if not settings.keep_source_in_blob or not firm_id or not matter_id or not sha256:
-        return None
-    try:
-        from app.blob_store import matter_source_key
+    """Return a durable S3/R2 key only when the object is actually present."""
+    from app.scan_dispatch import resolve_retained_source_key
 
-        return matter_source_key(firm_id, matter_id, sha256)
-    except ValueError:
-        return None
+    return resolve_retained_source_key(
+        firm_id=firm_id,
+        matter_id=matter_id,
+        sha256=sha256,
+        preferred_key=preferred_key,
+    )
 
 
 def _resolve_upload_labels(
@@ -710,6 +715,22 @@ async def create_ephemeral_job(
         # Marker so sweeper retains report (facts live in DB; PDF still deleted).
         (dest_dir / "persist.flag").write_text(resolved_matter or "", encoding="utf-8")
 
+    # Retain tiny source PDFs in object storage BEFORE the async kick so a
+    # worker/ephemeral cleanup cannot race the durable put.
+    durable_key = None
+    if persist and firm_ctx and resolved_matter and digest and settings.keep_source_in_blob:
+        try:
+            from app.scan_dispatch import retain_source_blob
+
+            durable_key = retain_source_blob(
+                firm_id=firm_ctx.get("firm_id"),
+                matter_id=resolved_matter,
+                sha256=digest,
+                source_path=dest,
+            )
+        except Exception:
+            logger.exception("upload-time durable retain failed job=%s", job_id[:8])
+
     # Schedule off the request thread — inline backpressure or worker enqueue.
     ensure_scan_executor()
     payload = {
@@ -724,6 +745,7 @@ async def create_ephemeral_job(
         "filed_date": filed_date,
         "persist": persist,
         "sha256": digest,
+        "source_blob_key": durable_key,
     }
 
     def _kick() -> None:
@@ -771,6 +793,7 @@ def _persist_pipeline_result(
     display_name: str | None,
     doc_kind: str | None,
     filed_date: str | None,
+    source_blob_key: str | None = None,
 ) -> str | None:
     from app.fact_memory.store import get_store
     from app.ingestion import sha256_file
@@ -789,6 +812,41 @@ def _persist_pipeline_result(
             byte_length = None
     if byte_length is None and report.audit and report.audit.file_size_bytes is not None:
         byte_length = int(report.audit.file_size_bytes)
+    # Last-chance retain when the source file is still on this host (inline path).
+    preferred_key = (source_blob_key or "").strip() or None
+    if (
+        settings.keep_source_in_blob
+        and source.exists()
+        and firm_ctx.get("firm_id")
+        and matter_id
+        and digest
+    ):
+        try:
+            from app.scan_dispatch import retain_source_blob
+
+            preferred_key = (
+                retain_source_blob(
+                    firm_id=firm_ctx.get("firm_id"),
+                    matter_id=matter_id,
+                    sha256=digest,
+                    source_path=source,
+                )
+                or preferred_key
+            )
+        except Exception:
+            logger.exception("persist-time durable retain failed job=%s", job_id[:8])
+    resolved_blob_key = _durable_source_key(
+        firm_id=firm_ctx.get("firm_id"),
+        matter_id=matter_id,
+        sha256=digest,
+        preferred_key=preferred_key,
+    )
+    if settings.keep_source_in_blob and digest and not resolved_blob_key:
+        logger.warning(
+            "persist without durable source job=%s matter=%s",
+            job_id[:8],
+            str(matter_id)[:8],
+        )
     comparison = report.comparison or {}
     facts = comparison.get("facts") or []
     entities = comparison.get("entities") or {}
@@ -833,11 +891,7 @@ def _persist_pipeline_result(
             user_id=firm_ctx.get("user_id"),
             report=report_dict,
             source_size=byte_length,
-            source_blob_key=_durable_source_key(
-                firm_id=firm_ctx.get("firm_id"),
-                matter_id=matter_id,
-                sha256=digest,
-            ),
+            source_blob_key=resolved_blob_key,
             extraction_status=comparison.get("extraction_status"),
             extraction_error=comparison.get("extraction_error"),
             extraction_retry_done=bool(comparison.get("extraction_retry_done")),

@@ -70,7 +70,7 @@ def _report_with_finding(job_id: str, *, page: int, bbox=None):
     )
 
 
-def test_attach_page_zoom_without_inventing_bbox(tmp_path):
+def test_attach_quote_aimed_annotation_without_supplied_bbox(tmp_path):
     from app.report.page_shots import attach_finding_page_shots
 
     pdf = tmp_path / "ex.pdf"
@@ -80,10 +80,13 @@ def test_attach_page_zoom_without_inventing_bbox(tmp_path):
     out = attach_finding_page_shots(report, pdf)
     ev = out.findings[0].evidence
     assert ev.get("page_shot", "").startswith("data:image/jpeg;base64,")
-    assert ev.get("page_shot_kind") == "page_zoom"
     assert ev.get("page_shot_page") == 2
-    # No bbox was supplied — must not claim a highlight.
-    assert ev.get("page_shot_kind") != "bbox_highlight"
+    # Quote search should aim the crop; never invent a fake bbox_highlight label
+    # without coords — annotated_region means a real quote hit + red circle.
+    assert ev.get("page_shot_kind") in {"annotated_region", "page_zoom"}
+    assert isinstance(ev.get("page_shot_note"), str) and ev["page_shot_note"]
+    if ev.get("page_shot_kind") == "annotated_region":
+        assert ev.get("page_shot_bbox")
 
 
 def test_attach_bbox_highlight_when_coords_exist(tmp_path):
@@ -96,7 +99,8 @@ def test_attach_bbox_highlight_when_coords_exist(tmp_path):
     report = _report_with_finding(job_id, page=1, bbox=[0.08, 0.12, 0.75, 0.28])
     out = attach_finding_page_shots(report, pdf)
     ev = out.findings[0].evidence
-    assert ev.get("page_shot_kind") == "bbox_highlight"
+    assert ev.get("page_shot_kind") in {"bbox_highlight", "annotated_region"}
+    assert ev.get("page_shot_note")
     img = decode_data_url_image(ev["page_shot"])
     assert img is not None
     assert max(img.size) <= 900

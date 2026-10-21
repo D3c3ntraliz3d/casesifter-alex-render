@@ -410,14 +410,17 @@ def _build_pdf(report: Report, destination: str | io.BytesIO) -> None:
         shot_kind = ev.get("page_shot_kind") or ""
         if page_shot:
             kind_note = (
-                "Highlighted region"
-                if shot_kind == "bbox_highlight"
+                "Annotated evidence"
+                if shot_kind in {"bbox_highlight", "annotated_region"}
                 else "Page crop"
             )
             shot_page = ev.get("page_shot_page")
             if shot_page:
                 kind_note = f"{kind_note} · p.{shot_page}"
             block.append(Paragraph(f"<b>{kind_note}</b>", styles["Small"]))
+            shot_note = ev.get("page_shot_note")
+            if isinstance(shot_note, str) and shot_note.strip():
+                block.append(Paragraph(shot_note.strip()[:220], styles["Small"]))
             flow = _evidence_image_flowable(page_shot, report.job_id, max_h=2.8 * inch)
             if flow is not None:
                 block.append(Spacer(1, 2))

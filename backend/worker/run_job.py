@@ -191,6 +191,38 @@ def process_queue_message(message: QueueMessage) -> None:
             terminal = True
             return
 
+        # Belt-and-suspenders: keep the tiny source under the matter key even if
+        # upload-time retain raced ephemeral cleanup. Job bundle is deleted next.
+        durable_key = (meta.get("source_blob_key") or "").strip() or None
+        digest = (
+            (report.audit.sha256 if report and report.audit else None)
+            or meta.get("sha256")
+            or ""
+        )
+        digest = str(digest).strip().lower()
+        if (
+            bool(meta.get("persist"))
+            and source_path is not None
+            and source_path.is_file()
+            and meta.get("firm_id")
+            and meta.get("matter_id")
+            and digest
+        ):
+            try:
+                from app.scan_dispatch import retain_source_blob
+
+                durable_key = (
+                    retain_source_blob(
+                        firm_id=meta.get("firm_id"),
+                        matter_id=meta.get("matter_id"),
+                        sha256=digest,
+                        source_path=source_path,
+                    )
+                    or durable_key
+                )
+            except Exception:
+                logger.exception("worker durable retain failed job=%s", job_id[:8])
+
         post_result(
             job_id,
             {
@@ -206,7 +238,8 @@ def process_queue_message(message: QueueMessage) -> None:
                 "filed_date": meta.get("filed_date"),
                 "persist": bool(meta.get("persist")),
                 "source_size": int(source_path.stat().st_size) if source_path and source_path.is_file() else None,
-                "sha256": (report.audit.sha256 if report and report.audit else None),
+                "sha256": digest or None,
+                "source_blob_key": durable_key,
             },
         )
         terminal = True

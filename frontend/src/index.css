@@ -2258,6 +2258,16 @@ table.data td.row-actions { width: 1%; text-align: right; }
   border-radius: 8px;
   background: #f3f6fa;
 }
+.finding-page-shot-note {
+  margin: 0;
+  padding: 6px 8px;
+  font-size: 12px;
+  line-height: 1.35;
+  color: #5c1a1a;
+  background: #fff5f5;
+  border-left: 3px solid #c81010;
+  border-radius: 0 6px 6px 0;
+}
 .finding .finding-page-shot-wrap,
 .gotcha-row-detail .finding-page-shot-wrap {
   margin-left: 0;

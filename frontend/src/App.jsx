@@ -70,6 +70,7 @@ import {
   unarchiveCase,
   uploadCaseDocument,
 } from "./api";
+import { BrandMark } from "./BrandMark.jsx";
 import { sha256OfFile } from "./localFiles.js";
 import {
   checkLights,
@@ -1374,7 +1375,7 @@ export default function App() {
             goCases();
           }}
         >
-          <div className="seal">CS</div>
+          <BrandMark className="seal" decorative />
           <div>
             <h1>CaseSifter</h1>
             <p>Find what matters in the record.</p>
@@ -5040,6 +5041,7 @@ function CaseGotchaBoard({
             src={item.evidence.page_shot}
             kind={item.evidence.page_shot_kind}
             page={shotPage}
+            note={item.evidence.page_shot_note}
           />
         ) : null}
         {!claimQuote && !evidenceQuote && !bodyText && !showWhy ? (
@@ -7439,7 +7441,7 @@ function ReportViewer({
     <>
       <div className="card report-chrome">
         <div className="report-brand">
-          <div className="seal report-seal" aria-hidden="true">CS</div>
+          <BrandMark className="seal report-seal" decorative />
           <div>
             <p className="report-brand-name">CaseSifter</p>
             <p className="report-brand-tag">Find what matters in the record.</p>
@@ -8268,14 +8270,16 @@ function ReportFindingsList({
 }
 
 /** Page-shot snip behind a collapsible Image control (default collapsed). */
-function FindingPageShot({ src, kind, page }) {
+function FindingPageShot({ src, kind, page, note }) {
   const [open, setOpen] = useState(false);
   useEffect(() => {
     setOpen(false);
   }, [src]);
   if (typeof src !== "string" || !src.startsWith("data:image")) return null;
-  const label = kind === "bbox_highlight" ? "Highlighted region" : "Page crop";
+  const annotated = kind === "bbox_highlight" || kind === "annotated_region";
+  const label = annotated ? "Annotated evidence" : "Page crop";
   const pageBit = page != null ? ` · p.${page}` : "";
+  const noteText = typeof note === "string" ? note.trim() : "";
   return (
     <div className={`finding-page-shot-wrap${open ? " is-open" : ""}`}>
       <button
@@ -8297,7 +8301,8 @@ function FindingPageShot({ src, kind, page }) {
             {label}
             {pageBit}
           </figcaption>
-          <img src={src} alt={`Page ${page || ""} screenshot`} />
+          <img src={src} alt={`Page ${page || ""} annotated evidence`} />
+          {noteText ? <p className="finding-page-shot-note">{noteText}</p> : null}
         </figure>
       ) : null}
     </div>
@@ -8520,6 +8525,7 @@ function FindingCard({
           src={item.evidence.page_shot}
           kind={item.evidence.page_shot_kind}
           page={shotPage}
+          note={item.evidence.page_shot_note}
         />
       ) : null}
       {heat && <img className="heatmap" src={heat} alt="Forensic overlay" />}

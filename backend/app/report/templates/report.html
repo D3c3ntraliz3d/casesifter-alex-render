@@ -245,6 +245,16 @@
       color: var(--accent);
     }
     details.shot-toggle .shot { margin: 0; }
+    .shot-note {
+      margin: 0;
+      padding: 6px 8px;
+      font-size: 12px;
+      line-height: 1.35;
+      color: #5c1a1a;
+      background: #fff5f5;
+      border-left: 3px solid #c81010;
+      border-radius: 0 6px 6px 0;
+    }
     @media print {
       details.shot-toggle > summary { display: none; }
       details.shot-toggle > .shot { display: flex !important; }
@@ -349,16 +359,19 @@
           <summary>
             Image
             <span class="meta">
-              {% if item.evidence.page_shot_kind == "bbox_highlight" %}Highlighted region{% else %}Page crop{% endif %}
+              {% if item.evidence.page_shot_kind in ["bbox_highlight", "annotated_region"] %}Annotated evidence{% else %}Page crop{% endif %}
               {% if item.evidence.page_shot_page %} · p.{{ item.evidence.page_shot_page }}{% endif %}
             </span>
           </summary>
           <figure class="shot">
             <figcaption>
-              {% if item.evidence.page_shot_kind == "bbox_highlight" %}Highlighted region{% else %}Page crop{% endif %}
+              {% if item.evidence.page_shot_kind in ["bbox_highlight", "annotated_region"] %}Annotated evidence{% else %}Page crop{% endif %}
               {% if item.evidence.page_shot_page %} · p.{{ item.evidence.page_shot_page }}{% endif %}
             </figcaption>
-            <img class="evidence" src="{{ item.evidence.page_shot }}" alt="Finding page screenshot" />
+            <img class="evidence" src="{{ item.evidence.page_shot }}" alt="Finding annotated evidence" />
+            {% if item.evidence.page_shot_note %}
+            <p class="shot-note">{{ item.evidence.page_shot_note }}</p>
+            {% endif %}
           </figure>
         </details>
         {% endif %}
@@ -399,16 +412,19 @@
         <summary>
           Image
           <span class="meta">
-            {% if item.evidence.page_shot_kind == "bbox_highlight" %}Highlighted region{% else %}Page crop{% endif %}
+            {% if item.evidence.page_shot_kind in ["bbox_highlight", "annotated_region"] %}Annotated evidence{% else %}Page crop{% endif %}
             {% if item.evidence.page_shot_page %} · p.{{ item.evidence.page_shot_page }}{% endif %}
           </span>
         </summary>
         <figure class="shot">
           <figcaption>
-            {% if item.evidence.page_shot_kind == "bbox_highlight" %}Highlighted region{% else %}Page crop{% endif %}
+            {% if item.evidence.page_shot_kind in ["bbox_highlight", "annotated_region"] %}Annotated evidence{% else %}Page crop{% endif %}
             {% if item.evidence.page_shot_page %} · p.{{ item.evidence.page_shot_page }}{% endif %}
           </figcaption>
-          <img class="evidence" src="{{ item.evidence.page_shot }}" alt="Finding page screenshot" />
+          <img class="evidence" src="{{ item.evidence.page_shot }}" alt="Finding annotated evidence" />
+          {% if item.evidence.page_shot_note %}
+          <p class="shot-note">{{ item.evidence.page_shot_note }}</p>
+          {% endif %}
         </figure>
       </details>
       {% endif %}

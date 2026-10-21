@@ -48,6 +48,8 @@ class ResultBody(BaseModel):
     # Optional source size for persist when bytes are already gone.
     source_size: int | None = None
     sha256: str | None = None
+    # Durable matter source key written by the worker (SOURCE_FILE_RETENTION=s3).
+    source_blob_key: str | None = None
 
 
 def _check_auth(request: Request, job_id: str, body: bytes) -> None:
@@ -204,6 +206,7 @@ async def worker_result(job_id: str, request: Request):
                 display_name=body.display_name,
                 doc_kind=body.doc_kind,
                 filed_date=body.filed_date,
+                source_blob_key=body.source_blob_key,
             )
     elif body.status == "cancelled":
         update_job(
