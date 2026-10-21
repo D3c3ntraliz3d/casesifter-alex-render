@@ -24,7 +24,10 @@ jobs:
         run: pip install -r backend/requirements.txt
       - name: Analysis security tests
         working-directory: backend
-        run: pytest -q evals/test_source_retention.py evals/test_access_audit.py evals/test_production_docs.py evals/test_key_rewrap.py evals/test_no_debug_routes.py evals/test_fail_closed_secrets.py evals/test_session_secret_fail_closed.py evals/test_security_headers.py evals/test_export_smoke.py
+        run: pytest -q evals/test_source_retention.py evals/test_access_audit.py evals/test_production_docs.py evals/test_key_rewrap.py evals/test_no_debug_routes.py evals/test_fail_closed_secrets.py evals/test_session_secret_fail_closed.py evals/test_security_headers.py evals/test_export_smoke.py evals/test_csrf_origin_blocked.py
+      - name: Deploy-gate CSRF unit pack
+        working-directory: backend
+        run: pytest -q evals/test_csrf_origin_blocked.py -v
       - name: Forgery / suppress pack
         working-directory: backend
         run: pytest -q evals/test_forgery_risk_floor.py evals/test_logo_chrome_must_suppress.py evals/test_visual_review_fail_closed.py
