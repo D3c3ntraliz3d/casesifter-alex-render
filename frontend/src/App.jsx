@@ -712,12 +712,33 @@ export default function App() {
       setError((prev) => (prev === ANALYSIS_OFFLINE_MESSAGE ? "" : prev));
     }
     // Scan completion re-renders the list; keep the viewport where the user was.
+    // Double rAF wins against Case Impact / banner layout that settles one frame later.
     if (scrollY != null && typeof window !== "undefined") {
+      const restore = () => {
+        if (caseIdRef.current === matterId) window.scrollTo(0, scrollY);
+      };
       requestAnimationFrame(() => {
-        if (caseIdRef.current === matterId) {
-          window.scrollTo(0, scrollY);
-        }
+        restore();
+        requestAnimationFrame(restore);
       });
+    }
+    // Hard-pin the matter URL so a stale replaceState("/") cannot survive a refresh.
+    if (
+      caseIdRef.current === matterId &&
+      (viewRef.current === "case" || viewRef.current === "report") &&
+      !applyingPopState.current
+    ) {
+      const live = parseAppRoute();
+      if (live.matterId !== matterId || live.view === "cases" || live.view === "boot") {
+        writeAppHref(
+          {
+            view: viewRef.current,
+            matterId,
+            docId: viewRef.current === "report" ? selectedDocId : null,
+          },
+          { replace: true }
+        );
+      }
     }
     return data;
   }
@@ -961,16 +982,27 @@ export default function App() {
       .join(","),
   ]);
 
+  // Hosted: poll open matter while jobs are in flight. Depend on a cheap id/status
+  // signature — not `documents` identity — so each refresh does not tear down the timer.
+  const hostedPendingSig = (caseData?.documents || [])
+    .filter(
+      (d) =>
+        d.scan_job_id &&
+        d.status !== "complete" &&
+        d.status !== "failed" &&
+        d.status !== "uploaded" &&
+        d.status !== "cancelled" &&
+        d.status !== "canceled"
+    )
+    .map((d) => `${d.id}:${d.scan_job_id}`)
+    .join(",");
   useEffect(() => {
     if (isDesktopApp()) return;
-    if (!caseData?.documents?.length) return;
-    const pending = caseData.documents.filter(
-      (d) => d.scan_job_id && d.status !== "complete" && d.status !== "failed" && d.status !== "uploaded"
-    );
-    if (!pending.length) return;
+    if (!caseData?.id || !hostedPendingSig) return;
+    const matterId = caseData.id;
     const timer = setInterval(async () => {
       try {
-        const next = await refreshCase(caseData.id);
+        const next = await refreshCase(matterId);
         if (selectedDocId) {
           const doc = next?.documents?.find((d) => d.id === selectedDocId);
           if (doc?.scan_job_id) {
@@ -987,7 +1019,7 @@ export default function App() {
       }
     }, 4000);
     return () => clearInterval(timer);
-  }, [caseData?.id, caseData?.documents, selectedDocId]);
+  }, [caseData?.id, hostedPendingSig, selectedDocId]);
 
   async function openCase(id, opts = {}) {
     if (!id) {
@@ -2036,6 +2068,8 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
   const backfillKeyRef = useRef("");
   const scanningRef = useRef(false);
   const autoRetryKeyRef = useRef("");
+  /** Last matter refresh per finished armed job — throttle settle polls. */
+  const settleRefreshAtRef = useRef({});
   // New array every render would retrigger effects that list this as a dependency.
   const docs = useMemo(() => {
     const server = caseData.documents || [];
@@ -2200,10 +2234,16 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
       for (const [docId, live] of pending) {
         try {
           if (live.finished) {
+            // Docs-settle effect disarms when the list attaches the new job.
+            // Refresh at most every 4s — the old 2Hz path jerked scroll toward home.
+            const last = settleRefreshAtRef.current[docId] || 0;
+            const now = Date.now();
+            if (now - last < 4000) continue;
+            settleRefreshAtRef.current[docId] = now;
             try {
               await onRefresh();
             } catch {
-              /* retry next tick */
+              /* retry next window */
             }
             continue;
           }
@@ -3623,18 +3663,6 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
         <div className="toolbar tight">
           <button className="text-link" type="button" onClick={() => { setBusy(false); onBack(); }}>← All cases</button>
           <div className="row-actions">
-            {!caseData.archived_at && selectedDocs.size > 0 && (
-              <button
-                className="btn secondary"
-                type="button"
-                disabled={busy}
-                title={`Rescan ${selectedDocs.size} selected file${selectedDocs.size === 1 ? "" : "s"}`}
-                onClick={rescanSelected}
-              >
-                <RefreshCw size={14} />{" "}
-                {`Rescan selected (${selectedDocs.size})`}
-              </button>
-            )}
             {!caseData.archived_at &&
               isHostedAnalysis() &&
               missingCacheCount > 0 && (
@@ -4159,6 +4187,15 @@ function CaseWorkspace({ caseData, busy, entitlement, onBack, onRefresh, onError
             {selectedDocs.size > 0 && (
               <div className="bulk-actions">
                 <span className="footnote">{selectedDocs.size} selected</span>
+                <button
+                  className="btn secondary"
+                  type="button"
+                  disabled={busy}
+                  title={`Rescan ${selectedDocs.size} selected file${selectedDocs.size === 1 ? "" : "s"}`}
+                  onClick={rescanSelected}
+                >
+                  <RefreshCw size={14} /> Rescan selected
+                </button>
                 {isHostedAnalysis() &&
                   docs.some(
                     (d) =>
@@ -4642,6 +4679,7 @@ function CaseGotchaBoard({
   const [panelOpen, setPanelOpen] = useState(false);
   const [feedbackBusy, setFeedbackBusy] = useState("");
   const userToggledPanel = useRef(false);
+  const autoOpenedForCase = useRef(null);
   const refreshRef = useRef(onRisksElevated);
   refreshRef.current = onRisksElevated;
   const elevatedFor = useRef("");
@@ -4692,6 +4730,7 @@ function CaseGotchaBoard({
     setShowIgnored(false);
     setOpenKey("");
     userToggledPanel.current = false;
+    autoOpenedForCase.current = null;
     setPanelOpen(false);
   }, [caseId]);
 
@@ -4723,7 +4762,10 @@ function CaseGotchaBoard({
 
   useEffect(() => {
     if (!loaded || userToggledPanel.current) return;
-    // Open once when interrupts first appear; do not re-toggle on each doc refresh.
+    // Decide open state once per matter load. Re-opening when interrupts appear
+    // after a scan expands Case Impact above Documents and jerks scroll home.
+    if (autoOpenedForCase.current === caseId) return;
+    autoOpenedForCase.current = caseId;
     setPanelOpen(hasInterrupts);
   }, [loaded, hasInterrupts, caseId]);
 
