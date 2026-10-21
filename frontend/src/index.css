@@ -84,36 +84,34 @@ h1, h2, h3, .serif {
 }
 .brand {
   display: flex;
-  gap: 12px;
+  gap: 14px;
   align-items: center;
   background: none;
   border: 0;
-  padding: 2px 8px 2px 2px;
+  padding: 2px 10px 2px 2px;
   cursor: pointer;
   text-align: left;
   color: inherit;
 }
 .seal {
-  width: 44px;
-  height: 44px;
-  border-radius: 13px;
-  background: linear-gradient(145deg, var(--navy) 0%, var(--accent) 125%);
-  color: #f4fffe;
-  display: grid;
-  place-items: center;
-  font-family: var(--display);
-  font-size: 16px;
-  font-weight: 600;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22);
+  width: 48px;
+  height: 48px;
+  flex: 0 0 auto;
+  display: block;
+  border-radius: 50%;
+  background: none;
+  box-shadow: 0 1px 2px rgba(18, 47, 71, 0.12), 0 0 0 1px rgba(18, 47, 71, 0.06);
 }
 .brand h1 {
   margin: 0;
-  font-size: 1.35rem;
+  font-size: 1.48rem;
+  font-weight: 600;
   color: var(--navy);
-  line-height: 1.05;
+  line-height: 1.02;
+  letter-spacing: -0.03em;
 }
 .brand p {
-  margin: 3px 0 0;
+  margin: 4px 0 0;
   color: var(--faint);
   font-size: 12px;
   font-family: var(--font);
@@ -2058,8 +2056,8 @@ table.data td.row-actions { width: 1%; text-align: right; }
 .report-seal {
   width: 40px;
   height: 40px;
-  border-radius: 12px;
-  font-size: 14px;
+  border-radius: 50%;
+  box-shadow: 0 1px 2px rgba(18, 47, 71, 0.1);
 }
 .report-brand-name {
   margin: 0;

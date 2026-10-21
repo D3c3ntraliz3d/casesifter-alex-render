@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="CaseSifter">
+  <title>CaseSifter</title>
+  <circle cx="32" cy="32" r="32" fill="#122F47"/>
+  <circle cx="32" cy="32" r="29.75" fill="none" stroke="#2B5572" stroke-width="1"/>
+  <circle cx="32" cy="32" r="27" fill="none" stroke="#0D7372" stroke-width="1.25"/>
+  <path d="M22 44.5h20M24.5 47h15M27 49.5h10" fill="none" stroke="#0D7372" stroke-width="1.05" stroke-linecap="round" opacity="0.55"/>
+  <text x="32" y="37" text-anchor="middle" font-family="Georgia, 'Times New Roman', Times, serif" font-size="21" font-weight="700" fill="#F4FFFE" letter-spacing="0.02em">CS</text>
+</svg>

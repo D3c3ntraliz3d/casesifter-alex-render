@@ -56,12 +56,11 @@ img, svg { max-width: 100%; display: block; }
 }
 .brand-link { display: flex; align-items: center; gap: 0.65rem; text-decoration: none; }
 .mark {
-  width: 38px; height: 38px; border-radius: 12px; flex: 0 0 auto;
-  background: linear-gradient(145deg, var(--navy), var(--accent));
-  color: #fff; display: grid; place-items: center;
-  font-family: Fraunces, Georgia, serif; font-weight: 600; font-size: 0.95rem;
+  width: 40px; height: 40px; border-radius: 50%; flex: 0 0 auto;
+  display: block; background: none;
+  box-shadow: 0 1px 2px rgba(20, 50, 74, 0.12), 0 0 0 1px rgba(20, 50, 74, 0.06);
 }
-.brand-name { font-family: Fraunces, Georgia, serif; font-weight: 600; font-size: 1.15rem; color: var(--navy); }
+.brand-name { font-family: Fraunces, Georgia, serif; font-weight: 600; font-size: 1.28rem; color: var(--navy); letter-spacing: -0.03em; }
 .nav-links { display: flex; align-items: center; gap: 1.75rem; list-style: none; margin: 0; padding: 0; }
 .nav-links a {
   text-decoration: none; color: var(--muted); font-weight: 500; font-size: 0.95rem;
@@ -143,8 +142,8 @@ img, svg { max-width: 100%; display: block; }
 }
 .mock-brand { display: flex; align-items: center; gap: 0.6rem; }
 .mock-brand .seal {
-  width: 30px; height: 30px; border-radius: 9px; background: linear-gradient(145deg, var(--navy), var(--accent));
-  color: #fff; display: grid; place-items: center; font-family: Fraunces, serif; font-weight: 600; font-size: 0.8rem;
+  width: 32px; height: 32px; border-radius: 50%; display: block; background: none;
+  box-shadow: 0 1px 2px rgba(20, 50, 74, 0.1);
 }
 .mock-brand strong { font-family: Fraunces, serif; font-size: 1rem; color: var(--navy); display: block; }
 .mock-brand span { font-size: 0.72rem; color: var(--muted); }
